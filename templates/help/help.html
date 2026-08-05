@@ -1,0 +1,94 @@
+<h2>Sprachsteuerung lokal</h2>
+
+<p><b>Kein Wort verl&auml;sst das Haus.</b> Spracherkennung, Deutung und
+Sprachausgabe laufen auf dem LoxBerry selbst. Es gibt kein Konto, keinen
+Anbieter und keine Internetverbindung im Betrieb &mdash; nur bei der
+Installation, um die Container und Modelle zu holen.</p>
+
+<p>Die Kette ist immer dieselbe: <i>Mikrofon &rarr; Spracherkennung (Whisper)
+&rarr; Deutung &rarr; MQTT an Loxone &rarr; Antwort &uuml;ber die Sprachausgabe
+(Piper) zur&uuml;ck ins Mikrofon.</i> Was daraus wird, entscheidet der
+Miniserver. Das Plugin sagt ihm nur, WAS gemeint war.</p>
+
+<h3>Vier Container, drei davon Pflicht</h3>
+<ul>
+<li><b>Whisper</b> versteht gesprochene Sprache. Ohne ihn geht nichts.</li>
+<li><b>Piper</b> spricht die Antwort. Ohne ihn schaltet zwar alles, aber es
+bleibt still.</li>
+<li><b>Wortwecker</b> (openWakeWord) horcht auf das Weckwort. Nur f&uuml;r
+Mikrofone n&ouml;tig, die das nicht selbst k&ouml;nnen.</li>
+<li><b>Sprachmodell</b> (llama.cpp) ist die Auffanglinie f&uuml;r S&auml;tze,
+die auf kein Muster passen. <b>Freiwillig</b> &mdash; und auf kleiner Hardware
+besser aus.</li>
+</ul>
+<p>Der Reiter <i>Dienste</i> legt sie an, startet, stoppt und zeigt ihre
+Logdateien. Docker muss dazu auf dem LoxBerry installiert sein; das Plugin
+bringt es nicht mit.</p>
+
+<h3>Welche Modelle passen &mdash; das entscheidet der Arbeitsspeicher</h3>
+<p>Der Reiter <i>Dienste</i> liest Architektur, Kerne, Speicher und Grafikkarte
+aus und schl&auml;gt dazu passende Modelle vor. Die Faustregel dahinter: unter
+etwa 3,5&nbsp;GB ist nur das kleinste Whisper-Modell sinnvoll und ein
+Sprachmodell gar nicht; ab etwa 15&nbsp;GB oder mit Grafikkarte l&auml;uft auch
+das gro&szlig;e. <b>Geschwindigkeitsangaben stehen bewusst nirgends</b>, weil
+sie ohne Ihre Hardware geraten w&auml;ren. Der Knopf <i>Messen</i> misst sie
+stattdessen bei Ihnen.</p>
+
+<h3>Mikrofone</h3>
+<p>Zwei Familien werden bedient, gemischt und gleichzeitig:</p>
+<ul>
+<li><b>Wyoming-Satelliten</b> &mdash; das offene Protokoll hinter Home Assistant
+Voice. Alles, was einen Wyoming-Satelliten spricht, l&auml;sst sich mit
+Adresse und Port eintragen: die Voice-PE-Hardware, ein Raspberry Pi mit
+wyoming-satellite, ein selbstgebautes Mikrofon.</li>
+<li><b>ESPHome-Mikrofone</b> &mdash; direkt &uuml;ber die native
+API (Port 6053) mit ihrem Verschl&uuml;sselungsschl&uuml;ssel.</li>
+</ul>
+<p>Der ESPHome-Weg ist der am wenigsten erprobte Teil des Plugins. Er ist
+deshalb so gebaut, dass ein Fehler dort die Wyoming-Mikrofone nicht mitrei&szlig;t.</p>
+
+<h3>Wie ein Satz gedeutet wird</h3>
+<p>Zuerst die Muster im Reiter <i>S&auml;tze</i>: <span class="sm-mono">[schalte|mach]
+{ziel} [an|ein]</span>. Eckige Klammern sind Alternativen, geschweifte
+Platzhalter. Sie sind schnell, nachvollziehbar und
+liefern immer dasselbe Ergebnis. Passt kein Muster und ist das Sprachmodell
+eingeschaltet, wird es gefragt &mdash; es darf aber nur Ziele nennen, die in der
+Liste stehen. Erfundene Ziele werden verworfen.</p>
+<p>Umlaute, Gro&szlig;schreibung und Satzzeichen spielen keine Rolle.
+&bdquo;K&uuml;che&ldquo;, &bdquo;kueche&ldquo; und &bdquo;Kuche&ldquo; sind
+dasselbe.</p>
+
+<h3>So gehen Sie vor</h3>
+<ol>
+<li><b>Dienste:</b> Empfehlung ansehen, Container anlegen und starten.</li>
+<li><b>Einstellungen:</b> Weckwort, Sprache und Miniserver eintragen, Dienst
+starten.</li>
+<li><b>Test:</b> Die Selbstpr&uuml;fung geht die Kette durch. Danach unten einen
+Satz eintippen &mdash; das ist der beste Test, den es hier gibt: er braucht kein
+Mikrofon und pr&uuml;ft trotzdem alles ab der Spracherkennung.</li>
+<li><b>Mikrofone:</b> erst jetzt eintragen.</li>
+<li><b>MQTT:</b> Das Abo im MQTT-Gateway eintragen. <b>Ohne diesen Eintrag kommt
+am Miniserver nichts an.</b></li>
+<li><b>Einbindung in Loxone:</b> Schritt f&uuml;r Schritt, mit vollst&auml;ndiger
+Baustein-Liste.</li>
+</ol>
+
+<h3>Wenn es nicht versteht</h3>
+<p>Der Reiter <i>Test</i> zeigt unter <i>Was zuletzt verstanden wurde</i>, was
+die Spracherkennung geh&ouml;rt hat. Sehr oft steht dort etwas anderes, als
+gesagt wurde &mdash; dann liegt es am Mikrofon, am Raum oder am Modell und nicht
+am Satzmuster. Steht der Satz richtig da und wird trotzdem nichts geschaltet,
+fehlt ein Muster oder ein Ziel.</p>
+
+<h3>Was ungepr&uuml;ft ist</h3>
+<p>Dieses Plugin wurde ohne Mikrofon gebaut. Gepr&uuml;ft wurde die ganze Kette
+gegen Attrappen, die das <i>Originalpaket</i> des Wyoming-Protokolls benutzen.
+Ob ein bestimmtes Mikrofon Audio liefert, das Whisper versteht, ob das Weckwort
+in Ihrem Raum anspricht und ob ESPHome-Mikrofone den Audioweg tragen, kann nur
+echte Hardware zeigen.</p>
+
+<h3>Grundlage</h3>
+<p>Wyoming-Protokoll und die Container-Abbilder stammen aus dem
+Rhasspy-Projekt (MIT), das Sprachmodell aus llama.cpp (MIT). Die
+Protokollangaben wurden gegen das ver&ouml;ffentlichte Paket
+<span class="sm-mono">wyoming</span> gemessen, nicht nur gelesen.</p>

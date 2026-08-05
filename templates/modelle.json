@@ -1,0 +1,77 @@
+{
+  "_hinweis": [
+    "Empfehlungen fuer die lokalen Modelle, gestaffelt nach Arbeitsspeicher.",
+    "",
+    "WAS HIER STEHT UND WAS NICHT:",
+    "Die Dateigroessen und Modellnamen sind Tatsachen der jeweiligen Projekte.",
+    "Angaben zur GESCHWINDIGKEIT stehen hier bewusst NICHT - sie haengen an CPU,",
+    "Takt, Kuehlung und Speicherbandbreite und liessen sich nur behaupten. Statt",
+    "dessen misst das Plugin im Reiter Test die tatsaechliche Laufzeit auf der",
+    "Maschine, auf der es laeuft.",
+    "",
+    "'ab_mb' ist der freie Arbeitsspeicher in Megabyte, ab dem die Stufe",
+    "vorgeschlagen wird. Die Reihenfolge ist absteigend zu lesen: es gilt die",
+    "erste Stufe, deren Schwelle unterschritten wird."
+  ],
+
+  "stufen": [
+    {
+      "name": "gross",
+      "ab_mb": 15000,
+      "text": "STUFE.GROSS",
+      "whisper": { "modell": "small-int8", "datei_mb": 500 },
+      "piper":   { "stimme": "de_DE-thorsten-medium", "datei_mb": 65 },
+      "llm":     { "modell": "Qwen2.5-7B-Instruct-Q4_K_M", "datei_mb": 4700,
+                   "quelle": "Qwen/Qwen2.5-7B-Instruct-GGUF" }
+    },
+    {
+      "name": "mittel",
+      "ab_mb": 7000,
+      "text": "STUFE.MITTEL",
+      "whisper": { "modell": "base-int8", "datei_mb": 150 },
+      "piper":   { "stimme": "de_DE-thorsten-medium", "datei_mb": 65 },
+      "llm":     { "modell": "Qwen2.5-3B-Instruct-Q4_K_M", "datei_mb": 2000,
+                   "quelle": "Qwen/Qwen2.5-3B-Instruct-GGUF" }
+    },
+    {
+      "name": "klein",
+      "ab_mb": 3500,
+      "text": "STUFE.KLEIN",
+      "whisper": { "modell": "base-int8", "datei_mb": 150 },
+      "piper":   { "stimme": "de_DE-thorsten-low", "datei_mb": 30 },
+      "llm":     { "modell": "Qwen2.5-1.5B-Instruct-Q4_K_M", "datei_mb": 1100,
+                   "quelle": "Qwen/Qwen2.5-1.5B-Instruct-GGUF" }
+    },
+    {
+      "name": "winzig",
+      "ab_mb": 0,
+      "text": "STUFE.WINZIG",
+      "whisper": { "modell": "tiny-int8", "datei_mb": 75 },
+      "piper":   { "stimme": "de_DE-thorsten-low", "datei_mb": 30 },
+      "llm":     null
+    }
+  ],
+
+  "dienste": {
+    "whisper": {
+      "abbild": "rhasspy/wyoming-whisper",
+      "port": 10300,
+      "text": "DIENST.WHISPER"
+    },
+    "piper": {
+      "abbild": "rhasspy/wyoming-piper",
+      "port": 10200,
+      "text": "DIENST.PIPER"
+    },
+    "wakeword": {
+      "abbild": "rhasspy/wyoming-openwakeword",
+      "port": 10400,
+      "text": "DIENST.WAKEWORD"
+    },
+    "llm": {
+      "abbild": "ghcr.io/ggml-org/llama.cpp:server",
+      "port": 8080,
+      "text": "DIENST.LLM"
+    }
+  }
+}

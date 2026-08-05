@@ -1,0 +1,721 @@
+<?php
+/**
+ * Sprachsteuerung lokal - gemeinsame Bibliothek
+ *
+ * Liegt unter webfrontend/html/, weil der Miniserver-Endpunkt sie ebenso
+ * braucht wie die Oberflaeche. So gibt es EINE Datei statt zweier Kopien.
+ *
+ * Das Plugin ist die Vermittlung zwischen Mikrofonen, Spracherkennung,
+ * Sprachausgabe und Loxone. Die schweren Teile laufen in Containern; diese
+ * Bibliothek verwaltet sie ueber die Docker-Kommandozeile, liest den
+ * Zwischenspeicher des Dienstes und legt Befehle in einer Warteschlange ab.
+ * Sie spricht selbst nie mit einem Mikrofon.
+ *
+ * Praefix 'sp_', weil LBWeb::lbheader() SDK-Globale setzt.
+ * Kompatibel mit PHP 7.4 und PHP 8.x (LoxBerry 3.x/4.x).
+ */
+
+if (!function_exists('sp_e')) {
+    function sp_e($s)
+    {
+        return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8');
+    }
+}
+
+function sp_paths()
+{
+    static $p = null;
+    if ($p !== null) {
+        return $p;
+    }
+    $home = getenv('LBHOMEDIR');
+    if (!$home || !is_dir($home)) {
+        foreach (array('/opt/loxberry', '/home/loxberry/loxberry') as $k) {
+            if (is_dir($k)) { $home = $k; break; }
+        }
+    }
+    // Der Pluginordner ergibt sich aus dem Ablageort dieser Datei. Der
+    // MD5-Schluessel aus der plugindatabase.json wird bewusst NICHT benutzt.
+    $dir = basename(dirname(__FILE__));
+    if ($home && !is_dir($home . '/config/plugins/' . $dir)) {
+        foreach (array(getenv('LBPPLUGINDIR'), 'sprache') as $kand) {
+            if ($kand && is_dir($home . '/config/plugins/' . $kand)) { $dir = $kand; break; }
+        }
+    }
+    if ($home) {
+        $p = array(
+            'home' => $home, 'plugin' => $dir,
+            'configdir' => $home . '/config/plugins/' . $dir,
+            'config'    => $home . '/config/plugins/' . $dir . '/sprache.json',
+            'saetze'    => $home . '/config/plugins/' . $dir . '/saetze.json',
+            'sicherung' => $home . '/config/plugins/' . $dir . '.backup.sprache.json',
+            'sicherung_saetze' => $home . '/config/plugins/' . $dir . '.backup.saetze.json',
+            'datadir'   => $home . '/data/plugins/' . $dir,
+            'bindir'    => $home . '/bin/plugins/' . $dir,
+            'logdir'    => $home . '/log/plugins/' . $dir,
+            'log'       => $home . '/log/plugins/' . $dir . '/sprache.log',
+            'modelle'   => $home . '/templates/plugins/' . $dir . '/modelle.json',
+        );
+    } else {
+        $basis = dirname(dirname(__DIR__));
+        $p = array(
+            'home' => '', 'plugin' => $dir,
+            'configdir' => $basis . '/config',
+            'config'    => $basis . '/config/sprache.json',
+            'saetze'    => $basis . '/config/saetze.json',
+            'sicherung' => $basis . '/config/sprache.backup.json',
+            'sicherung_saetze' => $basis . '/config/saetze.backup.json',
+            'datadir'   => $basis . '/data',
+            'bindir'    => $basis . '/bin',
+            'logdir'    => $basis . '/log',
+            'log'       => $basis . '/log/sprache.log',
+            'modelle'   => $basis . '/templates/modelle.json',
+        );
+    }
+    return $p;
+}
+
+/** Voreinstellungen. Muessen zu VORGABEN in bin/sprache_dienst.py passen. */
+function sp_vorgaben()
+{
+    return array(
+        'satelliten'       => array(),
+        'whisper_host'     => '127.0.0.1', 'whisper_port' => 10300,
+        'piper_host'       => '127.0.0.1', 'piper_port'   => 10200,
+        'wake_host'        => '127.0.0.1', 'wake_port'    => 10400,
+        'llm_host'         => '127.0.0.1', 'llm_port'     => 8080,
+        'llm_ein'          => 0,
+        'sprache'          => 'de',
+        'wakeword'         => 'ok_nabu',
+        'antwort_sprechen' => 1,
+        'mqtt_ein'         => 1,
+        'mqtt_topic'       => 'sprache',
+        'miniserver_url'   => '',
+        'aktionstoken'     => '',
+        'wartezeit'        => 10,
+        'verlauf_zeilen'   => 50,
+        'whisper_modell'   => '',
+        'piper_stimme'     => '',
+        'llm_modell'       => '',
+    );
+}
+
+function sp_json_lesen($pfad)
+{
+    if (!is_file($pfad)) { return array(); }
+    $d = json_decode((string) @file_get_contents($pfad), true);
+    return is_array($d) ? $d : array();
+}
+
+function sp_json_schreiben($pfad, $daten, $rechte = null)
+{
+    $ordner = dirname($pfad);
+    if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) { return false; }
+    $tmp = $pfad . '.tmp';
+    $json = json_encode($daten, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    if ($json === false || @file_put_contents($tmp, $json) === false) { @unlink($tmp); return false; }
+    if ($rechte !== null) { @chmod($tmp, $rechte); }
+    return @rename($tmp, $pfad);
+}
+
+function sp_config()
+{
+    $p = sp_paths();
+    $roh = is_file($p['config']) ? trim((string) @file_get_contents($p['config'])) : '';
+    if (($roh === '' || $roh === '{}') && is_file($p['sicherung'])) {
+        @mkdir($p['configdir'], 0775, true);
+        @copy($p['sicherung'], $p['config']);
+    }
+    return array_merge(sp_vorgaben(), sp_json_lesen($p['config']));
+}
+
+function sp_config_speichern($cfg)
+{
+    $p = sp_paths();
+    // Die Konfiguration kann eine Miniserver-Adresse mit Zugangsdaten
+    // enthalten - deshalb 0600, nicht 0644.
+    if (!sp_json_schreiben($p['config'], $cfg, 0600)) { return false; }
+    @copy($p['config'], $p['sicherung']);
+    @chmod($p['sicherung'], 0600);
+    return true;
+}
+
+function sp_saetze()
+{
+    return sp_json_lesen(sp_paths()['saetze']);
+}
+
+function sp_saetze_speichern($saetze)
+{
+    $p = sp_paths();
+    if (!sp_json_schreiben($p['saetze'], $saetze)) { return false; }
+    @copy($p['saetze'], $p['sicherung_saetze']);
+    return true;
+}
+
+/** Die Empfehlungstabelle: EINE Datei fuer Dienst und Oberflaeche. */
+function sp_modelle()
+{
+    static $t = null;
+    if ($t !== null) { return $t; }
+    $p = sp_paths();
+    foreach (array($p['modelle'], dirname(dirname(__DIR__)) . '/templates/modelle.json') as $kand) {
+        $d = sp_json_lesen($kand);
+        if (!empty($d['stufen'])) { $t = $d; return $t; }
+    }
+    $t = array('stufen' => array(), 'dienste' => array());
+    return $t;
+}
+
+function sp_token_erzeugen($laenge = 24)
+{
+    $zeichen = 'abcdefghijkmnpqrstuvwxyz23456789';
+    $t = '';
+    for ($i = 0; $i < $laenge; $i++) { $t .= $zeichen[random_int(0, strlen($zeichen) - 1)]; }
+    return $t;
+}
+
+function sp_token()
+{
+    $cfg = sp_config();
+    if (trim((string) $cfg['aktionstoken']) === '') {
+        $cfg['aktionstoken'] = sp_token_erzeugen();
+        sp_config_speichern($cfg);
+    }
+    return (string) $cfg['aktionstoken'];
+}
+
+/* ---------------- Zwischenspeicher ---------------- */
+
+function sp_loxone()   { return sp_json_lesen(sp_paths()['datadir'] . '/loxone.json'); }
+function sp_zustand()  { return sp_json_lesen(sp_paths()['datadir'] . '/zustand.json'); }
+function sp_verlauf()
+{
+    $d = sp_json_lesen(sp_paths()['datadir'] . '/verlauf.json');
+    return isset($d['saetze']) && is_array($d['saetze']) ? $d['saetze'] : array();
+}
+function sp_satelliten()
+{
+    $l = sp_loxone();
+    return isset($l['satelliten']) && is_array($l['satelliten']) ? $l['satelliten'] : array();
+}
+function sp_alter()
+{
+    $l = sp_loxone();
+    return isset($l['ts']) ? max(0, time() - (int) $l['ts']) : -1;
+}
+
+/* ---------------- Protokollierung ---------------- */
+
+function sp_log($text)
+{
+    $p = sp_paths();
+    if (!is_dir($p['logdir'])) {
+        @mkdir($p['logdir'], 0775, true);
+    }
+    if (is_file($p['log']) && filesize($p['log']) > 512000) {
+        // Rotation: die letzten 400 Zeilen behalten
+        $rest = array_slice(file($p['log'], FILE_IGNORE_NEW_LINES) ?: array(), -400);
+        @file_put_contents($p['log'], implode("\n", $rest) . "\n");
+    }
+    @file_put_contents($p['log'], '[' . date('Y-m-d H:i:s') . '] ' . $text . "\n", FILE_APPEND);
+}
+
+/** Dieselbe Meldung hoechstens einmal je Zeitfenster - sonst wird die
+ *  Logdatei durch eine Dauerstoerung unlesbar. */
+function sp_log_gebremst($schluessel, $text, $sekunden = 3600)
+{
+    $f = sp_paths()['datadir'] . '/.meld_' . preg_replace('/[^a-z0-9_]/i', '', $schluessel);
+    $letzte = is_file($f) ? (int) @file_get_contents($f) : 0;
+    if (time() - $letzte >= $sekunden) {
+        @file_put_contents($f, (string) time());
+        sp_log($text);
+    }
+}
+
+/* ---------------- Dienst ---------------- */
+
+function sp_dienst_pid()
+{
+    $f = sp_paths()['datadir'] . '/dienst.pid';
+    if (!is_file($f)) {
+        return 0;
+    }
+    $pid = (int) trim((string) @file_get_contents($f));
+    if ($pid <= 0 || !is_dir('/proc/' . $pid)) {
+        return 0;
+    }
+    $cmd = (string) @file_get_contents('/proc/' . $pid . '/cmdline');
+    return strpos($cmd, 'sprache_dienst.py') !== false ? $pid : 0;
+}
+
+function sp_dienst_soll()
+{
+    return is_file(sp_paths()['datadir'] . '/soll_laufen') ? 1 : 0;
+}
+
+/** $befehl ist 'start', 'stop' oder 'restart'. Rueckgabe: array(ok, Ausgabe) */
+function sp_dienst($befehl)
+{
+    if (!in_array($befehl, array('start', 'stop', 'restart'), true)) {
+        return array(0, 'Unbekannter Befehl.');
+    }
+    $skript = sp_paths()['bindir'] . '/dienst.sh';
+    if (!is_file($skript)) {
+        return array(0, 'dienst.sh nicht gefunden: ' . $skript);
+    }
+    $ausgabe = array();
+    $code = 0;
+    @exec(escapeshellcmd($skript) . ' ' . escapeshellarg($befehl) . ' 2>&1', $ausgabe, $code);
+    return array($code === 0 ? 1 : 0, implode("\n", $ausgabe));
+}
+
+/* ---------------- Befehlswarteschlange ----------------
+ *
+ * Sowohl der Miniserver-Endpunkt als auch der Reiter Test setzen Befehle ueber
+ * diese eine Funktion ab. Zwei Kopien derselben Logik laufen zwangslaeufig
+ * auseinander.
+ *
+ * Rueckgabe: array(ok, Meldung). ok = 1 erledigt, 0 abgelehnt,
+ * 2 eingereiht, aber ohne Antwort in der Wartezeit - Ergebnis unbekannt.
+ * Es wird nie ein Erfolg gemeldet, den niemand geprueft hat.
+ */
+function sp_befehl_absetzen($befehl, $wartezeit = null)
+{
+    $p = sp_paths();
+    $cfg = sp_config();
+    if ($wartezeit === null) {
+        $wartezeit = (int) $cfg['wartezeit'];
+    }
+    $wartezeit = max(0, min(20, (int) $wartezeit));
+
+    $ordner = $p['datadir'] . '/befehle';
+    if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) {
+        return array(0, 'Der Ordner fuer die Warteschlange liess sich nicht anlegen: ' . $ordner);
+    }
+    $kennung = bin2hex(random_bytes(8));
+    $datei = $ordner . '/' . $kennung . '.json';
+    $tmp = $datei . '.tmp';
+    if (@file_put_contents($tmp, json_encode($befehl)) === false || !@rename($tmp, $datei)) {
+        @unlink($tmp);
+        return array(0, 'Der Befehl liess sich nicht ablegen: ' . $datei);
+    }
+    $antwort = $p['datadir'] . '/antworten/' . $kennung . '.json';
+    for ($i = 0; $i < $wartezeit * 10; $i++) {
+        if (is_file($antwort)) {
+            $a = sp_json_lesen($antwort);
+            return array((int) (isset($a['ok']) ? $a['ok'] : 0),
+                         (string) (isset($a['meldung']) ? $a['meldung'] : ''));
+        }
+        usleep(100000);
+    }
+    return array(2, 'Eingereiht, aber der Dienst hat innerhalb von ' . $wartezeit . ' s nicht geantwortet.');
+}
+
+/* ---------------- MQTT-Gateway des LoxBerry ----------------
+ *
+ * Das MQTT-Gateway ist seit LoxBerry 3 Bestandteil des Systems, kein Plugin.
+ * Es wird nicht nachinstalliert, sondern unter System -> MQTT Gateway
+ * eingeschaltet.
+ *
+ * Mqtt.Brokerhost ist ab Werk auf 'localhost' gesetzt. Eine Pruefung darauf
+ * beantwortet also NICHT die Frage, ob Nachrichten ankommen koennen -
+ * massgeblich ist Gatewayautostart.
+ */
+function sp_mqtt_zustand()
+{
+    $p = sp_paths();
+    $leer = array('gefunden' => 0, 'autostart' => 0, 'udpport' => 0, 'broker' => '',
+                  'brokerport' => '', 'user' => '', 'pw' => '', 'lokal' => 0);
+    if ($p['home'] === '') {
+        return $leer;
+    }
+    $gen = sp_json_lesen($p['home'] . '/config/system/general.json');
+    $m = array();
+    if (isset($gen['Mqtt']) && is_array($gen['Mqtt'])) {
+        $m = $gen['Mqtt'];
+    } elseif (isset($gen['mqtt']) && is_array($gen['mqtt'])) {
+        $m = $gen['mqtt'];
+    }
+    if (!$m) {
+        return $leer;
+    }
+    $hol = function ($gross, $klein) use ($m) {
+        if (isset($m[$gross])) {
+            return $m[$gross];
+        }
+        return isset($m[$klein]) ? $m[$klein] : '';
+    };
+    return array(
+        'gefunden'   => 1,
+        'autostart'  => in_array((string) $hol('Gatewayautostart', 'gatewayautostart'), array('1', 'true'), true) ? 1 : 0,
+        'udpport'    => (int) $hol('Udpinport', 'udpinport'),
+        'broker'     => (string) $hol('Brokerhost', 'brokerhost'),
+        'brokerport' => (string) $hol('Brokerport', 'brokerport'),
+        'user'       => (string) $hol('Brokeruser', 'brokeruser'),
+        'pw'         => (string) $hol('Brokerpass', 'brokerpass'),
+        'lokal'      => in_array((string) $hol('Uselocalbroker', 'uselocalbroker'), array('1', 'true'), true) ? 1 : 0,
+    );
+}
+
+/**
+ * Werte ueber das LoxBerry-Gateway veroeffentlichen.
+ *
+ * Bewusst ueber den UDP-Eingang des Gateways und nicht mit einem eigenen
+ * MQTT-Client: so muss das Plugin ueberhaupt keine Broker-Zugangsdaten
+ * kennen, um zu senden. Das Gateway hat sie ohnehin.
+ */
+function sp_mqtt_senden(array $paare, $praefix)
+{
+    $z = sp_mqtt_zustand();
+    if (!$z['udpport']) {
+        sp_log_gebremst('mqtt_kein_port', 'MQTT: kein UDP-Eingangsport in der general.json gefunden - nichts gesendet.');
+        return false;
+    }
+    if (!$z['autostart']) {
+        sp_log_gebremst('mqtt_aus', 'MQTT: das Gateway ist nicht auf Autostart gestellt '
+            . '(System, MQTT Gateway). Es wird gesendet, aber vermutlich hoert niemand zu.');
+    }
+    $s = @socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+    if (!$s) {
+        sp_log_gebremst('mqtt_socket', 'MQTT: Socket nicht moeglich.');
+        return false;
+    }
+    foreach ($paare as $k => $v) {
+        if ($v === null || $v === '') {
+            continue;   // fehlender Wert: nichts senden statt eine erfundene 0
+        }
+        $msg = 'publish ' . $praefix . '/' . $k . ' ' . $v;
+        @socket_sendto($s, $msg, strlen($msg), 0, '127.0.0.1', $z['udpport']);
+    }
+    socket_close($s);
+    return true;
+}
+
+/* ==================================================================
+ * Loxone-Vorlagen
+ *
+ * Nachbau der Bausteine aus LoxBerry::LoxoneTemplateBuilder; das Modul gibt es
+ * nur in Perl. Attributreihenfolge, CRLF als Zeilenende und der Tabulator vor
+ * den Kindelementen entsprechen dem Original. Wortgleich uebernommen aus
+ * LoxBerry-Plugin-APC-UPS-1.0.0 (ap_xml_virtual_in_http) - nicht neu
+ * geschrieben, weil die Fassung dort geprueft ist.
+ * ================================================================== */
+
+function sp_x($s)
+{
+    return htmlspecialchars((string) $s, ENT_QUOTES | ENT_XML1, 'UTF-8');
+}
+
+function sp_xml_virtual_in_http($kopf, $cmds)
+{
+    $crlf = "\r\n";
+    $o = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
+    $o .= '<VirtualInHttp ';
+    $o .= 'Title="' . sp_x($kopf['title']) . '" ';
+    $o .= 'Comment="' . sp_x(isset($kopf['comment']) ? $kopf['comment'] : '') . '" ';
+    $o .= 'Address="' . sp_x(isset($kopf['address']) ? $kopf['address'] : '') . '" ';
+    $o .= 'PollingTime="' . sp_x(isset($kopf['polling']) ? $kopf['polling'] : '60') . '"';
+    $o .= '>' . $crlf;
+    foreach ($cmds as $c) {
+        $o .= "\t" . '<VirtualInHttpCmd ';
+        $o .= 'Title="' . sp_x($c['title']) . '" ';
+        $o .= 'Comment="' . sp_x(isset($c['comment']) ? $c['comment'] : '') . '" ';
+        $o .= 'Check="' . sp_x(isset($c['check']) ? $c['check'] : ' ') . '" ';
+        $o .= 'Signed="true" ';
+        $o .= 'Analog="true" ';
+        $o .= 'SourceValLow="0" ';
+        $o .= 'DestValLow="0" ';
+        $o .= 'SourceValHigh="100" ';
+        $o .= 'DestValHigh="100" ';
+        $o .= 'DefVal="0" ';
+        $o .= 'MinVal="-2147483647" ';
+        $o .= 'MaxVal="2147483647"';
+        $o .= '/>' . $crlf;
+    }
+    $o .= '</VirtualInHttp>' . $crlf;
+    return $o;
+}
+
+/* ==================================================================
+ * Sprache (Pflicht: Deutsch und Englisch)
+ *
+ * Englisch ist die Rueckfallebene, nicht Deutsch: wer eine dritte Sprache
+ * eingestellt hat, versteht eher Englisch. Deshalb muss language_en.ini immer
+ * vollstaendig sein.
+ *
+ * Die Funktion setzt kein sp_paths() voraus, damit derselbe Block in jedes
+ * Plugin passt. Der Pfad wird zweistufig gesucht:
+ *   installiert: <home>/templates/plugins/<ordner>/lang
+ *   Archiv:      <pluginwurzel>/templates/lang
+ * ================================================================== */
+
+function sp_sprache()
+{
+    $sprache = 'de';
+    if (class_exists('LBSystem', false) && method_exists('LBSystem', 'lblanguage')) {
+        $sprache = LBSystem::lblanguage();
+    } elseif (getenv('LBLANG')) {
+        $sprache = getenv('LBLANG');
+    }
+    $sprache = strtolower(substr((string) $sprache, 0, 2));
+    return in_array($sprache, array('de', 'en'), true) ? $sprache : 'en';
+}
+
+function sp_t($schluessel)
+{
+    static $texte = null;
+    if ($texte === null) {
+        $home = getenv('LBHOMEDIR');
+        if (!$home || !is_dir($home)) {
+            foreach (array('/opt/loxberry', '/home/loxberry/loxberry') as $k) {
+                if (is_dir($k)) {
+                    $home = $k;
+                    break;
+                }
+            }
+        }
+        $ordner = basename(dirname(__FILE__));
+        $pfad = $home . '/templates/plugins/' . $ordner . '/lang';
+        if (!is_dir($pfad)) {
+            $pfad = dirname(dirname(dirname(__FILE__))) . '/templates/lang';
+        }
+        $texte = @parse_ini_file($pfad . '/language_' . sp_sprache() . '.ini', true, INI_SCANNER_RAW);
+        if (!is_array($texte)) {
+            $texte = array();
+        }
+        $rueck = @parse_ini_file($pfad . '/language_en.ini', true, INI_SCANNER_RAW);
+        if (is_array($rueck)) {
+            $texte = array_replace_recursive($rueck, $texte);
+        }
+        // INI_SCANNER_RAW liefert die Werte samt der Anfuehrungszeichen
+        // zurueck, in die sie in der Datei stehen muessen. Die gehoeren nicht
+        // in die Ausgabe.
+        foreach ($texte as $ab => $paare) {
+            if (!is_array($paare)) {
+                continue;
+            }
+            foreach ($paare as $s => $w) {
+                $texte[$ab][$s] = trim((string) $w, '"');
+            }
+        }
+    }
+    $teile = array_pad(explode('.', $schluessel, 2), 2, '');
+    return isset($texte[$teile[0]][$teile[1]]) ? $texte[$teile[0]][$teile[1]] : $schluessel;
+}
+
+
+/* ==================================================================
+ * Die Sprachdienste in Containern
+ *
+ * Vier Container, alle nur im Heimnetz: Spracherkennung (Whisper),
+ * Sprachausgabe (Piper), Wortwecker (openWakeWord) und wahlweise das
+ * Sprachmodell. Die Aufrufzeilen folgen den Anleitungen der jeweiligen
+ * Projekte. Der Modellordner wird NIE mitgeloescht - darin liegen Gigabyte,
+ * die sonst erneut aus dem Netz kommen muessten.
+ * ================================================================== */
+
+function sp_docker_da()
+{
+    $a = array();
+    @exec('command -v docker 2>/dev/null', $a);
+    return count($a) > 0 ? 1 : 0;
+}
+
+function sp_docker($argumente)
+{
+    if (!sp_docker_da()) {
+        return array(0, 'Docker ist auf diesem LoxBerry nicht installiert.');
+    }
+    $ausgabe = array();
+    $code = 0;
+    @exec('docker ' . $argumente . ' 2>&1', $ausgabe, $code);
+    return array($code === 0 ? 1 : 0, implode("\n", $ausgabe));
+}
+
+/** Die vier Dienste mit Containernamen. */
+function sp_dienste()
+{
+    return array('whisper', 'piper', 'wakeword', 'llm');
+}
+
+function sp_container_name($dienst)
+{
+    $dienst = preg_replace('/[^a-z]/', '', (string) $dienst);
+    return 'sprache-' . ($dienst !== '' ? $dienst : 'unbekannt');
+}
+
+/** 'laeuft', 'gestoppt', 'fehlt' oder 'kein_docker' */
+function sp_container_zustand($dienst)
+{
+    if (!sp_docker_da()) { return 'kein_docker'; }
+    list($ok, $aus) = sp_docker('inspect -f {{.State.Running}} '
+                                . escapeshellarg(sp_container_name($dienst)));
+    if (!$ok) { return 'fehlt'; }
+    return trim($aus) === 'true' ? 'laeuft' : 'gestoppt';
+}
+
+/**
+ * Die Aufrufzeile fuer einen Dienst - auch fuer die Anzeige.
+ *
+ * Absichtlich OHNE --network=host: diese Dienste brauchen kein Wirtsnetz,
+ * eine Portweiterleitung genuegt. Das haelt sie vom uebrigen Netz fern.
+ */
+function sp_container_befehl($dienst, $cfg = null, $emp = null)
+{
+    if ($cfg === null) { $cfg = sp_config(); }
+    $p = sp_paths();
+    $tab = sp_modelle();
+    $d = isset($tab['dienste'][$dienst]) ? $tab['dienste'][$dienst] : null;
+    if ($d === null) { return ''; }
+    $modelle = $p['datadir'] . '/modelle';
+    $name = sp_container_name($dienst);
+    $port = (int) $d['port'];
+    $abbild = (string) $d['abbild'];
+
+    $zeile = 'run -d --name ' . escapeshellarg($name)
+           . ' --restart=unless-stopped'
+           . ' -p 127.0.0.1:' . $port . ':' . $port
+           . ' -v ' . escapeshellarg($modelle . '/' . $dienst . ':/data');
+
+    if ($dienst === 'whisper') {
+        $modell = trim((string) $cfg['whisper_modell']);
+        if ($modell === '' && $emp !== null) { $modell = (string) $emp['whisper']['modell']; }
+        if ($modell === '') { $modell = 'base-int8'; }
+        $zeile .= ' ' . escapeshellarg($abbild)
+                . ' --model ' . escapeshellarg($modell)
+                . ' --language ' . escapeshellarg((string) $cfg['sprache']);
+    } elseif ($dienst === 'piper') {
+        $stimme = trim((string) $cfg['piper_stimme']);
+        if ($stimme === '' && $emp !== null) { $stimme = (string) $emp['piper']['stimme']; }
+        if ($stimme === '') { $stimme = 'de_DE-thorsten-low'; }
+        $zeile .= ' ' . escapeshellarg($abbild) . ' --voice ' . escapeshellarg($stimme);
+    } elseif ($dienst === 'wakeword') {
+        $wort = trim((string) $cfg['wakeword']);
+        if ($wort === '') { $wort = 'ok_nabu'; }
+        $zeile .= ' ' . escapeshellarg($abbild)
+                . ' --preload-model ' . escapeshellarg($wort);
+    } elseif ($dienst === 'llm') {
+        $modell = trim((string) $cfg['llm_modell']);
+        if ($modell === '' && $emp !== null && !empty($emp['llm'])) {
+            $modell = (string) $emp['llm']['quelle'];
+        }
+        if ($modell === '') { return ''; }
+        // llama.cpp laedt das Modell selbst von HuggingFace, wenn -hf gesetzt ist.
+        $zeile .= ' ' . escapeshellarg($abbild)
+                . ' -hf ' . escapeshellarg($modell)
+                . ' --host 0.0.0.0 --port ' . $port . ' -c 2048';
+    }
+    return $zeile;
+}
+
+/** $was ist 'anlegen', 'start', 'stop', 'restart', 'entfernen' oder 'holen'. */
+function sp_container($dienst, $was)
+{
+    if (!in_array($dienst, sp_dienste(), true)) {
+        return array(0, 'Unbekannter Dienst.');
+    }
+    $p = sp_paths();
+    $name = sp_container_name($dienst);
+    $tab = sp_modelle();
+    switch ($was) {
+        case 'holen':
+            $abbild = isset($tab['dienste'][$dienst]['abbild']) ? $tab['dienste'][$dienst]['abbild'] : '';
+            return $abbild === '' ? array(0, 'Kein Abbild bekannt.')
+                                  : sp_docker('pull ' . escapeshellarg($abbild));
+        case 'anlegen':
+            $ordner = $p['datadir'] . '/modelle/' . $dienst;
+            if (!is_dir($ordner)) { @mkdir($ordner, 0775, true); }
+            if (sp_container_zustand($dienst) !== 'fehlt') {
+                return array(0, 'Es gibt bereits einen Container ' . $name
+                              . '. Erst entfernen, dann neu anlegen.');
+            }
+            $befehl = sp_container_befehl($dienst);
+            if ($befehl === '') {
+                return array(0, 'Fuer diesen Dienst ist kein Modell eingestellt.');
+            }
+            return sp_docker($befehl);
+        case 'start':     return sp_docker('start ' . escapeshellarg($name));
+        case 'stop':      return sp_docker('stop ' . escapeshellarg($name));
+        case 'restart':   return sp_docker('restart ' . escapeshellarg($name));
+        case 'entfernen':
+            // Nur der Container, NIE der Modellordner.
+            return sp_docker('rm -f ' . escapeshellarg($name));
+    }
+    return array(0, 'Unbekannter Containerbefehl.');
+}
+
+function sp_container_log($dienst, $zeilen = 200)
+{
+    list($ok, $aus) = sp_docker('logs --tail ' . (int) $zeilen . ' '
+                                . escapeshellarg(sp_container_name($dienst)));
+    // Programmprotokolle vor dem Auswerten von Farbcodes befreien.
+    return preg_replace('/\x1B\[[0-9;]*[A-Za-z]/', '', (string) $aus);
+}
+
+/* ---------------- Hardware und Empfehlung ---------------- */
+
+function sp_hardware($messen = false)
+{
+    $p = sp_paths();
+    $py = is_file($p['bindir'] . '/venv/bin/python3') ? $p['bindir'] . '/venv/bin/python3' : 'python3';
+    $skript = $p['bindir'] . '/hardware.py';
+    if (!is_file($skript)) { return array(); }
+    $ausgabe = array();
+    @exec(escapeshellcmd($py) . ' ' . escapeshellarg($skript)
+          . ($messen ? ' --messen' : '') . ' 2>/dev/null', $ausgabe);
+    $d = json_decode(implode("\n", $ausgabe), true);
+    return is_array($d) ? $d : array();
+}
+
+function sp_selbsttest_ausgabe()
+{
+    $p = sp_paths();
+    $py = $p['bindir'] . '/venv/bin/python3';
+    $skript = $p['bindir'] . '/sprache_dienst.py';
+    if (!is_file($py) || !is_file($skript)) {
+        return "[FEHL] Die virtuelle Python-Umgebung oder sprache_dienst.py fehlt.\n"
+             . '       Erwartet: ' . $py . "\n                 " . $skript . "\n"
+             . '       Abhilfe: Plugin neu installieren.';
+    }
+    $ausgabe = array();
+    @exec(escapeshellcmd($py) . ' ' . escapeshellarg($skript) . ' --selbsttest 2>&1', $ausgabe);
+    return implode("\n", $ausgabe);
+}
+
+/** Die Werte des Status-Endpunkts: Einheit und Sprachschluessel. */
+function sp_status_felder()
+{
+    return array(
+        'OK'        => array('',  'SP_FELD.OK'),
+        'SATELLITEN'=> array('',  'SP_FELD.SATELLITEN'),
+        'BEREIT'    => array('',  'SP_FELD.BEREIT'),
+        'ALTER'     => array('s', 'SP_FELD.ALTER'),
+    );
+}
+
+/** Vorlage fuer den Import in Loxone Config. Rueckgabe: array(name, inhalt) */
+function sp_vorlage()
+{
+    $p = sp_paths();
+    $host = isset($_SERVER['HTTP_HOST']) && $_SERVER['HTTP_HOST'] !== ''
+        ? preg_replace('/[^A-Za-z0-9\.\-:]/', '', (string) $_SERVER['HTTP_HOST'])
+        : (gethostname() ?: 'loxberry');
+    $token = sp_token();
+    $cmds = array();
+    foreach (sp_status_felder() as $feld => $info) {
+        $cmds[] = array(
+            'title'   => 'SPRACHE_' . $feld,
+            'comment' => trim(strip_tags(html_entity_decode(sp_t($info[1]), ENT_QUOTES, 'UTF-8')))
+                       . ($info[0] !== '' ? ' [' . $info[0] . ']' : ''),
+            'check'   => '\i' . $feld . '=\i\v',
+        );
+    }
+    return array('sprache_status.xml', sp_xml_virtual_in_http(array(
+        'title'   => 'Sprachsteuerung lokal',
+        'address' => 'http://' . $host . '/plugins/' . $p['plugin']
+                   . '/index.php?token=' . $token . '&aktion=status',
+        'polling' => '60',
+        'comment' => 'Erzeugt vom LoxBerry-Plugin Sprachsteuerung lokal (' . date('d.m.Y') . ')',
+    ), $cmds));
+}

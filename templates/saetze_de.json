@@ -1,0 +1,60 @@
+{
+  "_hinweis": [
+    "Satzmuster und Zielgeraete. Diese Datei wird bei der Installation nach",
+    "config/plugins/sprache/saetze.json kopiert und dort vom Benutzer gepflegt -",
+    "eine Aktualisierung des Plugins ueberschreibt sie NIE.",
+    "",
+    "In den Mustern stehen Platzhalter in geschweiften Klammern:",
+    "  {ziel}  wird gegen die Liste 'ziele' samt ihrer Aliasnamen aufgeloest",
+    "  {wert}  nimmt eine Zahl auf",
+    "  {rest}  nimmt beliebigen Text auf",
+    "Alternativen stehen in eckigen Klammern und mit senkrechtem Strich:",
+    "  'mach [das|die] licht {ziel} an'",
+    "Beim Vergleich werden Gross- und Kleinschreibung, Umlaute und",
+    "Zeichensetzung eingeebnet - 'Küche' und 'kueche' sind dasselbe."
+  ],
+
+  "ziele": {
+    "wohnzimmer_licht": {
+      "name": "Licht im Wohnzimmer",
+      "alias": ["wohnzimmer", "wohnzimmerlicht", "licht wohnzimmer", "im wohnzimmer"],
+      "thema": "wohnzimmer/licht"
+    },
+    "kueche_licht": {
+      "name": "Licht in der Kueche",
+      "alias": ["kueche", "kuechenlicht", "licht kueche", "in der kueche"],
+      "thema": "kueche/licht"
+    },
+    "alle_lichter": {
+      "name": "Alle Lichter",
+      "alias": ["alle lichter", "alles licht", "ueberall"],
+      "thema": "alle/licht"
+    }
+  },
+
+  "regeln": [
+    { "muster": "[schalte|mach] {ziel} [an|ein]",
+      "absicht": "schalten", "aktion": "ein",
+      "antwort": "{zielname} ist eingeschaltet" },
+
+    { "muster": "[schalte|mach] {ziel} [aus|ab]",
+      "absicht": "schalten", "aktion": "aus",
+      "antwort": "{zielname} ist ausgeschaltet" },
+
+    { "muster": "[licht|das licht] {ziel} [an|ein]",
+      "absicht": "schalten", "aktion": "ein",
+      "antwort": "{zielname} ist eingeschaltet" },
+
+    { "muster": "[licht|das licht] {ziel} aus",
+      "absicht": "schalten", "aktion": "aus",
+      "antwort": "{zielname} ist ausgeschaltet" },
+
+    { "muster": "[dimme|stelle] {ziel} auf {wert} [prozent|]",
+      "absicht": "dimmen", "aktion": "wert",
+      "antwort": "{zielname} steht auf {wert} Prozent" },
+
+    { "muster": "wie [warm|kalt] ist es [im|in der|] {ziel}",
+      "absicht": "frage", "aktion": "temperatur",
+      "antwort": "" }
+  ]
+}
