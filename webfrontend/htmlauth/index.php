@@ -761,7 +761,7 @@ for ($sp_i = 0; $sp_i < 8; $sp_i++) {
     <td colspan="2"><span class="sm-mono"><?= sp_e($sp_basis) ?>?token=<?= sp_e($sp_token) ?>&amp;aktion=status</span></td></tr>
 <tr><th><?= sp_e(sp_t('LOX.T_TITEL')) ?></th><th><?= sp_e(sp_t('LOX.T_BEFEHL')) ?></th><th><?= sp_e(sp_t('LOX.T_BEDEUTUNG')) ?></th></tr>
 <?php foreach (sp_status_felder() as $sp_feld => $sp_info) { ?>
-<tr><td><span class="sm-mono">SPRACHE_<?= sp_e($sp_feld) ?></span></td>
+<tr><td><span class="sm-mono">SPRACHSTEUERUNG_<?= sp_e($sp_feld) ?></span></td>
     <td><span class="sm-mono">\i<?= sp_e($sp_feld) ?>=\i\v</span></td>
     <td><?= sp_t($sp_info[1]) ?></td></tr>
 <?php } ?>
@@ -851,7 +851,7 @@ function sp_bausteine()
 <table class="sm-tbl">
 <tr><th><?= sp_e(sp_t('LOX.T_PRUEFUNG')) ?></th><th><?= sp_e(sp_t('LOX.T_ERWARTUNG')) ?></th></tr>
 <tr><td><span class="sm-mono"><?= sp_e($sp_basis) ?>?token=<?= sp_e($sp_token) ?>&amp;aktion=status</span></td>
-    <td><span class="sm-mono">SPRACHE;OK=1;SATELLITEN=...</span></td></tr>
+    <td><span class="sm-mono">SPRACHSTEUERUNG;OK=1;SATELLITEN=...</span></td></tr>
 <tr><td><span class="sm-mono"><?= sp_e($sp_basis) ?>?aktion=status</span></td>
     <td><span class="sm-mono">FEHLER;OK=0;GRUND=TOKEN</span> (HTTP 403)</td></tr>
 <tr><td><span class="sm-mono"><?= sp_e($sp_basis) ?>?token=<?= sp_e($sp_token) ?>&amp;aktion=quatsch</span></td>

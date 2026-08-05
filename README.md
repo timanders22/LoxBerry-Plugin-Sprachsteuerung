@@ -105,7 +105,7 @@ erreicht mehr als jede Meldung auf einem Bildschirm.
 
 ## Aufbau
 
-    bin/sprache_dienst.py     Sprachdienst: Wyoming-Client, Pipeline,
+    bin/sprachsteuerung_dienst.py     Sprachdienst: Wyoming-Client, Pipeline,
                               ESPHome, MQTT, Warteschlange, Selbsttest
     bin/hardware.py           Hardware erkennen, empfehlen, messen
                               (läuft ohne venv)

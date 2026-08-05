@@ -13,7 +13,7 @@
 
 ARGV3=$3
 ARGV5=$5
-PFOLDER="${ARGV3:-sprache}"
+PFOLDER="${ARGV3:-sprachsteuerung}"
 BASE="${ARGV5:-$LBHOMEDIR}"
 if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
     SELF=$(cd "$(dirname "$0")" && pwd)
@@ -33,8 +33,8 @@ mkdir -p "$PDATA/befehle" "$PDATA/antworten" "$PDATA/modelle" "$PDATA/verlauf" \
 }
 chmod 755 "$PDATA" "$PLOG" "$PCONFIG" 2>/dev/null
 
-[ -f "$PCONFIG/sprache.json" ] || echo '{}' > "$PCONFIG/sprache.json"
-chmod 600 "$PCONFIG/sprache.json"
+[ -f "$PCONFIG/sprachsteuerung.json" ] || echo '{}' > "$PCONFIG/sprachsteuerung.json"
+chmod 600 "$PCONFIG/sprachsteuerung.json"
 # Die Satzdatei ist Nutzerinhalt: nur anlegen, nie ueberschreiben.
 if [ ! -f "$PCONFIG/saetze.json" ]; then
     if [ -f "$BASE/templates/plugins/$PFOLDER/saetze_de.json" ]; then
@@ -45,7 +45,7 @@ if [ ! -f "$PCONFIG/saetze.json" ]; then
     fi
 fi
 
-for f in sprache.json saetze.json; do
+for f in sprachsteuerung.json saetze.json; do
     BK="$BASE/config/plugins/$PFOLDER.backup.$f"
     CF="$PCONFIG/$f"
     if [ -f "$BK" ]; then
@@ -55,7 +55,7 @@ for f in sprache.json saetze.json; do
         fi
     fi
 done
-chmod 600 "$PCONFIG/sprache.json"
+chmod 600 "$PCONFIG/sprachsteuerung.json"
 
 # ---------- Architektur ----------
 ARCH=$(uname -m)
@@ -133,9 +133,9 @@ if [ -x "$PBIN/hardware.py" ]; then
     "$VENV/bin/python3" "$PBIN/hardware.py" --klartext 2>/dev/null | sed 's/^/<INFO> /'
 fi
 
-chmod 755 "$PBIN/dienst.sh" "$PBIN/sprache_dienst.py" "$PBIN/hardware.py" 2>/dev/null
+chmod 755 "$PBIN/dienst.sh" "$PBIN/sprachsteuerung_dienst.py" "$PBIN/hardware.py" 2>/dev/null
 chown -R loxberry:loxberry "$PBIN" "$PDATA" "$PLOG" "$PCONFIG" 2>/dev/null
-chmod 600 "$PCONFIG/sprache.json"
+chmod 600 "$PCONFIG/sprachsteuerung.json"
 
 echo "<OK> Installation abgeschlossen."
 echo "<INFO> Weiter in der Plugin-Oberflaeche, Reiter Dienste: dort stehen der"

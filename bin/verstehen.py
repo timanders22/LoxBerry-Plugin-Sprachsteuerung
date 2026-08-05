@@ -211,7 +211,7 @@ def laden(pfad: Path) -> Verstehen:
 
 if __name__ == "__main__":
     kandidaten = [Path(p) for p in (
-        "/opt/loxberry/config/plugins/sprache/saetze.json",
+        "/opt/loxberry/config/plugins/sprachsteuerung/saetze.json",
         str(Path(__file__).resolve().parent.parent / "templates" / "saetze_de.json"),
     )]
     quelle = next((k for k in kandidaten if k.is_file()), kandidaten[-1])

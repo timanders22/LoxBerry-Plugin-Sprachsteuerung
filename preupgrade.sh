@@ -6,7 +6,7 @@
 # heruntergeladenen Modelle. Wer den loescht, laedt Gigabyte erneut.
 ARGV3=$3
 ARGV5=$5
-PFOLDER="${ARGV3:-sprache}"
+PFOLDER="${ARGV3:-sprachsteuerung}"
 BASE="${ARGV5:-$LBHOMEDIR}"
 
 PID="$BASE/data/plugins/$PFOLDER/dienst.pid"
@@ -18,11 +18,11 @@ if [ -f "$PID" ]; then
     echo "<INFO> Laufender Dienst angehalten."
 fi
 
-for f in sprache.json saetze.json; do
+for f in sprachsteuerung.json saetze.json; do
     CF="$BASE/config/plugins/$PFOLDER/$f"
     [ -f "$CF" ] && cp -p "$CF" "$BASE/config/plugins/$PFOLDER.backup.$f"
 done
 CF=""
-chmod 600 "$BASE/config/plugins/$PFOLDER.backup.sprache.json" 2>/dev/null
+chmod 600 "$BASE/config/plugins/$PFOLDER.backup.sprachsteuerung.json" 2>/dev/null
 echo "<OK> preupgrade abgeschlossen. Die Container bleiben unberuehrt."
 exit 0

@@ -31,9 +31,9 @@ ESPHome-Mikrofone (Atom Echo, Voice PE) sprechen ein anderes Protokoll; dafuer
 wird die offizielle Bibliothek aioesphomeapi benutzt.
 
 Aufrufe:
-    sprache_dienst.py              Dienst (Dauerbetrieb)
-    sprache_dienst.py --selbsttest Pruefungen ohne Mikrofon, Klartextausgabe
-    sprache_dienst.py --satz "..."  einen Satz durch die Kette schicken
+    sprachsteuerung_dienst.py              Dienst (Dauerbetrieb)
+    sprachsteuerung_dienst.py --selbsttest Pruefungen ohne Mikrofon, Klartextausgabe
+    sprachsteuerung_dienst.py --satz "..."  einen Satz durch die Kette schicken
 """
 
 from __future__ import annotations
@@ -62,14 +62,14 @@ PDATA = LBHOME / "data" / "plugins" / PNAME
 PLOG = LBHOME / "log" / "plugins" / PNAME
 PCONFIG = LBHOME / "config" / "plugins" / PNAME
 
-DATEI_CONFIG = PCONFIG / "sprache.json"
+DATEI_CONFIG = PCONFIG / "sprachsteuerung.json"
 DATEI_SAETZE = PCONFIG / "saetze.json"
 DATEI_LOXONE = PDATA / "loxone.json"
 DATEI_ZUSTAND = PDATA / "zustand.json"
 DATEI_VERLAUF = PDATA / "verlauf.json"
 ORDNER_BEFEHLE = PDATA / "befehle"
 ORDNER_ANTWORTEN = PDATA / "antworten"
-DATEI_LOG = PLOG / "sprache.log"
+DATEI_LOG = PLOG / "sprachsteuerung.log"
 
 sys.path.insert(0, str(SELF))
 try:
@@ -88,7 +88,7 @@ VORGABEN = {
     "wakeword": "ok_nabu",
     "antwort_sprechen": 1,
     "mqtt_ein": 1,
-    "mqtt_topic": "sprache",
+    "mqtt_topic": "sprachsteuerung",
     "miniserver_url": "",
     "aktionstoken": "",
     "wartezeit": 10,
@@ -96,7 +96,7 @@ VORGABEN = {
 }
 
 _LAUF = True
-_LOG = logging.getLogger("sprache")
+_LOG = logging.getLogger("sprachsteuerung")
 _LETZTE_MELDUNG: dict[str, float] = {}
 
 
@@ -342,7 +342,7 @@ def llm_fragen(cfg: dict, satz: str, ziele: list) -> dict:
         f"http://{cfg['llm_host']}:{int(cfg['llm_port'])}/v1/chat/completions",
         data=koerper,
         headers={"Content-Type": "application/json",
-                 "User-Agent": "LoxBerry-Sprache-Plugin/0.9",
+                 "User-Agent": "LoxBerry-Sprachsteuerung-Plugin/0.9",
                  "Accept": "application/json",
                  "Accept-Language": "de"})
     t0 = time.monotonic()
@@ -405,7 +405,7 @@ def miniserver_rufen(url: str, ersatz: dict) -> dict:
     for schluessel, wert in ersatz.items():
         voll = voll.replace("{" + schluessel + "}", str(wert if wert is not None else ""))
     anfrage = urllib.request.Request(voll, headers={
-        "User-Agent": "LoxBerry-Sprache-Plugin/0.9", "Accept": "*/*",
+        "User-Agent": "LoxBerry-Sprachsteuerung-Plugin/0.9", "Accept": "*/*",
         "Accept-Language": "de", "Accept-Encoding": "identity"})
     try:
         with urllib.request.urlopen(anfrage, timeout=8) as antwort:
@@ -488,7 +488,7 @@ def satz_verarbeiten(satz: str, cfg: dict, v) -> dict:
 
     # ---- Tat: MQTT und wahlweise der unmittelbare Aufruf ----
     if cfg.get("mqtt_ein"):
-        praefix = str(cfg.get("mqtt_topic") or "sprache").strip("/") or "sprache"
+        praefix = str(cfg.get("mqtt_topic") or "sprachsteuerung").strip("/") or "sprachsteuerung"
         paare = {
             "satz": satz.replace(" ", "_"),
             "absicht": erkannt["absicht"],

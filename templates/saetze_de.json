@@ -1,7 +1,7 @@
 {
   "_hinweis": [
     "Satzmuster und Zielgeraete. Diese Datei wird bei der Installation nach",
-    "config/plugins/sprache/saetze.json kopiert und dort vom Benutzer gepflegt -",
+    "config/plugins/sprachsteuerung/saetze.json kopiert und dort vom Benutzer gepflegt -",
     "eine Aktualisierung des Plugins ueberschreibt sie NIE.",
     "",
     "In den Mustern stehen Platzhalter in geschweiften Klammern:",

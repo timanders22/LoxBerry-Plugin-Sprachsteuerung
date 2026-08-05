@@ -284,7 +284,7 @@ def messen_llm(host: str, port: int, frage: str = "Antworte mit genau einem Wort
     anfrage = urllib.request.Request(
         f"http://{host}:{port}/v1/chat/completions", data=koerper,
         headers={"Content-Type": "application/json",
-                 "User-Agent": "LoxBerry-Sprache-Plugin/0.9",
+                 "User-Agent": "LoxBerry-Sprachsteuerung-Plugin/0.9",
                  "Accept": "application/json"})
     t0 = time.monotonic()
     try:

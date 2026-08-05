@@ -109,7 +109,7 @@ if ($sp_aktion === 'status') {
     foreach ($sp_sats as $sp_s) {
         if ($sp_s['zustand'] !== 'getrennt') { $sp_bereit++; }
     }
-    printf("SPRACHE;OK=%d;SATELLITEN=%d;BEREIT=%d;REGELN=%d;ZIELE=%d;ALTER=%d\n",
+    printf("SPRACHSTEUERUNG;OK=%d;SATELLITEN=%d;BEREIT=%d;REGELN=%d;ZIELE=%d;ALTER=%d\n",
         (int) (!empty($sp_lox['ok'])), count($sp_sats), $sp_bereit,
         (int) (isset($sp_lox['anzahl_regeln']) ? $sp_lox['anzahl_regeln'] : 0),
         (int) (isset($sp_lox['anzahl_ziele']) ? $sp_lox['anzahl_ziele'] : 0),

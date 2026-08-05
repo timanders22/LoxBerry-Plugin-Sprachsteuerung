@@ -15,8 +15,8 @@ PLOG="$LBHOMEDIR/log/plugins/$PNAME"
 PCONFIG="$LBHOMEDIR/config/plugins/$PNAME"
 PID="$PDATA/dienst.pid"
 SOLL="$PDATA/soll_laufen"
-LOGDATEI="$PLOG/sprache.log"
-SKRIPT="$SELF/sprache_dienst.py"
+LOGDATEI="$PLOG/sprachsteuerung.log"
+SKRIPT="$SELF/sprachsteuerung_dienst.py"
 PY="$SELF/venv/bin/python3"
 
 mkdir -p "$PDATA" "$PLOG" 2>/dev/null
@@ -27,7 +27,7 @@ laeuft() {
     [ -n "$P" ] || return 1
     kill -0 "$P" 2>/dev/null || return 1
     # Nummernrecycling ausschliessen: der Prozess muss unser Skript sein
-    grep -qa "sprache_dienst.py" "/proc/$P/cmdline" 2>/dev/null || return 1
+    grep -qa "sprachsteuerung_dienst.py" "/proc/$P/cmdline" 2>/dev/null || return 1
     return 0
 }
 
@@ -44,8 +44,8 @@ starten() {
         echo "FEHLER: $SKRIPT fehlt. Plugin neu installieren."
         return 1
     fi
-    if [ ! -f "$PCONFIG/sprache.json" ]; then
-        echo "FEHLER: Konfiguration fehlt ($PCONFIG/sprache.json). Erst die Oberflaeche oeffnen."
+    if [ ! -f "$PCONFIG/sprachsteuerung.json" ]; then
+        echo "FEHLER: Konfiguration fehlt ($PCONFIG/sprachsteuerung.json). Erst die Oberflaeche oeffnen."
         return 1
     fi
     touch "$SOLL"

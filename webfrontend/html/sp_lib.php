@@ -38,7 +38,7 @@ function sp_paths()
     // MD5-Schluessel aus der plugindatabase.json wird bewusst NICHT benutzt.
     $dir = basename(dirname(__FILE__));
     if ($home && !is_dir($home . '/config/plugins/' . $dir)) {
-        foreach (array(getenv('LBPPLUGINDIR'), 'sprache') as $kand) {
+        foreach (array(getenv('LBPPLUGINDIR'), 'sprachsteuerung') as $kand) {
             if ($kand && is_dir($home . '/config/plugins/' . $kand)) { $dir = $kand; break; }
         }
     }
@@ -46,14 +46,14 @@ function sp_paths()
         $p = array(
             'home' => $home, 'plugin' => $dir,
             'configdir' => $home . '/config/plugins/' . $dir,
-            'config'    => $home . '/config/plugins/' . $dir . '/sprache.json',
+            'config'    => $home . '/config/plugins/' . $dir . '/sprachsteuerung.json',
             'saetze'    => $home . '/config/plugins/' . $dir . '/saetze.json',
-            'sicherung' => $home . '/config/plugins/' . $dir . '.backup.sprache.json',
+            'sicherung' => $home . '/config/plugins/' . $dir . '.backup.sprachsteuerung.json',
             'sicherung_saetze' => $home . '/config/plugins/' . $dir . '.backup.saetze.json',
             'datadir'   => $home . '/data/plugins/' . $dir,
             'bindir'    => $home . '/bin/plugins/' . $dir,
             'logdir'    => $home . '/log/plugins/' . $dir,
-            'log'       => $home . '/log/plugins/' . $dir . '/sprache.log',
+            'log'       => $home . '/log/plugins/' . $dir . '/sprachsteuerung.log',
             'modelle'   => $home . '/templates/plugins/' . $dir . '/modelle.json',
         );
     } else {
@@ -61,21 +61,21 @@ function sp_paths()
         $p = array(
             'home' => '', 'plugin' => $dir,
             'configdir' => $basis . '/config',
-            'config'    => $basis . '/config/sprache.json',
+            'config'    => $basis . '/config/sprachsteuerung.json',
             'saetze'    => $basis . '/config/saetze.json',
-            'sicherung' => $basis . '/config/sprache.backup.json',
+            'sicherung' => $basis . '/config/sprachsteuerung.backup.json',
             'sicherung_saetze' => $basis . '/config/saetze.backup.json',
             'datadir'   => $basis . '/data',
             'bindir'    => $basis . '/bin',
             'logdir'    => $basis . '/log',
-            'log'       => $basis . '/log/sprache.log',
+            'log'       => $basis . '/log/sprachsteuerung.log',
             'modelle'   => $basis . '/templates/modelle.json',
         );
     }
     return $p;
 }
 
-/** Voreinstellungen. Muessen zu VORGABEN in bin/sprache_dienst.py passen. */
+/** Voreinstellungen. Muessen zu VORGABEN in bin/sprachsteuerung_dienst.py passen. */
 function sp_vorgaben()
 {
     return array(
@@ -89,7 +89,7 @@ function sp_vorgaben()
         'wakeword'         => 'ok_nabu',
         'antwort_sprechen' => 1,
         'mqtt_ein'         => 1,
-        'mqtt_topic'       => 'sprache',
+        'mqtt_topic'       => 'sprachsteuerung',
         'miniserver_url'   => '',
         'aktionstoken'     => '',
         'wartezeit'        => 10,
@@ -246,7 +246,7 @@ function sp_dienst_pid()
         return 0;
     }
     $cmd = (string) @file_get_contents('/proc/' . $pid . '/cmdline');
-    return strpos($cmd, 'sprache_dienst.py') !== false ? $pid : 0;
+    return strpos($cmd, 'sprachsteuerung_dienst.py') !== false ? $pid : 0;
 }
 
 function sp_dienst_soll()
@@ -542,7 +542,7 @@ function sp_dienste()
 function sp_container_name($dienst)
 {
     $dienst = preg_replace('/[^a-z]/', '', (string) $dienst);
-    return 'sprache-' . ($dienst !== '' ? $dienst : 'unbekannt');
+    return 'sprachsteuerung-' . ($dienst !== '' ? $dienst : 'unbekannt');
 }
 
 /** 'laeuft', 'gestoppt', 'fehlt' oder 'kein_docker' */
@@ -672,9 +672,9 @@ function sp_selbsttest_ausgabe()
 {
     $p = sp_paths();
     $py = $p['bindir'] . '/venv/bin/python3';
-    $skript = $p['bindir'] . '/sprache_dienst.py';
+    $skript = $p['bindir'] . '/sprachsteuerung_dienst.py';
     if (!is_file($py) || !is_file($skript)) {
-        return "[FEHL] Die virtuelle Python-Umgebung oder sprache_dienst.py fehlt.\n"
+        return "[FEHL] Die virtuelle Python-Umgebung oder sprachsteuerung_dienst.py fehlt.\n"
              . '       Erwartet: ' . $py . "\n                 " . $skript . "\n"
              . '       Abhilfe: Plugin neu installieren.';
     }
@@ -705,13 +705,13 @@ function sp_vorlage()
     $cmds = array();
     foreach (sp_status_felder() as $feld => $info) {
         $cmds[] = array(
-            'title'   => 'SPRACHE_' . $feld,
+            'title'   => 'SPRACHSTEUERUNG_' . $feld,
             'comment' => trim(strip_tags(html_entity_decode(sp_t($info[1]), ENT_QUOTES, 'UTF-8')))
                        . ($info[0] !== '' ? ' [' . $info[0] . ']' : ''),
             'check'   => '\i' . $feld . '=\i\v',
         );
     }
-    return array('sprache_status.xml', sp_xml_virtual_in_http(array(
+    return array('sprachsteuerung_status.xml', sp_xml_virtual_in_http(array(
         'title'   => 'Sprachsteuerung lokal',
         'address' => 'http://' . $host . '/plugins/' . $p['plugin']
                    . '/index.php?token=' . $token . '&aktion=status',
