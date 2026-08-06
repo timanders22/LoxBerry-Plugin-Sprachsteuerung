@@ -47,6 +47,7 @@ import socket
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -87,6 +88,15 @@ VORGABEN = {
     "sprache": "de",
     "wakeword": "ok_nabu",
     "antwort_sprechen": 1,
+    # Wohin die Antwort geht. 'satellit' ist das Verhalten bis 0.9.0: Piper
+    # spricht in den Lautsprecher des Mikrofons, das die Frage gehoert hat.
+    # 'loxone' sagt statt dessen ueber Music Server / Audioserver an,
+    # 'beide' macht beides. Vorgabe ist 'beide', damit bestehende Anlagen
+    # nichts verlieren und den Loxone-Weg nur dazubekommen, sobald eine
+    # Adresse eingetragen ist.
+    "antwortweg": "beide",
+    "tts": {"mode": "musicserver", "ip": "", "port": 7091,
+            "zones": "1", "volume": 8, "lang": "de", "template": ""},
     "mqtt_ein": 1,
     "mqtt_topic": "sprachsteuerung",
     "miniserver_url": "",
@@ -94,6 +104,10 @@ VORGABEN = {
     "wartezeit": 10,
     "verlauf_zeilen": 50,
 }
+
+ANTWORTWEGE = ("satellit", "loxone", "beide")
+TTS_MODI = ("musicserver", "ms4h", "audioserver", "custom")
+TTS_VORLAGE_MS4H = "http://{ip}:{port}/tts?text={text}&zone={zones}&vol={vol}"
 
 _LAUF = True
 _LOG = logging.getLogger("sprachsteuerung")
@@ -152,6 +166,28 @@ def config() -> dict:
             c[feld] = max(klein, min(gross, int(c.get(feld) or 0)))
         except (TypeError, ValueError):
             c[feld] = VORGABEN[feld]
+
+    weg = str(c.get("antwortweg") or "")
+    c["antwortweg"] = weg if weg in ANTWORTWEGE else "beide"
+
+    # Der TTS-Block wird auf die Vorgaben gelegt, nicht ersetzt: eine aeltere
+    # Konfiguration ohne diesen Block bekommt so vollstaendige Felder, ohne
+    # dass irgendwo ein .get() mit Ersatzwert stehen muss.
+    t = dict(VORGABEN["tts"])
+    if isinstance(c.get("tts"), dict):
+        t.update(c["tts"])
+    t["mode"] = t.get("mode") if t.get("mode") in TTS_MODI else "musicserver"
+    for feld, klein, gross in (("port", 1, 65535), ("volume", 1, 100)):
+        try:
+            t[feld] = max(klein, min(gross, int(t.get(feld) or 0)))
+        except (TypeError, ValueError):
+            t[feld] = VORGABEN["tts"][feld]
+    t["ip"] = str(t.get("ip") or "").strip()
+    t["zones"] = str(t.get("zones") or "1").strip() or "1"
+    t["template"] = str(t.get("template") or "").strip()
+    sprachkuerzel = "".join(z for z in str(t.get("lang") or "de").lower() if z.isalpha())
+    t["lang"] = sprachkuerzel[:5] or "de"
+    c["tts"] = t
     return c
 
 
@@ -423,7 +459,139 @@ def miniserver_rufen(url: str, ersatz: dict) -> dict:
         return {"ok": 0, "fehler": "Miniserver: " + str(err)}
 
 
+# ---------------------------------------------------------------------------
+# Der Rueckweg nach Loxone
+#
+# Piper spricht in den Lautsprecher des Satelliten, der die Frage gehoert hat.
+# Wer im Nebenzimmer steht, hoert nichts - und in der Visu steht nichts. Beides
+# holt dieser Abschnitt nach:
+#
+#   MQTT   <praefix>/antwort   der fertige Satz -> Virtueller Texteingang
+#          <praefix>/ok        1 verstanden, 0 nicht
+#   Audio  Ansage ueber Music Server / Audioserver
+#
+# Die Adressform ist die feldgleiche Uebertragung von awm_tts_url() aus
+# LoxBerry-Plugin-AWM-Abfuhr und abfahrt_tts_url() aus dem Abfahrtsassistenten:
+# gleiche Modi, gleiche Feldnamen, gleiche Adresse. Im Haus soll eine Bedienung
+# gelten und nicht drei. Nur die Sprache ist eine andere - dort PHP, hier
+# Python.
+# ---------------------------------------------------------------------------
+
+def loxone_tts_url(tts: dict, text: str):
+    """Adresse der Ansage bauen.
+
+    None -> Modus 'audioserver'. Der originale Loxone Audioserver kennt keinen
+            TTS-Aufruf ueber HTTP; das laeuft ueber Loxone Config
+            (Textgenerator am TTS-Eingang) und nicht ueber uns.
+    ''   -> es fehlt die Adresse des Servers.
+    """
+    modus = str(tts.get("mode") or "musicserver")
+    if modus == "audioserver":
+        return None
+    ip = str(tts.get("ip") or "").strip()
+    if ip == "":
+        return ""
+    port = int(tts.get("port") or 7091)
+    sprache = str(tts.get("lang") or "de")
+    try:
+        laut = max(1, min(100, int(tts.get("volume") or 8)))
+    except (TypeError, ValueError):
+        laut = 8
+
+    if modus == "musicserver":
+        # Zonenliste normalisieren: '2,4,6' plus Lautstaerkefeld ergibt
+        # '2~8,4~8,6~8'. Eine im Feld bereits angegebene Lautstaerke
+        # ('4~15') hat Vorrang und bleibt stehen.
+        zonen = []
+        for z in str(tts.get("zones") or "").split(","):
+            z = z.strip()
+            if z == "":
+                continue
+            zonen.append(z if "~" in z else "%s~%d" % (z, laut))
+        zonenstr = ",".join(zonen) if zonen else "1~%d" % laut
+        return "http://%s:%d/audio/grouped/tts/%s/%s" % (
+            ip, port, zonenstr,
+            urllib.parse.quote(sprache + "|" + text, safe=""))
+
+    # ms4h und custom: Vorlage mit Platzhaltern. Die Reihenfolge ist Absicht -
+    # {text} kommt zuletzt, damit ein Platzhaltername, der zufaellig im
+    # gesprochenen Satz steht, nicht selbst noch ersetzt wird.
+    vorlage = str(tts.get("template") or "").strip() or TTS_VORLAGE_MS4H
+    for platzhalter, wert in (("{ip}", ip),
+                              ("{port}", str(port)),
+                              ("{zones}", str(tts.get("zones") or "")),
+                              ("{vol}", str(laut)),
+                              ("{lang}", sprache),
+                              ("{text}", urllib.parse.quote(text, safe=""))):
+        vorlage = vorlage.replace(platzhalter, wert)
+    return vorlage
+
+
+def loxone_ansagen(cfg: dict, text: str) -> dict:
+    """Die Antwort ueber die Loxone-Audioausgabe ansagen."""
+    url = loxone_tts_url(cfg.get("tts") or {}, text)
+    if url is None:
+        melde_gebremst("tts_audioserver",
+                       "Ansage: Modus 'Originaler Loxone Audioserver' - die "
+                       "Sprachausgabe laeuft ueber Loxone Config "
+                       "(Textgenerator am TTS-Eingang), nicht ueber das Plugin.",
+                       3600)
+        return {"ok": 0, "grund": "audioserver"}
+    if url == "":
+        melde_gebremst("tts_keine_adresse",
+                       "Ansage uebersprungen: fuer die Loxone-Audioausgabe ist "
+                       "keine Adresse eingetragen.")
+        return {"ok": 0, "grund": "keine_adresse"}
+    try:
+        with urllib.request.urlopen(url, timeout=10) as antwort:
+            antwort.read(200)
+    except (urllib.error.URLError, OSError) as err:
+        melde_gebremst("tts_fehler", "Ansage fehlgeschlagen: " + fehlertext(err))
+        return {"ok": 0, "fehler": fehlertext(err)}
+    _LOG.info("Ansage gesendet: %r", text)
+    return {"ok": 1}
+
+
+def antwort_ausgeben(cfg: dict, erg: dict) -> None:
+    """Antworttext nach Loxone - als MQTT-Text und wahlweise als Ansage.
+
+    Laeuft fuer JEDEN Satz, auch fuer einen nicht verstandenen: gerade dann
+    will man in der Visu lesen koennen, woran es lag.
+    """
+    text = str(erg.get("antwort") or "").strip()
+    if text == "":
+        return
+    if cfg.get("mqtt_ein"):
+        praefix = str(cfg.get("mqtt_topic") or "sprachsteuerung").strip("/") or "sprachsteuerung"
+        # Der Text behaelt seine Leerzeichen - er soll in der Visu lesbar sein.
+        # Das Gateway nimmt alles hinter dem Thema als Nutzlast. Das Thema
+        # 'satz' weiter oben ersetzt Leerzeichen dagegen weiterhin durch
+        # Unterstriche; das bleibt so, damit bestehende Bausteine passen.
+        mqtt_senden({"antwort": text, "ok": int(erg.get("ok") or 0)}, praefix)
+    if str(cfg.get("antwortweg") or "beide") in ("loxone", "beide"):
+        loxone_ansagen(cfg, text)
+
+
 def satz_verarbeiten(satz: str, cfg: dict, v) -> dict:
+    """Satz verarbeiten und die Antwort nach Loxone geben.
+
+    Die Trennung in Huelle und Kern hat einen Grund: der Kern verlaesst sich an
+    mehreren Stellen vorzeitig - unbekanntes Ziel, Sprachmodell versagt, nichts
+    verstanden. Stuende die Ausgabe im Kern, muesste sie an jeder dieser
+    Stellen wiederholt werden, und der naechste neue Rueckgabepfad wuerde sie
+    vergessen.
+    """
+    erg = satz_kern(satz, cfg, v)
+    try:
+        antwort_ausgeben(cfg, erg)
+    except Exception as err:  # noqa: BLE001
+        # Eine misslungene Ansage darf den Befehl nicht nachtraeglich
+        # scheitern lassen: geschaltet ist zu diesem Zeitpunkt bereits.
+        melde_gebremst("antwortweg", "Antwortweg: " + fehlertext(err))
+    return erg
+
+
+def satz_kern(satz: str, cfg: dict, v) -> dict:
     """Der Kern: Satz -> Absicht -> Tat -> Antworttext.
 
     Rueckgabe enthaelt immer 'antwort' (was gesprochen werden soll) und
@@ -625,7 +793,11 @@ class Satellit:
         json_schreiben(DATEI_ZUSTAND, {"ts": int(time.time()), "pid": os.getpid(),
                                        "letzter_satz": satz, "letztes_ergebnis": erg})
 
-        if not cfg.get("antwort_sprechen") or not erg.get("antwort"):
+        # Ab 0.9.1 entscheidet zusaetzlich der Antwortweg. Bei 'loxone' bleibt
+        # der Satellit still, weil die Ansage bereits ueber den Music Server
+        # gelaufen ist - sonst hoerte man sie im selben Raum zweimal.
+        if (not cfg.get("antwort_sprechen") or not erg.get("antwort")
+                or str(cfg.get("antwortweg") or "beide") == "loxone"):
             return
         gesprochen = await sprachausgabe(cfg, erg["antwort"])
         if not gesprochen.get("ok"):
@@ -966,6 +1138,47 @@ def selbsttest() -> int:
         fehler += 1
         zeilen.append("[FEHL] Das MQTT-Gateway ist nicht auf Autostart gestellt "
                       "(System, MQTT Gateway). Ohne das kommt am Miniserver nichts an.")
+
+    # ---- Rueckweg nach Loxone ----
+    weg = str(cfg.get("antwortweg") or "beide")
+    beschreibung = {"satellit": "nur der Lautsprecher des Mikrofons",
+                    "loxone": "nur Music Server / Audioserver",
+                    "beide": "Mikrofon und Music Server / Audioserver"}
+    zeilen.append("[OK]   Antwortweg: %s (%s)" % (weg, beschreibung.get(weg, "?")))
+    if cfg.get("mqtt_ein"):
+        praefix = str(cfg.get("mqtt_topic") or "sprachsteuerung").strip("/") or "sprachsteuerung"
+        zeilen.append("[OK]   Antworttext geht nach %s/antwort, das Ergebnis nach %s/ok"
+                      % (praefix, praefix))
+    else:
+        zeilen.append("[INFO] MQTT ist abgeschaltet - der Antworttext erreicht die Visu nicht.")
+
+    if weg in ("loxone", "beide"):
+        tts = cfg.get("tts") or {}
+        probe = "Ich habe das Licht im Wohnzimmer auf 50 Prozent gestellt."
+        url = loxone_tts_url(tts, probe)
+        if url is None:
+            zeilen.append("[INFO] Ansage im Modus 'Originaler Loxone Audioserver': die "
+                          "Sprachausgabe wird in Loxone Config eingerichtet "
+                          "(Textgenerator am TTS-Eingang), nicht hier.")
+        elif url == "":
+            fehler += 1
+            zeilen.append("[FEHL] Antwortweg steht auf '%s', aber es ist keine Adresse fuer "
+                          "die Loxone-Audioausgabe eingetragen." % weg)
+        else:
+            ok, grund = dienst_erreichbar(str(tts.get("ip")), int(tts.get("port") or 7091))
+            if ok:
+                zeilen.append("[OK]   Loxone-Audioausgabe antwortet auf %s:%s"
+                              % (tts.get("ip"), tts.get("port")))
+            else:
+                fehler += 1
+                zeilen.append("[FEHL] Loxone-Audioausgabe antwortet nicht auf %s:%s (%s)."
+                              % (tts.get("ip"), tts.get("port"), grund))
+            # Die fertige Adresse mit ausgeben: im Browser aufgerufen sagt sie
+            # sofort, ob Zonen und Lautstaerke stimmen - ohne Mikrofon.
+            zeilen.append("       Probeansage: " + url)
+    else:
+        zeilen.append("[INFO] Antwortweg 'satellit': Loxone bekommt den Text, aber keine "
+                      "Ansage. Der Satz steht trotzdem im Thema /antwort.")
 
     zeilen.append("")
     zeilen.append("Nicht geprueft, weil dafuer echte Hardware noetig ist:")

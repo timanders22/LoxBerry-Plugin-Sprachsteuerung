@@ -88,6 +88,14 @@ function sp_vorgaben()
         'sprache'          => 'de',
         'wakeword'         => 'ok_nabu',
         'antwort_sprechen' => 1,
+        // Wohin die Antwort geht: satellit | loxone | beide.
+        // Feldnamen und Modi des tts-Blocks sind wortgleich mit
+        // LoxBerry-Plugin-AWM-Abfuhr und dem Abfahrtsassistenten - im Haus
+        // soll eine Bedienung gelten und nicht drei.
+        'antwortweg'       => 'beide',
+        'tts'              => array('mode' => 'musicserver', 'ip' => '', 'port' => 7091,
+                                    'zones' => '1', 'volume' => 8, 'lang' => 'de',
+                                    'template' => ''),
         'mqtt_ein'         => 1,
         'mqtt_topic'       => 'sprachsteuerung',
         'miniserver_url'   => '',
@@ -126,7 +134,31 @@ function sp_config()
         @mkdir($p['configdir'], 0775, true);
         @copy($p['sicherung'], $p['config']);
     }
-    return array_merge(sp_vorgaben(), sp_json_lesen($p['config']));
+    $cfg = array_merge(sp_vorgaben(), sp_json_lesen($p['config']));
+
+    // array_merge ersetzt einen verschachtelten Block vollstaendig. Steht in
+    // der gespeicherten Datei nur ein Teil des tts-Blocks - etwa allein die
+    // Adresse -, fehlten sonst alle uebrigen Felder. Deshalb wird er auf die
+    // Vorgaben GELEGT. Dieselbe Regel gilt im Dienst (config() in
+    // sprachsteuerung_dienst.py); beide Seiten muessen gleich rechnen.
+    $vor = sp_vorgaben();
+    $tts = is_array(isset($cfg['tts']) ? $cfg['tts'] : null)
+         ? array_merge($vor['tts'], $cfg['tts']) : $vor['tts'];
+    if (!in_array($tts['mode'], array('musicserver', 'ms4h', 'audioserver', 'custom'), true)) {
+        $tts['mode'] = 'musicserver';
+    }
+    $tts['ip'] = trim((string) $tts['ip']);
+    $tts['port'] = max(1, min(65535, (int) $tts['port']));
+    $tts['volume'] = max(1, min(100, (int) $tts['volume']));
+    $tts['zones'] = trim((string) $tts['zones']) !== '' ? trim((string) $tts['zones']) : '1';
+    $tts['lang'] = preg_replace('/[^a-z]/', '', strtolower((string) $tts['lang'])) ?: 'de';
+    $tts['template'] = trim((string) $tts['template']);
+    $cfg['tts'] = $tts;
+
+    if (!in_array($cfg['antwortweg'], array('satellit', 'loxone', 'beide'), true)) {
+        $cfg['antwortweg'] = 'beide';
+    }
+    return $cfg;
 }
 
 function sp_config_speichern($cfg)

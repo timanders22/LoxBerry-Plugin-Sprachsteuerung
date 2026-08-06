@@ -4,9 +4,31 @@ Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedene
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
 LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 
-> **Fassung 0.9.0 — ungeprüft an echter Hardware.** Gebaut ohne Mikrofon;
+> **Fassung 0.9.1 — ungeprüft an echter Hardware.** Gebaut ohne Mikrofon;
 > geprüft wurde die ganze Kette gegen Attrappen, die das **Originalpaket** des
-> Wyoming-Protokolls benutzen. Deshalb 0.9.0 und nicht 1.0.0.
+> Wyoming-Protokolls benutzen. Deshalb 0.9.1 und nicht 1.0.0.
+
+## Neu in 0.9.1: der Rückweg nach Loxone
+
+Bis 0.9.0 sprach Piper ausschließlich in den Lautsprecher des Satelliten, der
+die Frage gehört hatte. Wer im Nebenzimmer stand, hörte nichts — und in der
+Visualisierung stand auch nichts. Beides holt 0.9.1 nach:
+
+* **Als Text.** Der fertige Antwortsatz geht auf `<präfix>/antwort`, dazu
+  `<präfix>/ok` mit `1` für verstanden und `0` für nicht. Ein Virtueller
+  Texteingang zeigt damit an, was das Haus geantwortet hat.
+* **Als Ansage.** Wahlweise über **Music Server**, **Audioserver**,
+  **MS4H** oder eine **frei eingetragene Adresse** — Zone und Lautstärke
+  einstellbar.
+
+Der Schalter dafür heißt *Antwortweg* und kennt drei Stellungen: `satellit`
+(wie bisher), `loxone` (nur Ansage) und `beide`. **Vorgabe ist `beide`** —
+bestehende Anlagen verlieren damit nichts und bekommen den Loxone-Weg erst
+dazu, sobald eine Adresse eingetragen ist.
+
+Eine ältere Konfigurationsdatei ohne diesen Abschnitt wird nicht ersetzt,
+sondern auf die Vorgaben gelegt: die neuen Felder sind danach vollständig
+vorhanden, ohne dass irgendwo im Code ein Ersatzwert stehen muss.
 
 ## Der Weg eines Satzes
 

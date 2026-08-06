@@ -124,6 +124,66 @@ if ($sp_post && isset($_POST['speichern'])) {
     $sp_cfg['mqtt_ein'] = isset($_POST['mqtt_ein']) ? 1 : 0;
     $sp_cfg['antwort_sprechen'] = isset($_POST['antwort_sprechen']) ? 1 : 0;
 
+    /* ---- Rueckweg nach Loxone ---- */
+    $sp_weg = $sp_sauber('antwortweg');
+    if (!in_array($sp_weg, array('satellit', 'loxone', 'beide'), true)) {
+        $sp_fehler[] = sp_t('EINST.FEHLER_ANTWORTWEG');
+    } else {
+        $sp_cfg['antwortweg'] = $sp_weg;
+    }
+    $sp_tts = is_array(isset($sp_cfg['tts']) ? $sp_cfg['tts'] : null) ? $sp_cfg['tts'] : array();
+    $sp_modus = $sp_sauber('tts_mode');
+    if (!in_array($sp_modus, array('musicserver', 'ms4h', 'audioserver', 'custom'), true)) {
+        $sp_fehler[] = sp_t('EINST.FEHLER_TTS_MODUS');
+    } else {
+        $sp_tts['mode'] = $sp_modus;
+    }
+    // Die Adresse darf ein Name sein, nicht nur eine IP - geprueft wird die
+    // Form, nicht der Inhalt.
+    $sp_tts_ip = $sp_sauber('tts_ip');
+    if ($sp_tts_ip !== '' && !preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-:_]{0,80}$/', $sp_tts_ip)) {
+        $sp_fehler[] = sp_t('EINST.FEHLER_TTS_IP');
+    } else {
+        $sp_tts['ip'] = $sp_tts_ip;
+    }
+    $sp_tts_port = $sp_sauber('tts_port');
+    if (!preg_match('/^[0-9]+$/', $sp_tts_port) || (int) $sp_tts_port < 1 || (int) $sp_tts_port > 65535) {
+        $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_PORT'), sp_t('EINST.L_TTS_PORT'));
+    } else {
+        $sp_tts['port'] = (int) $sp_tts_port;
+    }
+    $sp_tts_laut = $sp_sauber('tts_volume');
+    if (!preg_match('/^[0-9]+$/', $sp_tts_laut) || (int) $sp_tts_laut < 1 || (int) $sp_tts_laut > 100) {
+        $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_BEREICH'), sp_t('EINST.L_TTS_VOLUME'), 1, 100);
+    } else {
+        $sp_tts['volume'] = (int) $sp_tts_laut;
+    }
+    // Zonen: Ziffern, Komma und die Tilde fuer 'Zone~Lautstaerke'.
+    $sp_tts_zonen = $sp_sauber('tts_zones');
+    if ($sp_tts_zonen !== '' && !preg_match('/^[0-9~,\s]{1,80}$/', $sp_tts_zonen)) {
+        $sp_fehler[] = sp_t('EINST.FEHLER_TTS_ZONEN');
+    } else {
+        $sp_tts['zones'] = $sp_tts_zonen !== '' ? $sp_tts_zonen : '1';
+    }
+    $sp_tts_spr = $sp_sauber('tts_lang');
+    if ($sp_tts_spr !== '' && !preg_match('/^[a-z]{2,5}$/', $sp_tts_spr)) {
+        $sp_fehler[] = sp_t('EINST.FEHLER_SPRACHE');
+    } else {
+        $sp_tts['lang'] = $sp_tts_spr !== '' ? $sp_tts_spr : 'de';
+    }
+    // Die Vorlage traegt Platzhalter in geschweiften Klammern und darf
+    // deshalb NICHT durch den Filter oben laufen.
+    $sp_tts_vorl = trim((string) (isset($_POST['tts_template']) ? $_POST['tts_template'] : ''));
+    if ($sp_tts_vorl !== '' && !preg_match('#^https?://\S{3,300}$#', $sp_tts_vorl)) {
+        $sp_fehler[] = sp_t('EINST.FEHLER_TTS_VORLAGE');
+    } else {
+        $sp_tts['template'] = $sp_tts_vorl;
+    }
+    if ($sp_weg !== 'satellit' && $sp_modus !== 'audioserver' && $sp_tts_ip === '') {
+        $sp_fehler[] = sp_t('EINST.FEHLER_TTS_FEHLT');
+    }
+    $sp_cfg['tts'] = $sp_tts;
+
     if (!$sp_fehler) {
         if (sp_config_speichern($sp_cfg)) { $sp_meldungen[] = sp_t('EINST.GESPEICHERT'); }
         else { $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_SPEICHERN'), $sp_p['config']); }
@@ -486,6 +546,53 @@ if ($sp_rahmen) {
     <?= sp_e(sp_t('EINST.L_ANTWORT')) ?>
   </label>
 </div>
+
+<h2><?= sp_e(sp_t('EINST.H_ANTWORTWEG')) ?></h2>
+<div class="sm-hinweis"><?= sp_t('EINST.H_ANTWORTWEG_TEXT') ?></div>
+<div class="sm-feld">
+  <label for="antwortweg"><?= sp_e(sp_t('EINST.L_ANTWORTWEG')) ?></label>
+  <select data-role="none" id="antwortweg" name="antwortweg">
+<?php foreach (array('satellit', 'loxone', 'beide') as $sp_w) { ?>
+    <option value="<?= $sp_w ?>"<?= $sp_cfg['antwortweg'] === $sp_w ? ' selected' : '' ?>><?= sp_e(sp_t('EINST.WEG_' . strtoupper($sp_w))) ?></option>
+<?php } ?>
+  </select>
+  <div class="sm-hilfe"><?= sp_t('EINST.H_ANTWORTWEG_FELD') ?></div>
+</div>
+<div class="sm-feld">
+  <label for="tts_mode"><?= sp_e(sp_t('EINST.L_TTS_MODE')) ?></label>
+  <select data-role="none" id="tts_mode" name="tts_mode">
+<?php foreach (array('musicserver', 'ms4h', 'audioserver', 'custom') as $sp_m) { ?>
+    <option value="<?= $sp_m ?>"<?= $sp_cfg['tts']['mode'] === $sp_m ? ' selected' : '' ?>><?= sp_e(sp_t('EINST.TTS_' . strtoupper($sp_m))) ?></option>
+<?php } ?>
+  </select>
+  <div class="sm-hilfe"><?= sp_t('EINST.H_TTS_MODE') ?></div>
+</div>
+<div class="sm-feld">
+  <label for="tts_ip"><?= sp_e(sp_t('EINST.L_TTS_IP')) ?></label>
+  <input data-role="none" type="text" id="tts_ip" name="tts_ip" value="<?= sp_e($sp_cfg['tts']['ip']) ?>" placeholder="192.168.1.20">
+</div>
+<div class="sm-feld">
+  <label for="tts_port"><?= sp_e(sp_t('EINST.L_TTS_PORT')) ?></label>
+  <input data-role="none" type="number" id="tts_port" name="tts_port" value="<?= (int) $sp_cfg['tts']['port'] ?>" min="1" max="65535">
+</div>
+<div class="sm-feld">
+  <label for="tts_zones"><?= sp_e(sp_t('EINST.L_TTS_ZONES')) ?></label>
+  <input data-role="none" type="text" id="tts_zones" name="tts_zones" value="<?= sp_e($sp_cfg['tts']['zones']) ?>" placeholder="2,4">
+  <div class="sm-hilfe"><?= sp_t('EINST.H_TTS_ZONES') ?></div>
+</div>
+<div class="sm-feld">
+  <label for="tts_volume"><?= sp_e(sp_t('EINST.L_TTS_VOLUME')) ?></label>
+  <input data-role="none" type="number" id="tts_volume" name="tts_volume" value="<?= (int) $sp_cfg['tts']['volume'] ?>" min="1" max="100">
+</div>
+<div class="sm-feld">
+  <label for="tts_lang"><?= sp_e(sp_t('EINST.L_TTS_LANG')) ?></label>
+  <input data-role="none" type="text" id="tts_lang" name="tts_lang" value="<?= sp_e($sp_cfg['tts']['lang']) ?>" maxlength="5">
+</div>
+<div class="sm-feld">
+  <label for="tts_template"><?= sp_e(sp_t('EINST.L_TTS_TEMPLATE')) ?></label>
+  <input data-role="none" type="text" id="tts_template" name="tts_template" value="<?= sp_e($sp_cfg['tts']['template']) ?>" placeholder="http://{ip}:{port}/tts?text={text}&amp;zone={zones}&amp;vol={vol}">
+  <div class="sm-hilfe"><?= sp_t('EINST.H_TTS_TEMPLATE') ?></div>
+</div>
 <div class="sm-feld">
   <label for="sprache"><?= sp_e(sp_t('EINST.L_SPRACHE')) ?></label>
   <input data-role="none" type="text" id="sprache" name="sprache" value="<?= sp_e($sp_cfg['sprache']) ?>" maxlength="2">
@@ -750,6 +857,8 @@ for ($sp_i = 0; $sp_i < 8; $sp_i++) {
 <tr><td><span class="sm-mono"><?= sp_e($sp_cfg['mqtt_topic']) ?>/wert</span></td><td><?= sp_t('MQTT.B_WERT') ?></td></tr>
 <tr><td><span class="sm-mono"><?= sp_e($sp_cfg['mqtt_topic']) ?>/quelle</span></td><td><?= sp_t('MQTT.B_QUELLE') ?></td></tr>
 <tr><td><span class="sm-mono"><?= sp_e($sp_cfg['mqtt_topic']) ?>/&lt;Thema&gt;/aktion</span></td><td><?= sp_t('MQTT.B_ZIELTHEMA') ?></td></tr>
+<tr><td><span class="sm-mono"><?= sp_e($sp_cfg['mqtt_topic']) ?>/antwort</span></td><td><?= sp_t('MQTT.B_ANTWORT') ?></td></tr>
+<tr><td><span class="sm-mono"><?= sp_e($sp_cfg['mqtt_topic']) ?>/ok</span></td><td><?= sp_t('MQTT.B_OK') ?></td></tr>
 </table>
 <?= sp_t('LOX.S2_EMPFEHLUNG') ?>
 </div>
