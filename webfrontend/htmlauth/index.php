@@ -36,10 +36,18 @@ if ($sp_p['home'] !== '' && is_file($sp_p['home'] . '/libs/phplib/loxberry_syste
     require_once $sp_p['home'] . '/libs/phplib/loxberry_web.php';
 }
 
-/* Positivliste: jeder Reiter MUSS hier stehen, sonst springt die Seite nach
- * jedem Absenden zurueck auf Einstellungen. */
-$sp_muster = '/^tab-(settings|services|mics|sentences|loxone|test|log)$/';
-$sp_tab = 'tab-settings';
+/* EINE Quelle fuer Reihenfolge, Positivliste und Beschriftung.
+ *
+ * Bis 0.9.1 standen die Reiternamen an drei Stellen: in dieser Positivliste,
+ * in der Reiterleiste und in den sieben Flaechen-ids. Wer einen Reiter
+ * ergaenzt und eine davon vergisst, bekommt keinen Fehler, sondern eine
+ * Seite, die nach jedem Absenden auf Einstellungen zurueckspringt.
+ *
+ * Die Beschriftungen brauchen sp_t() und kommen weiter unten dazu, wenn die
+ * Sprachdatei geladen ist. */
+$sp_reiter_ids = array('settings', 'services', 'mics', 'sentences', 'loxone', 'test', 'log');
+$sp_muster = '/^tab-(' . implode('|', $sp_reiter_ids) . ')$/';
+$sp_tab = 'tab-' . $sp_reiter_ids[0];
 if (isset($_POST['activetab']) && preg_match($sp_muster, (string) $_POST['activetab'])) {
     $sp_tab = (string) $_POST['activetab'];
 } elseif (isset($_GET['form']) && preg_match($sp_muster, 'tab-' . (string) $_GET['form'])) {
@@ -51,11 +59,33 @@ $sp_fehler = array();
 $sp_ausgabe = '';
 $sp_post = (isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') === 'POST';
 
+/*
+ * Fuer Felder, die KEIN Freitext sind: Rechnernamen, Anschlussnummern,
+ * Kennungen, Auswahlwerte. Dort haben Anfuehrungszeichen nichts zu suchen,
+ * und sie zu entfernen ist richtig.
+ *
+ * Zu einer Beanstandung, das treffe auch Freitextfelder: es geht durch
+ * diese Funktion kein Freitext. Geprueft wurde jedes Feld - sprache,
+ * wakeword, mqtt_topic, antwortweg, tts_mode, tts_ip, tts_port,
+ * tts_volume, tts_zones, tts_lang, die Modellnamen sowie Rechner und
+ * Anschluss der Dienste. Die TTS-Vorlage laeuft ausdruecklich NICHT
+ * hierdurch (siehe weiter unten). Das einzige echte Freitextfeld ist die
+ * Bezeichnung eines Mikrofons - die wird unten eigens behandelt.
+ */
 $sp_sauber = function ($feld) {
-    // Nur Steuerzeichen, Anfuehrungszeichen und Leerraum entfernen - ein hartes
-    // Filtern auf eine Positivliste zerstoert gueltige Eingaben.
     return trim(preg_replace('/[\x00-\x1F\x7F"\']/', '',
         (string) (isset($_POST[$feld]) ? $_POST[$feld] : '')));
+};
+
+/*
+ * Fuer Freitext: nur Steuerzeichen weg, Anfuehrungszeichen bleiben.
+ * Eine Bezeichnung wie  Kueche "oben"  soll so stehen bleiben duerfen. Der
+ * Wert landet in JSON und im Protokoll, nie in einer Shell; ausgegeben wird
+ * er ueber sp_e().
+ */
+$sp_freitext = function ($wert) {
+    return trim(preg_replace('/\s+/u', ' ',
+        preg_replace('/[\x00-\x1F\x7F]/u', ' ', (string) $wert)));
 };
 
 /* ---------------- Vorlage herunterladen ---------------- */
@@ -115,7 +145,7 @@ if ($sp_post && isset($_POST['speichern'])) {
     // Die Miniserver-Adresse kann Zugangsdaten enthalten - deshalb NICHT
     // filtern, nur auf die Form pruefen.
     $sp_url = trim((string) (isset($_POST['miniserver_url']) ? $_POST['miniserver_url'] : ''));
-    if ($sp_url !== '' && !preg_match('#^https?://\S{3,300}$#', $sp_url)) {
+    if ($sp_url !== '' && !sp_url_ok($sp_url)) {
         $sp_fehler[] = sp_t('EINST.FEHLER_URL');
     } else {
         $sp_cfg['miniserver_url'] = $sp_url;
@@ -174,7 +204,7 @@ if ($sp_post && isset($_POST['speichern'])) {
     // Die Vorlage traegt Platzhalter in geschweiften Klammern und darf
     // deshalb NICHT durch den Filter oben laufen.
     $sp_tts_vorl = trim((string) (isset($_POST['tts_template']) ? $_POST['tts_template'] : ''));
-    if ($sp_tts_vorl !== '' && !preg_match('#^https?://\S{3,300}$#', $sp_tts_vorl)) {
+    if ($sp_tts_vorl !== '' && !sp_url_ok($sp_tts_vorl)) {
         $sp_fehler[] = sp_t('EINST.FEHLER_TTS_VORLAGE');
     } else {
         $sp_tts['template'] = $sp_tts_vorl;
@@ -221,7 +251,9 @@ if ($sp_post && isset($_POST['mikros_speichern'])) {
             return isset($a[$i]) ? trim(preg_replace('/[\x00-\x1F\x7F"\']/', '', (string) $a[$i])) : '';
         };
         $host = $hol('m_host');
-        $name = $hol('m_name');
+        // Die Bezeichnung ist Freitext - Anfuehrungszeichen bleiben stehen.
+        $a_name = isset($_POST['m_name']) ? (array) $_POST['m_name'] : array();
+        $name = $sp_freitext(isset($a_name[$i]) ? $a_name[$i] : '');
         if ($host === '' && $name === '') { continue; }
         $art = $hol('m_art') === 'esphome' ? 'esphome' : 'wyoming';
         if ($host === '') {
@@ -282,6 +314,12 @@ if ($sp_post && isset($_POST['saetze_speichern'])) {
             }
         }
         if (!$sp_fehler) {
+            /* Erst jetzt reinigen, nicht vorher: die Pruefungen oben sollen
+             * das sehen, was eingegeben wurde. Steuerzeichen in einem Alias
+             * oder Thema landeten bis 0.9.1 unbesehen in der saetze.json -
+             * und von dort in ein MQTT-Thema oder in einen Text, der
+             * vorgelesen wird. */
+            $sp_d = sp_steuerzeichen_weg($sp_d);
             if (sp_saetze_speichern($sp_d)) { $sp_meldungen[] = sp_t('SATZ.GESPEICHERT'); }
             else { $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_SPEICHERN'), $sp_p['saetze']); }
         }
@@ -369,11 +407,7 @@ $sp_host = isset($_SERVER['HTTP_HOST']) && $_SERVER['HTTP_HOST'] !== ''
     ? preg_replace('/[^A-Za-z0-9\.\-:]/', '', (string) $_SERVER['HTTP_HOST'])
     : (gethostname() ?: 'loxberry');
 $sp_basis = 'http://' . $sp_host . '/plugins/' . $sp_p['plugin'] . '/index.php';
-$sp_logzeilen = array();
-if (is_file($sp_p['log'])) {
-    $sp_logzeilen = array_slice(array_reverse(
-        file($sp_p['log'], FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: array()), 0, 400);
-}
+$sp_logzeilen = is_file($sp_p['log']) ? sp_log_ende($sp_p['log'], 400) : array();
 
 $sp_rahmen = class_exists('LBWeb', false);
 if ($sp_rahmen) {
@@ -487,18 +521,22 @@ if ($sp_rahmen) {
 </div>
 <?php } ?>
 
+<?php
+$sp_beschriftung = array(
+    'settings'  => 'REITER.EINSTELLUNGEN', 'services' => 'REITER.DIENSTE',
+    'mics'      => 'REITER.MIKROFONE',     'sentences' => 'REITER.SAETZE',
+    'loxone'    => 'REITER.LOXONE',        'test'      => 'REITER.TEST',
+    'log'       => 'REITER.LOG',
+);
+?>
 <div class="sm-tabs">
-	<a class="sm-tab" data-ziel="tab-settings"  href="index.php?form=settings"><?= sp_e(sp_t('REITER.EINSTELLUNGEN')) ?></a>
-	<a class="sm-tab" data-ziel="tab-services"  href="index.php?form=services"><?= sp_e(sp_t('REITER.DIENSTE')) ?></a>
-	<a class="sm-tab" data-ziel="tab-mics"      href="index.php?form=mics"><?= sp_e(sp_t('REITER.MIKROFONE')) ?></a>
-	<a class="sm-tab" data-ziel="tab-sentences" href="index.php?form=sentences"><?= sp_e(sp_t('REITER.SAETZE')) ?></a>
-	<a class="sm-tab" data-ziel="tab-loxone"    href="index.php?form=loxone"><?= sp_e(sp_t('REITER.LOXONE')) ?></a>
-	<a class="sm-tab" data-ziel="tab-test"      href="index.php?form=test"><?= sp_e(sp_t('REITER.TEST')) ?></a>
-	<a class="sm-tab" data-ziel="tab-log"       href="index.php?form=log"><?= sp_e(sp_t('REITER.LOG')) ?></a>
+<?php foreach ($sp_reiter_ids as $sp_r) { ?>
+	<a class="sm-tab<?= $sp_tab === 'tab-' . $sp_r ? ' sm-active' : '' ?>" data-ziel="tab-<?= $sp_r ?>" href="index.php?form=<?= $sp_r ?>"><?= sp_e(isset($sp_beschriftung[$sp_r]) ? sp_t($sp_beschriftung[$sp_r]) : $sp_r) ?></a>
+<?php } ?>
 </div>
 
 <!-- ================= Reiter: Einstellungen ================= -->
-<div class="sm-seite" id="tab-settings">
+<div class="sm-seite<?= $sp_tab === 'tab-settings' ? ' sm-active' : '' ?>" id="tab-settings">
 <div class="sm-warnung"><?= sp_t('EINST.WAS_IST_DAS') ?></div>
 
 <h2><?= sp_e(sp_t('EINST.H_DIENST')) ?></h2>
@@ -635,7 +673,7 @@ if ($sp_rahmen) {
 </div>
 
 <!-- ================= Reiter: Dienste ================= -->
-<div class="sm-seite" id="tab-services">
+<div class="sm-seite<?= $sp_tab === 'tab-services' ? ' sm-active' : '' ?>" id="tab-services">
 <h2><?= sp_e(sp_t('DIENST.H_HARDWARE')) ?></h2>
 <?php if (!$sp_hw) { ?>
 <div class="sm-warnung"><?= sp_t('DIENST.KEINE_HARDWARE') ?></div>
@@ -742,7 +780,7 @@ if ($sp_rahmen) {
 </div>
 
 <!-- ================= Reiter: Mikrofone ================= -->
-<div class="sm-seite" id="tab-mics">
+<div class="sm-seite<?= $sp_tab === 'tab-mics' ? ' sm-active' : '' ?>" id="tab-mics">
 <h2><?= sp_e(sp_t('MIKRO.H_TITEL')) ?></h2>
 <div class="sm-hinweis"><?= sp_t('MIKRO.ERKLAERUNG') ?></div>
 <form action="index.php" method="post" autocomplete="off">
@@ -794,7 +832,7 @@ for ($sp_i = 0; $sp_i < 8; $sp_i++) {
 </div>
 
 <!-- ================= Reiter: Saetze ================= -->
-<div class="sm-seite" id="tab-sentences">
+<div class="sm-seite<?= $sp_tab === 'tab-sentences' ? ' sm-active' : '' ?>" id="tab-sentences">
 <h2><?= sp_e(sp_t('SATZ.H_TITEL')) ?></h2>
 <div class="sm-hinweis"><?= sp_t('SATZ.ERKLAERUNG') ?></div>
 <table class="sm-tbl">
@@ -837,7 +875,7 @@ for ($sp_i = 0; $sp_i < 8; $sp_i++) {
 </div>
 
 <!-- ================= Reiter: Einbindung in Loxone ================= -->
-<div class="sm-seite" id="tab-loxone">
+<div class="sm-seite<?= $sp_tab === 'tab-loxone' ? ' sm-active' : '' ?>" id="tab-loxone">
 <h2><?= sp_e(sp_t('LOX.H_TITEL')) ?></h2>
 <p><?= sp_t('LOX.EINLEITUNG') ?></p>
 
@@ -970,7 +1008,7 @@ function sp_bausteine()
 </div>
 
 <!-- ================= Reiter: Test ================= -->
-<div class="sm-seite" id="tab-test">
+<div class="sm-seite<?= $sp_tab === 'tab-test' ? ' sm-active' : '' ?>" id="tab-test">
 <h2><?= sp_e(sp_t('TEST.H_SELBSTPRUEFUNG')) ?></h2>
 <p class="sm-hilfe"><?= sp_t('TEST.EINLEITUNG') ?></p>
 <table class="sm-tbl">
@@ -1050,7 +1088,7 @@ function sp_bausteine()
 </div>
 
 <!-- ================= Reiter: Logdateien ================= -->
-<div class="sm-seite" id="tab-log">
+<div class="sm-seite<?= $sp_tab === 'tab-log' ? ' sm-active' : '' ?>" id="tab-log">
 <h2><?= sp_e(sp_t('LOG.H_TITEL')) ?></h2>
 <?php
 if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {

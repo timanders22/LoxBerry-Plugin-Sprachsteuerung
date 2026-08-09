@@ -1,19 +1,69 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- Sprachsteuerung lokal - Plugin-Symbol.
-     Hausstandard: runde Scheibe in LoxBerry-Gruen #6dac20. Motiv: ein
-     Mikrofon, dessen Schallwellen im Kreis bleiben - alles bleibt im Haus,
-     nichts geht in eine Cloud. Bewusst KEINE fremden Wortmarken oder Logos,
-     auch nicht angedeutet. -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
-  <circle cx="256" cy="256" r="256" fill="#6dac20"/>
-  <g stroke="#3d6412" stroke-width="16" stroke-linecap="round" fill="none">
-    <path d="M138 214 A 130 130 0 0 0 138 298"/>
-    <path d="M374 214 A 130 130 0 0 1 374 298"/>
-    <path d="M96 186 A 176 176 0 0 0 96 326"/>
-    <path d="M416 186 A 176 176 0 0 1 416 326"/>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="512" height="512" viewBox="0 0 512 512" version="1.1" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="bg-grad" cx="50%" cy="50%" r="50%" fx="35%" fy="35%">
+      <stop offset="0%" stop-color="#7dc424" />
+      <stop offset="65%" stop-color="#6dac20" />
+      <stop offset="100%" stop-color="#568819" />
+    </radialGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000000" flood-opacity="0.25"/>
+    </filter>
+  </defs>
+
+  <!-- Outer Badge Ring -->
+  <circle cx="256" cy="256" r="246" fill="url(#bg-grad)" />
+  <circle cx="256" cy="256" r="232" fill="none" stroke="#ffffff" stroke-opacity="0.35" stroke-width="3" />
+
+  <g filter="url(#shadow)" fill="#ffffff">
+    <!-- Main Center Icon: Microphone & Waves shifted DOWN (Base near dashed line at Y=280) -->
+    
+    <!-- Central Microphone Capsule (Y=125) -->
+    <rect x="232" y="125" width="48" height="98" rx="24" fill="#ffffff" />
+    <!-- Inner Slots -->
+    <line x1="244" y1="155" x2="268" y2="155" stroke="#6dac20" stroke-width="4" stroke-linecap="round" />
+    <line x1="244" y1="169" x2="268" y2="169" stroke="#6dac20" stroke-width="4" stroke-linecap="round" />
+    <line x1="244" y1="183" x2="268" y2="183" stroke="#6dac20" stroke-width="4" stroke-linecap="round" />
+
+    <!-- Microphone Holder Arc -->
+    <path d="M 208 185 A 48 48 0 0 0 304 185" fill="none" stroke="#ffffff" stroke-width="9" stroke-linecap="round" />
+    <!-- Stand Stem & Base -->
+    <line x1="256" y1="233" x2="256" y2="280" stroke="#ffffff" stroke-width="9" stroke-linecap="round" />
+    <line x1="225" y1="280" x2="287" y2="280" stroke="#ffffff" stroke-width="9" stroke-linecap="round" />
+
+    <!-- Soundwaves (Shifted down together with Mic) -->
+    <!-- Inner Waves -->
+    <path d="M 188 153 A 52 52 0 0 0 188 213" fill="none" stroke="#ffffff" stroke-width="7" stroke-linecap="round" />
+    <path d="M 324 153 A 52 52 0 0 1 324 213" fill="none" stroke="#ffffff" stroke-width="7" stroke-linecap="round" />
+    <!-- Middle Waves -->
+    <path d="M 168 137 A 76 76 0 0 0 168 229" fill="none" stroke="#ffffff" stroke-width="7" stroke-linecap="round" opacity="0.8" />
+    <path d="M 344 137 A 76 76 0 0 1 344 229" fill="none" stroke="#ffffff" stroke-width="7" stroke-linecap="round" opacity="0.8" />
+    <!-- Outer Waves -->
+    <path d="M 148 121 A 100 100 0 0 0 148 245" fill="none" stroke="#ffffff" stroke-width="7" stroke-linecap="round" opacity="0.5" />
+    <path d="M 364 121 A 100 100 0 0 1 364 245" fill="none" stroke="#ffffff" stroke-width="7" stroke-linecap="round" opacity="0.5" />
+
+    <!-- Flanking Left Symbol: Speech Bubble (SHIFTED UP to Y=145) -->
+    <g transform="translate(102, 145)">
+      <circle cx="0" cy="0" r="22" fill="#ffffff" />
+      <path d="M -9 -6 C -9 -11 -3 -12 0 -12 C 3 -12 9 -11 9 -6 C 9 0 4 2 4 6 L -4 6 C -4 2 -9 0 -9 -6 Z" fill="#6dac20" />
+      <polygon points="-4,6 4,6 -7,12" fill="#6dac20" />
+      <circle cx="-3" cy="-3" r="1.5" fill="#ffffff" />
+      <circle cx="0" cy="-3" r="1.5" fill="#ffffff" />
+      <circle cx="3" cy="-3" r="1.5" fill="#ffffff" />
+    </g>
+
+    <!-- Flanking Right Symbol: Smart Home (SHIFTED UP to Y=145) -->
+    <g transform="translate(410, 145)">
+      <circle cx="0" cy="0" r="22" fill="#ffffff" />
+      <path d="M -9 2 L 0 -7 L 9 2 L 9 9 C 9 10.5 7.5 11 6 11 L -6 11 C -7.5 11 -9 10.5 -9 9 Z" fill="#6dac20" />
+      <rect x="-3" y="4" width="6" height="7" fill="#ffffff" />
+    </g>
+
+    <!-- Dashed Line -->
+    <path d="M 150 345 L 362 345" stroke="#ffffff" stroke-width="4" stroke-dasharray="6 8" opacity="0.8" />
   </g>
-  <rect x="212" y="104" width="88" height="164" rx="44" fill="#ffffff" stroke="#3d6412" stroke-width="12"/>
-  <path d="M176 240 A 80 80 0 0 0 336 240" fill="none" stroke="#ffffff" stroke-width="22" stroke-linecap="round"/>
-  <path d="M256 320 L256 372" stroke="#ffffff" stroke-width="22" stroke-linecap="round"/>
-  <path d="M198 400 L314 400" stroke="#ffffff" stroke-width="22" stroke-linecap="round"/>
+
+  <!-- Typography -->
+  <text x="256" y="388" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-weight="900" font-size="29" letter-spacing="0.5">Sprachsteuerung</text>
+  <text x="256" y="424" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-weight="bold" font-size="20" letter-spacing="3">LOXBERRY</text>
 </svg>

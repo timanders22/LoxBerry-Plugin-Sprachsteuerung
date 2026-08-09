@@ -61,7 +61,10 @@ if (!in_array($sp_aktion, array_merge($sp_lesend, $sp_schaltend), true)) {
  * darf, weiss hier niemand besser als der Sprecher. */
 $sp_text = isset($_GET['text']) ? (string) $_GET['text'] : '';
 $sp_text = trim(preg_replace('/[\x00-\x1F\x7F]/u', ' ', $sp_text));
-if (strlen($sp_text) > 400) {
+/* Gezaehlt werden ZEICHEN, nicht Bytes. strlen() zaehlt Bytes, und ein
+ * Umlaut belegt in UTF-8 zwei davon. Nachgemessen: 201 Umlaute sind 201
+ * Zeichen, aber 402 Bytes - und wurden bis 0.9.1 abgewiesen. */
+if (sp_zeichen($sp_text) > 400) {
     http_response_code(400);
     echo "FEHLER;OK=0;GRUND=TEXT_ZU_LANG\n";
     echo "Mehr als 400 Zeichen nimmt der Endpunkt nicht an.\n";

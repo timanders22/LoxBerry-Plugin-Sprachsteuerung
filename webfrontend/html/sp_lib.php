@@ -37,10 +37,22 @@ function sp_paths()
     // Der Pluginordner ergibt sich aus dem Ablageort dieser Datei. Der
     // MD5-Schluessel aus der plugindatabase.json wird bewusst NICHT benutzt.
     $dir = basename(dirname(__FILE__));
-    if ($home && !is_dir($home . '/config/plugins/' . $dir)) {
-        foreach (array(getenv('LBPPLUGINDIR'), 'sprachsteuerung') as $kand) {
-            if ($kand && is_dir($home . '/config/plugins/' . $kand)) { $dir = $kand; break; }
-        }
+    /* Frueher wurde hier auf den festen Namen "sprachsteuerung" zurueckgefallen,
+     * sobald config/plugins/<ordner> noch fehlte - etwa im Augenblick der
+     * Installation. Haengt LoxBerry bei einer Zweitinstallation einen Zaehler
+     * an (sprachsteuerung_01, weil der Name schon belegt war), zeigten deren
+     * Pfade damit auf die ERSTE Installation: gemeinsame Konfiguration,
+     * gemeinsame Warteschlange, gemeinsames Protokoll.
+     *
+     * LBPPLUGINDIR ist die Auskunft von LoxBerry selbst und bleibt deshalb.
+     * Der feste Name greift nur noch dort, wo der ermittelte nachweislich kein
+     * Plugin-Ordner sein kann: aus dem ausgepackten Archiv heraus heisst er
+     * "html". */
+    $lbp = getenv('LBPPLUGINDIR');
+    if ($lbp) {
+        $dir = $lbp;
+    } elseif ($dir === '' || $dir === '.' || $dir === '/' || $dir === 'html') {
+        $dir = 'sprachsteuerung';
     }
     if ($home) {
         $p = array(
@@ -245,9 +257,11 @@ function sp_log($text)
     if (!is_dir($p['logdir'])) {
         @mkdir($p['logdir'], 0775, true);
     }
+    clearstatcache(true, $p['log']);
     if (is_file($p['log']) && filesize($p['log']) > 512000) {
-        // Rotation: die letzten 400 Zeilen behalten
-        $rest = array_slice(file($p['log'], FILE_IGNORE_NEW_LINES) ?: array(), -400);
+        // Rotation: die letzten 400 Zeilen behalten. sp_log_ende liefert sie
+        // neueste zuerst - zum Zurueckschreiben wieder umdrehen.
+        $rest = array_reverse(sp_log_ende($p['log'], 400));
         @file_put_contents($p['log'], implode("\n", $rest) . "\n");
     }
     @file_put_contents($p['log'], '[' . date('Y-m-d H:i:s') . '] ' . $text . "\n", FILE_APPEND);
@@ -266,6 +280,120 @@ function sp_log_gebremst($schluessel, $text, $sekunden = 3600)
 }
 
 /* ---------------- Dienst ---------------- */
+
+/**
+ * Ist das eine brauchbare http-Adresse? Platzhalter in geschweiften
+ * Klammern sind ausdruecklich erlaubt.
+ *
+ * WARUM NICHT filter_var(FILTER_VALIDATE_URL), wie oft empfohlen: beide
+ * Felder dieses Plugins arbeiten mit Platzhaltern. Die Miniserver-Adresse
+ * kennt {ziel}, {aktion}, {wert}; die TTS-Vorlage {ip}, {port}, {text},
+ * {zones}, {vol} - der Platzhaltertext im Eingabefeld lautet woertlich
+ *     http://{ip}:{port}/tts?text={text}&zone={zones}&vol={vol}
+ * Nachgemessen in PHP 7.4 und 8.1:
+ *
+ *   Eingabe                                        bisher      filter_var
+ *   http://192.168.1.10:7091/tts?text={text}       angenommen  angenommen
+ *   http://{ip}:{port}/tts?text={text}             angenommen  ABGEWIESEN
+ *   http://192.168.1.10/x<01>y (Steuerzeichen)     angenommen  ABGEWIESEN
+ *   http://a                                       ABGEWIESEN  angenommen
+ *
+ * filter_var wuerde also genau die Vorlage abweisen, die die Oberflaeche
+ * selbst vorschlaegt. Berechtigt ist der andere Teil des Einwands: \S
+ * schliesst nur Leerraum aus, Steuerzeichen kommen durch. Die werden jetzt
+ * ausdruecklich abgewiesen - und die Mindestlaenge bleibt, weil "http://a"
+ * keine Adresse ist, die jemand gemeint haben kann.
+ */
+function sp_url_ok($url)
+{
+    $url = (string) $url;
+    if (preg_match('/[\x00-\x1F\x7F]/', $url)) {
+        return false;   // Steuerzeichen - auch die, die \S durchlaesst
+    }
+    return (bool) preg_match('#^https?://[^\s\x00-\x1F\x7F]{3,300}$#', $url);
+}
+
+/**
+ * Steuerzeichen aus einer beliebig tiefen Struktur entfernen.
+ *
+ * Die Satzdatei wird als JSON eingegeben und ohne Ansehen der einzelnen
+ * Werte gespeichert. Ein Steuerzeichen in einem Alias oder Thema landet
+ * damit unbesehen in der saetze.json - und von dort in ein MQTT-Thema oder
+ * in eine Antwort, die vorgelesen wird. Schluessel werden mitgereinigt:
+ * sie werden zu MQTT-Themen.
+ */
+function sp_steuerzeichen_weg($wert)
+{
+    if (is_array($wert)) {
+        $neu = array();
+        foreach ($wert as $k => $v) {
+            $k = is_string($k) ? preg_replace('/[\x00-\x1F\x7F]/u', '', $k) : $k;
+            $neu[$k] = sp_steuerzeichen_weg($v);
+        }
+        return $neu;
+    }
+    if (is_string($wert)) {
+        // Zeilenumbrueche werden zu Leerzeichen, nicht geloescht: ein
+        // mehrzeiliger Antworttext soll lesbar bleiben, nicht zusammenkleben.
+        return trim(preg_replace('/\s+/u', ' ',
+            preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/u', '', $wert)));
+    }
+    return $wert;
+}
+
+/**
+ * Die letzten $anzahl Zeilen einer Datei, neueste zuerst.
+ *
+ * Bis 0.9.1 las die Oberflaeche das ganze Protokoll mit file() ein und warf
+ * fast alles wieder weg; dasselbe tat sp_log() beim Kuerzen. Nachgemessen an
+ * einer Datei an der Rotationsgrenze, PHP 7.4 und 8.1:
+ *
+ *   file() + array_reverse   0,3 ms   Spitze rund 1,4 MB
+ *   exec("tail -n 400")      1,9 ms   Spitze rund  75 kB
+ *   rueckwaerts mit fseek    0,05 ms  Spitze rund 125 kB
+ *
+ * Der Hinweis auf den Speicher war berechtigt, der vorgeschlagene Weg ueber
+ * tail aber der langsamste: ein Prozessstart kostet mehr, als das Einlesen
+ * je gespart hat. Und er braucht eine Shell, die man wieder absichern muss.
+ */
+function sp_log_ende($datei, $anzahl = 400, $block = 8192)
+{
+    $fp = @fopen($datei, 'rb');
+    if ($fp === false) {
+        return array();
+    }
+    fseek($fp, 0, SEEK_END);
+    $pos = ftell($fp);
+    $puffer = '';
+    $zeilen = array();
+    while ($pos > 0 && count($zeilen) <= $anzahl) {
+        $lese = (int) min($block, $pos);
+        $pos -= $lese;
+        fseek($fp, $pos, SEEK_SET);
+        $puffer = fread($fp, $lese) . $puffer;
+        $zeilen = explode("\n", $puffer);
+    }
+    fclose($fp);
+    $zeilen = array_values(array_filter(array_map('rtrim', $zeilen), 'strlen'));
+    return array_slice(array_reverse($zeilen), 0, $anzahl);
+}
+
+/**
+ * Laenge in ZEICHEN, nicht in Bytes.
+ *
+ * Bewusst ohne mb_strlen: mbstring ist eine eigene Erweiterung, dieses
+ * Plugin bringt keine dpkg/apt-Liste mit und benutzt mbstring sonst
+ * nirgends. Ein "Call to undefined function" waere hier ein toter Endpunkt -
+ * Loxone bekaeme auf jeden Satz eine leere Antwort. PCRE mit /u kann das
+ * ohne zusaetzliches Paket.
+ */
+function sp_zeichen($s)
+{
+    $n = preg_match_all('/./us', (string) $s);
+    // Bei ungueltigem UTF-8 liefert preg_match_all false - dann lieber die
+    // Bytezahl nehmen als gar nichts.
+    return $n === false ? strlen((string) $s) : $n;
+}
 
 function sp_dienst_pid()
 {
@@ -312,6 +440,9 @@ function sp_dienst($befehl)
  * 2 eingereiht, aber ohne Antwort in der Wartezeit - Ergebnis unbekannt.
  * Es wird nie ein Erfolg gemeldet, den niemand geprueft hat.
  */
+/** Obergrenze fuer eine Wartezeit, die aus einer Web-Anfrage kommt. */
+define('SP_WARTEN_WEB', 12);
+
 function sp_befehl_absetzen($befehl, $wartezeit = null)
 {
     $p = sp_paths();
@@ -319,7 +450,27 @@ function sp_befehl_absetzen($befehl, $wartezeit = null)
     if ($wartezeit === null) {
         $wartezeit = (int) $cfg['wartezeit'];
     }
-    $wartezeit = max(0, min(20, (int) $wartezeit));
+    /* Bis 0.9.1 war hier bei 20 s gedeckelt. Der Reiter Test uebergab 30 bzw.
+     * 60 - beides wurde also ohnehin auf 20 gestutzt, die Zahlen im Aufruf
+     * waren irrefuehrend. 20 Sekunden sind aber immer noch zu lang: ein
+     * Webserver bricht die Anfrage typischerweise nach 15 bis 30 Sekunden mit
+     * 504 ab, und der Miniserver wartet ebenfalls nicht beliebig.
+     *
+     * Der Dienst arbeitet den Befehl trotzdem zu Ende - die Warteschlange
+     * liegt im Dateisystem, nicht in dieser Anfrage. Wer laenger warten will,
+     * sieht das Ergebnis im Protokoll. */
+    $wartezeit = max(0, min(SP_WARTEN_WEB, (int) $wartezeit));
+
+    /* Laeuft der Dienst ueberhaupt? Ohne diese Frage wartete die Anfrage die
+     * volle Zeit auf eine Antwort, die niemand schreiben kann - gemessen
+     * 20,06 s, wo 0,00 s genuegen. Es wird KEIN Befehl eingereiht: er laege
+     * sonst herum, bis der Dienst irgendwann startet, und wuerde dann
+     * verspaetet ausgefuehrt. Bei einer Sprachausgabe ist das kein
+     * Schoenheitsfehler, sondern eine Stimme aus dem Nichts. */
+    if (sp_dienst_pid() === 0) {
+        return array(0, 'Der Dienst laeuft nicht - der Befehl wurde nicht eingereiht. '
+                      . 'Im Reiter Dienste starten.');
+    }
 
     $ordner = $p['datadir'] . '/befehle';
     if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) {
@@ -328,7 +479,18 @@ function sp_befehl_absetzen($befehl, $wartezeit = null)
     $kennung = bin2hex(random_bytes(8));
     $datei = $ordner . '/' . $kennung . '.json';
     $tmp = $datei . '.tmp';
-    if (@file_put_contents($tmp, json_encode($befehl)) === false || !@rename($tmp, $datei)) {
+    /* json_encode gibt bei ungueltigem UTF-8 false zurueck. file_put_contents
+     * macht daraus eine leere Zeichenkette, schreibt null Byte und meldet
+     * das als Erfolg - der Rueckgabewert ist 0, nicht false, die Pruefung
+     * unten greift also nicht. In der Warteschlange laege dann eine leere
+     * Befehlsdatei, die der Dienst nicht deuten kann. Deshalb zuerst
+     * kodieren und den Rueckgabewert ansehen. Dieselbe Vorsicht wie in
+     * sp_json_schreiben(). */
+    $sp_js = json_encode($befehl);
+    if ($sp_js === false) {
+        return array(0, 'Der Befehl liess sich nicht als JSON darstellen (ungueltiges UTF-8).');
+    }
+    if (@file_put_contents($tmp, $sp_js) !== strlen($sp_js) || !@rename($tmp, $datei)) {
         @unlink($tmp);
         return array(0, 'Der Befehl liess sich nicht ablegen: ' . $datei);
     }
@@ -336,12 +498,18 @@ function sp_befehl_absetzen($befehl, $wartezeit = null)
     for ($i = 0; $i < $wartezeit * 10; $i++) {
         if (is_file($antwort)) {
             $a = sp_json_lesen($antwort);
+            /* Gelesen ist erledigt. Bis 0.9.1 blieb die Datei liegen; der
+             * Dienst raeumt sie zwar nach 900 s weg, bis dahin sammeln sich
+             * bei einem gespraechigen Loxone aber hunderte kleiner Dateien
+             * im Ordner an - und jedes Aufraeumen muss sie alle durchgehen. */
+            @unlink($antwort);
             return array((int) (isset($a['ok']) ? $a['ok'] : 0),
                          (string) (isset($a['meldung']) ? $a['meldung'] : ''));
         }
         usleep(100000);
     }
-    return array(2, 'Eingereiht, aber der Dienst hat innerhalb von ' . $wartezeit . ' s nicht geantwortet.');
+    return array(2, 'Eingereiht, aber der Dienst hat innerhalb von ' . $wartezeit . ' s nicht geantwortet. '
+                  . 'Er arbeitet den Befehl zu Ende - das Ergebnis steht im Protokoll.');
 }
 
 /* ---------------- MQTT-Gateway des LoxBerry ----------------

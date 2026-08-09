@@ -1,0 +1,134 @@
+#!/bin/bash
+# Sprachsteuerung lokal - uninstall
+# command <TEMPFOLDER> <NAME> <FOLDER> <VERSION> <BASEFOLDER>
+#
+# Laeuft als root beim Deinstallieren.
+#
+# ===================================================================
+# WARUM ES DIESE DATEI GIBT
+# ===================================================================
+#
+# LoxBerry raeumt beim Deinstallieren die Ordner weg, die dem Plugin
+# gehoeren: bin/, data/, log/, config/, templates/ und die beiden
+# webfrontend-Ordner. Drei Dinge liegen ausserhalb und blieben sonst
+# fuer immer zurueck:
+#
+#   1. Die beiden Sicherungsdateien
+#        config/plugins/<ordner>.backup.sprachsteuerung.json
+#        config/plugins/<ordner>.backup.saetze.json
+#      Sie liegen bewusst NEBEN dem Konfigordner, damit sie ein Update
+#      und sogar eine Neuinstallation ueberstehen - preupgrade.sh legt
+#      sie an, postinstall.sh spielt sie zurueck. Beim Deinstallieren
+#      ist genau das falsch: in sprachsteuerung.json koennen die
+#      Miniserver-Adresse mit Zugangsdaten und der Noise-Schluessel
+#      eines ESPHome-Mikrofons stehen. Deshalb ist die Datei auch
+#      mit 0600 angelegt. Wer das Plugin entfernt, erwartet nicht,
+#      dass diese Angaben auf der Karte bleiben.
+#
+#   2. Der laufende Dienst. Er wird mit nohup gestartet und haengt an
+#      keinem Elternprozess, den LoxBerry beenden wuerde.
+#
+#   3. Die Container. Die werden ABSICHTLICH NICHT angefasst - siehe
+#      unten.
+#
+# Was NICHT aufgeraeumt werden muss: MQTT. Der Dienst sendet mit
+# "publish", nicht mit "retain".
+
+ARGV3=$3
+ARGV5=$5
+PFOLDER="${ARGV3:-sprachsteuerung}"
+BASE="${ARGV5:-$LBHOMEDIR}"
+[ -n "$BASE" ] && [ -d "$BASE" ] || BASE="/opt/loxberry"
+
+PDATA="$BASE/data/plugins/$PFOLDER"
+PBIN="$BASE/bin/plugins/$PFOLDER"
+PCONFIG="$BASE/config/plugins"
+
+# ---------------------------------------------------------------
+# 1. Dienst anhalten
+# ---------------------------------------------------------------
+# Erst ueber die PID-Datei. Die Nummer allein genuegt nicht: sie kann
+# nach einem Neustart einem voellig anderen Programm gehoeren. Geprueft
+# wird deshalb die Befehlszeile - und zwar ARGUMENTWEISE.
+# /proc/<pid>/cmdline trennt die Argumente mit Nullbytes; ein
+# "grep sprachsteuerung_dienst.py" darueber traefe auch einen Editor,
+# in dem die Datei gerade offen ist. Verglichen wird das zweite
+# Argument gegen den vollen Pfad - so wird auch nicht der Dienst eines
+# zweiten Exemplars abgeschossen (LoxBerry haengt bei Namenskonflikt
+# 01, 02 ... an den Ordnernamen an).
+ist_unser_dienst() {
+    [ -r "/proc/$1/cmdline" ] || return 1
+    [ "$(tr '\0' '\n' < "/proc/$1/cmdline" 2>/dev/null | sed -n '2p')" \
+        = "$PBIN/sprachsteuerung_dienst.py" ]
+}
+
+beenden() {
+    P="$1"
+    kill "$P" 2>/dev/null
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$P" 2>/dev/null || return 0
+        sleep 1
+    done
+    kill -9 "$P" 2>/dev/null
+    sleep 1
+    return 0
+}
+
+GEFUNDEN=0
+PIDDATEI="$PDATA/dienst.pid"
+if [ -f "$PIDDATEI" ]; then
+    P=$(cat "$PIDDATEI" 2>/dev/null)
+    if [ -n "$P" ] && kill -0 "$P" 2>/dev/null && ist_unser_dienst "$P"; then
+        beenden "$P"
+        GEFUNDEN=1
+        echo "<OK> Laufender Dienst beendet (PID $P)."
+    fi
+fi
+
+# Zweiter Durchgang ohne PID-Datei: sie kann fehlen, wenn der Dienst
+# von Hand gestartet oder die Datei geloescht wurde.
+for D in /proc/[0-9]*; do
+    P=$(basename "$D")
+    if ist_unser_dienst "$P" && kill -0 "$P" 2>/dev/null; then
+        beenden "$P"
+        GEFUNDEN=1
+        echo "<OK> Weiterer Dienst beendet (PID $P)."
+    fi
+done
+
+[ "$GEFUNDEN" -eq 0 ] && echo "<INFO> Es lief kein Dienst."
+rm -f "$PIDDATEI" "$PDATA/soll_laufen" 2>/dev/null
+
+# ---------------------------------------------------------------
+# 2. Sicherungsdateien ausserhalb der Plugin-Ordner
+# ---------------------------------------------------------------
+for f in sprachsteuerung.json saetze.json; do
+    BK="$PCONFIG/$PFOLDER.backup.$f"
+    if [ -f "$BK" ]; then
+        # Ueberschreiben, dann entfernen: nur unlink liesse den Inhalt
+        # auf der Karte stehen, bis der Platz neu vergeben wird.
+        LAENGE=$(stat -c %s "$BK" 2>/dev/null || echo 0)
+        [ "$LAENGE" -gt 0 ] && dd if=/dev/zero of="$BK" bs=1 count="$LAENGE" \
+            conv=notrunc >/dev/null 2>&1
+        rm -f "$BK" && echo "<OK> Sicherung entfernt: $PFOLDER.backup.$f"
+    fi
+done
+echo "<INFO> Miniserver-Zugangsdaten und Mikrofon-Schluessel sind damit"
+echo "<INFO> vom LoxBerry entfernt."
+
+# ---------------------------------------------------------------
+# 3. Container: bewusst NICHT anfassen
+# ---------------------------------------------------------------
+# In den Datenordnern der Container liegen die heruntergeladenen
+# Modelle - Whisper und das Sprachmodell sind zusammen mehrere
+# Gigabyte. Wer das Plugin nur neu installiert oder auf eine andere
+# Fassung wechselt, soll sie nicht erneut laden muessen. Und die
+# Container koennen von anderen Plugins oder von Hand mitbenutzt
+# werden; sie ungefragt zu loeschen waere ein Eingriff in fremde
+# Einrichtung.
+echo "<INFO> Die Container fuer Whisper, Piper, Wortwecker und Sprachmodell"
+echo "<INFO> bleiben unberuehrt - dort liegen die heruntergeladenen Modelle"
+echo "<INFO> (mehrere Gigabyte). Wer sie nicht mehr braucht, entfernt sie"
+echo "<INFO> ueber das Docker-Plugin oder mit 'docker rm -f <name>'."
+
+exit 0

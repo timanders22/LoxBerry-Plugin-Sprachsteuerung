@@ -10,6 +10,11 @@
 # Sprachdienste) und aioesphomeapi (fuer ESPHome-Mikrofone). PEP 668 laesst
 # ein systemweites pip3 install auf Debian 12/13 nicht zu - deshalb die venv.
 # JEDER Rueckgabewert wird geprueft.
+#
+# ZU DEN MELDUNGSTAGS: Eine Fehlerlage bekommt GENAU EIN <FAIL>; die Saetze
+# danach, die erklaeren, was zu tun ist, sind <INFO>. Mehrere <FAIL> in Folge
+# sind fuer den Betrachter kein staerkeres Signal, sondern nur laenger - und
+# der Log-Leser des Installers stellt die Folgezeilen nicht zuverlaessig dar.
 
 ARGV3=$3
 ARGV5=$5
@@ -63,9 +68,9 @@ case "$ARCH" in
     x86_64|aarch64|arm64) echo "<OK> Architektur $ARCH ist 64 Bit." ;;
     *)
         echo "<FAIL> Architektur $ARCH ist nicht 64 Bit."
-        echo "<FAIL> Die Container fuer Whisper, Piper und das Sprachmodell gibt es"
-        echo "<FAIL> nur fuer 64 Bit. Auf einem 32-Bit-Raspberry-Pi-OS hilft nur ein"
-        echo "<FAIL> Neuaufsetzen mit einem 64-Bit-Abbild."
+        echo "<INFO> Die Container fuer Whisper, Piper und das Sprachmodell gibt es"
+        echo "<INFO> nur fuer 64 Bit. Auf einem 32-Bit-Raspberry-Pi-OS hilft nur ein"
+        echo "<INFO> Neuaufsetzen mit einem 64-Bit-Abbild."
         exit 1 ;;
 esac
 
@@ -83,7 +88,7 @@ if [ ! -x "$VENV/bin/python3" ] || ! "$VENV/bin/python3" -c 'import sys' 2>/dev/
     rm -rf "$VENV"
     if ! "$PY" -m venv "$VENV"; then
         echo "<FAIL> Virtuelle Umgebung konnte nicht angelegt werden ($VENV)."
-        echo "<FAIL> Fehlt das Paket python3-venv? (apt install python3-venv)"
+        echo "<INFO> Fehlt das Paket python3-venv? (apt install python3-venv)"
         exit 1
     fi
     echo "<OK> Virtuelle Umgebung angelegt: $VENV"
@@ -94,7 +99,7 @@ fi
 echo "<INFO> Installiere wyoming (benoetigt eine Internetverbindung) ..."
 if ! "$VENV/bin/python3" -m pip install --no-cache-dir "wyoming>=1.5"; then
     echo "<FAIL> Das Paket wyoming liess sich nicht installieren."
-    echo "<FAIL> Ohne dieses Paket kann der Dienst nicht mit den Sprachdiensten reden."
+    echo "<INFO> Ohne dieses Paket kann der Dienst nicht mit den Sprachdiensten reden."
     exit 1
 fi
 if ! "$VENV/bin/python3" -c 'import wyoming' 2>/dev/null; then
@@ -123,8 +128,9 @@ else
     echo "<INFO> Ohne Docker kann das Plugin die Sprachdienste nicht selbst betreiben."
     echo "<INFO> Wer sie anderswo betreibt, traegt in den Einstellungen nur die"
     echo "<INFO> Adressen ein. Docker nachruesten: LoxBerry-Plugin Docker."
-    echo "<INFO> Antwortet Docker nicht, fehlt meist die Gruppe:"
-    echo "<INFO>   sudo usermod -aG docker loxberry   (danach neu anmelden)"
+    echo "<INFO> Antwortet Docker nicht, fehlt meist nur die Gruppe - darum"
+    echo "<INFO> kuemmert sich postroot.sh gleich im Anschluss. Die neue"
+    echo "<INFO> Gruppenzugehoerigkeit wirkt erst nach einem Neustart."
 fi
 
 # ---------- Empfehlung gleich ausgeben ----------

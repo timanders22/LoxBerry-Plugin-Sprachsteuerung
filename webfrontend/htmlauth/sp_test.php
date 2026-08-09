@@ -90,13 +90,18 @@ function sp_test_aktion($aktion)
             $text = isset($_POST['test_satz']) ? (string) $_POST['test_satz'] : '';
             $text = trim(preg_replace('/[\x00-\x1F\x7F]/u', ' ', $text));
             if ($text === '') { return array(0, sp_t('TEST.M_SATZ_LEER')); }
-            return sp_befehl_absetzen(array('aktion' => 'satz', 'satz' => $text), 30);
+            /* Ohne eigene Wartezeit: sp_befehl_absetzen() deckelt auf
+             * SP_WARTEN_WEB. Hier standen 30 bzw. 60 Sekunden - Zahlen, die
+             * nie zur Wirkung kamen, weil die Funktion schon auf 20 stutzte.
+             * Sie vorzutaeuschen ist schlimmer, als sie wegzulassen: wer sie
+             * liest, glaubt, der Reiter warte eine Minute. */
+            return sp_befehl_absetzen(array('aktion' => 'satz', 'satz' => $text));
 
         case 'sprechen':
             $text = isset($_POST['test_ansage']) ? (string) $_POST['test_ansage'] : '';
             $text = trim(preg_replace('/[\x00-\x1F\x7F]/u', ' ', $text));
             if ($text === '') { return array(0, sp_t('TEST.M_ANSAGE_LEER')); }
-            return sp_befehl_absetzen(array('aktion' => 'sprechen', 'text' => $text), 60);
+            return sp_befehl_absetzen(array('aktion' => 'sprechen', 'text' => $text));
 
         default:
             return array(0, sp_t('TEST.M_UNBEKANNT'));
