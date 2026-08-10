@@ -542,8 +542,7 @@ $sp_beschriftung = array(
 <h2><?= sp_e(sp_t('EINST.H_DIENST')) ?></h2>
 <p class="sm-hilfe"><?= sp_t('EINST.DIENST_ERKLAERUNG') ?></p>
 <div class="sm-legende">
-<span><i class="sm-punkt sm-b-lesen"></i> <?= sp_t('LEGENDE.LESEN') ?></span>
-<span><i class="sm-punkt sm-b-aktion"></i> <?= sp_t('LEGENDE.AKTION') ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i><?= sp_t('LEGENDE.AKTION') ?></span>
 </div>
 <div class="sm-knopfreihe">
 <?php foreach (array('start' => 'sm-b-lesen', 'restart' => 'sm-b-aktion', 'stop' => 'sm-b-aktion') as $sp_b => $sp_farbe) { ?>
@@ -667,7 +666,7 @@ $sp_beschriftung = array(
 </div>
 
 <div class="sm-knopfreihe">
-  <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sp_e(sp_t('ALLG.SPEICHERN')) ?></button>
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sp_e(sp_t('ALLG.SPEICHERN')) ?></button>
 </div>
 </form>
 </div>
@@ -724,7 +723,7 @@ $sp_beschriftung = array(
   <div class="sm-hilfe"><?= sp_t('DIENST.H_LLM_MODELL') ?></div>
 </div>
 <div class="sm-knopfreihe">
-  <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sp_e(sp_t('ALLG.SPEICHERN')) ?></button>
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sp_e(sp_t('ALLG.SPEICHERN')) ?></button>
 </div>
 </form>
 <div class="sm-hilfe"><?= sp_t('DIENST.MODELLE_LEER') ?></div>
@@ -735,9 +734,8 @@ $sp_beschriftung = array(
 <?php } ?>
 <div class="sm-warnung"><?= sp_t('DIENST.MODELL_WARNUNG') ?></div>
 <div class="sm-legende">
-<span><i class="sm-punkt sm-b-lesen"></i> <?= sp_t('LEGENDE.LESEN') ?></span>
-<span><i class="sm-punkt sm-b-technik"></i> <?= sp_t('LEGENDE.TECHNIK') ?></span>
-<span><i class="sm-punkt sm-b-aktion"></i> <?= sp_t('LEGENDE.AKTION') ?></span>
+<span><i class="sm-punkt sm-b-technik"></i><?= sp_t('LEGENDE.TECHNIK') ?></span>
+<span><i class="sm-punkt sm-b-aktion"></i><?= sp_t('LEGENDE.AKTION') ?></span>
 </div>
 <?php foreach (sp_dienste() as $sp_d) {
     $sp_zu = sp_container_zustand($sp_d);
@@ -812,8 +810,11 @@ for ($sp_i = 0; $sp_i < 8; $sp_i++) {
 <td class="<?= $sp_zust === 'getrennt' || $sp_zust === '' ? 'sm-aus' : 'sm-an' ?>"><?= $sp_zust !== '' ? sp_e($sp_zust) : '&mdash;' ?></td></tr>
 <?php } ?>
 </table>
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-aktion"></i><?= sp_t('LEGENDE.AKTION') ?></span>
+</div>
 <div class="sm-knopfreihe">
-  <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sp_e(sp_t('ALLG.SPEICHERN')) ?></button>
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sp_e(sp_t('ALLG.SPEICHERN')) ?></button>
 </div>
 </form>
 <div class="sm-hilfe"><?= sp_t('MIKRO.HILFE') ?></div>
@@ -867,8 +868,11 @@ for ($sp_i = 0; $sp_i < 8; $sp_i++) {
 <div class="sm-feld">
   <textarea data-role="none" name="saetze" rows="24" style="width:100%;font-family:Consolas,monospace;font-size:0.86em;"><?= sp_e(json_encode($sp_saetze, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)) ?></textarea>
 </div>
+<div class="sm-legende">
+<span><i class="sm-punkt sm-b-aktion"></i><?= sp_t('LEGENDE.AKTION') ?></span>
+</div>
 <div class="sm-knopfreihe">
-  <button data-role="none" class="sm-btn sm-b-lesen" type="submit"><?= sp_e(sp_t('ALLG.SPEICHERN')) ?></button>
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sp_e(sp_t('ALLG.SPEICHERN')) ?></button>
 </div>
 </form>
 <div class="sm-hilfe"><?= sp_t('SATZ.NEU_LADEN') ?></div>
