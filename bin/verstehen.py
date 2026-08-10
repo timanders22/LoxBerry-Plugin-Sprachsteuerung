@@ -16,11 +16,33 @@ Aufruf zum Ausprobieren:
 
 from __future__ import annotations
 
+import os
+
 import json
 import re
 import sys
 import unicodedata
 from pathlib import Path
+
+
+def lb_wurzel_ermitteln():
+    """Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
+
+    Vom eigenen Ablageort aufwaerts, bis ein Verzeichnis gefunden ist, das
+    config/plugins UND webfrontend enthaelt. Trifft die uebliche
+    Installation genauso wie eine an einem anderen Ort.
+    """
+    d = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(8):
+        if os.path.isdir(os.path.join(d, "config", "plugins")) \
+                and os.path.isdir(os.path.join(d, "webfrontend")):
+            return d
+        eltern = os.path.dirname(d)
+        if eltern == d:
+            break
+        d = eltern
+    return ""
+
 
 # ---------------------------------------------------------------------------
 # Einebnen
@@ -211,7 +233,7 @@ def laden(pfad: Path) -> Verstehen:
 
 if __name__ == "__main__":
     kandidaten = [Path(p) for p in (
-        "/opt/loxberry/config/plugins/sprachsteuerung/saetze.json",
+        lb_wurzel_ermitteln() + "/config/plugins/sprachsteuerung/saetze.json",
         str(Path(__file__).resolve().parent.parent / "templates" / "saetze_de.json"),
     )]
     quelle = next((k for k in kandidaten if k.is_file()), kandidaten[-1])

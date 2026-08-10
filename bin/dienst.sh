@@ -7,7 +7,14 @@
 # gestartet, kommt dort ueberall Leerstring zurueck - das Skript werkelt dann
 # gegen /-Pfade und meldet trotzdem Erfolg.
 
-SELF=$(cd "$(dirname "$0")" && pwd)          # <home>/bin/plugins/<ordner>
+# readlink -f loest Symlinks auf, BEVOR das Verzeichnis bestimmt wird.
+# LoxBerry legt Daemons als Symlink unter system/daemons/plugins/ ab; von
+# dort aufgerufen ergaebe dirname "$0" den Pfad .../system/daemons/plugins,
+# der Pluginname waere buchstaeblich "plugins", und PID-Datei, Sollmerker
+# und Logdatei landeten neben dem eigenen Ordner statt darin. Die
+# Oberflaeche saehe den Dienst dann nie laufen, und der Waechter startete
+# ihn im Minutentakt ein zweites Mal.
+SELF=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)          # <home>/bin/plugins/<ordner>
 PNAME=$(basename "$SELF")
 LBHOMEDIR=$(cd "$SELF/../../.." && pwd)
 PDATA="$LBHOMEDIR/data/plugins/$PNAME"
