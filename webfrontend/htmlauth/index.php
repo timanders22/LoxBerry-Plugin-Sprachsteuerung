@@ -775,11 +775,26 @@ $sp_beschriftung = array(
 <span><i class="sm-punkt sm-b-aktion"></i><?= sp_t('LEGENDE.AKTION') ?></span>
 </div>
 <?php foreach (sp_dienste() as $sp_d) {
-    $sp_zu = sp_container_zustand($sp_d);
-    $sp_bef = sp_container_befehl($sp_d, $sp_cfg, $sp_emp ?: null); ?>
+    list($sp_host, $sp_port) = sp_dienst_ziel($sp_d, $sp_cfg);
+    $sp_ext = !sp_ist_lokal($sp_host);
+    $sp_zu = sp_container_zustand($sp_d, $sp_cfg);
+    $sp_bef = sp_container_befehl($sp_d, $sp_cfg, $sp_emp ?: null, $sp_ext); ?>
 <h3><?= sp_e(sp_t('EINST.L_' . strtoupper($sp_d === 'wakeword' ? 'WAKE' : $sp_d))) ?>
-    <span class="<?= $sp_zu === 'laeuft' ? 'sm-an' : 'sm-aus' ?>">&mdash; <?= sp_e(sp_t('ALLG.CONT_' . strtoupper($sp_zu))) ?></span></h3>
+    <span class="<?= ($sp_zu === 'laeuft' || $sp_zu === 'extern') ? 'sm-an' : 'sm-aus' ?>">&mdash; <?= sp_e(sp_t('ALLG.CONT_' . strtoupper($sp_zu))) ?></span>
+    <span class="sm-mono">(<?= sp_e($sp_host . ':' . $sp_port) ?>)</span></h3>
 <p class="sm-hilfe"><?= sp_t($sp_modelle['dienste'][$sp_d]['text']) ?></p>
+<?php if ($sp_ext) { ?>
+<div class="sm-hinweis"><?= sprintf(sp_t('DIENST.AUSGELAGERT'), sp_e($sp_host . ':' . $sp_port)) ?></div>
+<?php if ($sp_bef !== '') { ?>
+<p><span class="sm-mono">docker <?= sp_e($sp_bef) ?></span></p>
+<?php } ?>
+<div class="sm-knopfreihe">
+  <form action="index.php" method="post">
+    <input data-role="none" type="hidden" name="activetab" value="tab-services">
+    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="containerlog" value="<?= $sp_d ?>"><?= sp_e(sp_t('DIENST.KC_LOG')) ?></button>
+  </form>
+</div>
+<?php } else { ?>
 <?php if ($sp_bef !== '') { ?>
 <p><span class="sm-mono">docker <?= sp_e($sp_bef) ?></span></p>
 <?php } else { ?>
@@ -799,6 +814,7 @@ $sp_beschriftung = array(
     <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="containerlog" value="<?= $sp_d ?>"><?= sp_e(sp_t('DIENST.KC_LOG')) ?></button>
   </form>
 </div>
+<?php } ?>
 <?php } ?>
 
 <h2><?= sp_e(sp_t('DIENST.H_MESSEN')) ?></h2>

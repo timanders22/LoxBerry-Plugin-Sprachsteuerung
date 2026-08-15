@@ -357,6 +357,40 @@ def klartext(hw: dict, emp: dict) -> str:
     return "\n".join(z)
 
 
+def konfiguration() -> dict:
+    """Die Plugin-Konfiguration lesen, soweit fuer das Messen noetig.
+
+    WARUM UEBERHAUPT
+    ----------------
+    Bis 0.9.7 mass diese Datei fest gegen 127.0.0.1. Wer Whisper oder das
+    Sprachmodell auf einen kraeftigeren Rechner ausgelagert hatte - wofuer die
+    Felder whisper_host, piper_host und llm_host ausdruecklich da sind -, bekam
+    hier eine Fehlmessung des LEEREN LoxBerry statt einer Messung des Dienstes,
+    den er tatsaechlich benutzt. Gemessen wird jetzt dort, wo der Dienst laeuft.
+    """
+    pfad = LBHOME / "config" / "plugins" / PNAME / "sprachsteuerung.json"
+    try:
+        d = json.loads(pfad.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def ziel(cfg: dict, dienst: str, vorgabe_port: int) -> tuple[str, int]:
+    """Adresse und Port eines Dienstes. Der Wortwecker heisst in der
+    Konfiguration 'wake', nicht 'wakeword' - dieselbe Abbildung wie in
+    sp_dienst_ziel() in webfrontend/html/sp_lib.php."""
+    schluessel = "wake" if dienst == "wakeword" else dienst
+    host = str(cfg.get(schluessel + "_host") or "").strip() or "127.0.0.1"
+    try:
+        port = int(cfg.get(schluessel + "_port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if not 1 <= port <= 65535:
+        port = vorgabe_port
+    return host, port
+
+
 def main() -> int:
     hw = hardware()
     emp = empfehlung(hw)
@@ -367,11 +401,20 @@ def main() -> int:
     if "--messen" in sys.argv:
         tab = tabelle()
         d = tab.get("dienste", {})
-        erg["messung"] = {
-            "whisper": messen_whisper("127.0.0.1", int(d.get("whisper", {}).get("port") or 10300)),
-            "piper": messen_piper("127.0.0.1", int(d.get("piper", {}).get("port") or 10200)),
-            "llm": messen_llm("127.0.0.1", int(d.get("llm", {}).get("port") or 8080)),
-        }
+        cfg = konfiguration()
+        messung = {}
+        for dienst, messer, vorgabe in (("whisper", messen_whisper, 10300),
+                                        ("piper", messen_piper, 10200),
+                                        ("llm", messen_llm, 8080)):
+            host, port = ziel(cfg, dienst, int(d.get(dienst, {}).get("port") or vorgabe))
+            wert = messer(host, port)
+            # Wo gemessen wurde, gehoert ins Ergebnis: sonst sieht eine
+            # Messung von einem anderen Rechner genauso aus wie eine hiesige.
+            wert["host"] = host
+            wert["port"] = port
+            wert["ausgelagert"] = host not in ("127.0.0.1", "localhost", "::1", "0.0.0.0")
+            messung[dienst] = wert
+        erg["messung"] = messung
     print(json.dumps(erg, ensure_ascii=False, indent=1))
     return 0
 

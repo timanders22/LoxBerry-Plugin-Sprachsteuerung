@@ -4,9 +4,42 @@ Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedene
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
 LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 
-> **Fassung 0.9.2 — ungeprüft an echter Hardware.** Gebaut ohne Mikrofon;
+> **Fassung 0.9.8 — ungeprüft an echter Hardware.** Gebaut ohne Mikrofon;
 > geprüft wurde die ganze Kette gegen Attrappen, die das **Originalpaket** des
 > Wyoming-Protokolls benutzen. Deshalb 0.9.x und nicht 1.0.0.
+
+## Neu in 0.9.8
+
+**Ausgelagerte Dienste werden als solche behandelt.** Die Felder
+`whisper_host`, `piper_host`, `wake_host` und `llm_host` gab es schon immer —
+wer sie benutzte, bekam aber eine Oberfläche, die weiter so tat, als liefe
+alles hier:
+
+* Der Reiter *Dienste* zeigte für einen ausgelagerten Dienst den Zustand des
+  **hiesigen** Containers, den es gar nicht gibt — also „fehlt". Jetzt steht
+  dort *läuft extern* oder *extern, antwortet nicht*, und das ist gemessen:
+  eine Verbindung auf die eingetragene Adresse.
+* *Anlegen*, *Starten*, *Anhalten* und *Entfernen* hätten den **falschen
+  Rechner** getroffen, nämlich den LoxBerry. `sp_container()` weist sie jetzt
+  ab und nennt die Adresse, auf der der Dienst wirklich läuft. Dasselbe gilt
+  für das Container-Protokoll.
+* Statt der Knöpfe steht dort die **fertige Aufrufzeile zum Mitnehmen**: mit
+  Portbindung ans Netz statt an `127.0.0.1`, sonst käme der LoxBerry nicht
+  heran.
+* Neben jedem Dienst steht jetzt seine Adresse.
+
+**Der Knopf *Messen* mass immer gegen `127.0.0.1`.** Wer Whisper oder das
+Sprachmodell ausgelagert hatte, mass damit den leeren LoxBerry statt des
+Dienstes, den er tatsächlich benutzt — das Ergebnis war wertlos, sah aber
+nicht so aus. `bin/hardware.py` liest jetzt die Konfiguration und misst dort,
+wo der Dienst läuft; im Ergebnis stehen Adresse, Port und ein Kennzeichen
+`ausgelagert`.
+
+**Die Modelltabelle in dieser README stimmte nicht mit
+`templates/modelle.json` überein** — sie nannte für „groß" `medium-int8` und
+für „mittel" `small-int8`, während die Datei `small-int8` beziehungsweise
+`base-int8` vorschlägt. Maßgeblich ist die Datei; die Tabelle unten ist
+berichtigt.
 
 ## Neu in 0.9.2
 
@@ -91,15 +124,40 @@ scheitern.
 `bin/hardware.py` liest Architektur, Kerne, Arbeitsspeicher und Grafikkarte aus
 und schlägt vier Stufen vor (`templates/modelle.json`):
 
-| Stufe | ab RAM | Whisper | Sprachmodell |
-|---|---|---|---|
-| groß | 15 GB | `medium-int8` | Qwen2.5 7B |
-| mittel | 7 GB | `small-int8` | Qwen2.5 3B |
-| klein | 3,5 GB | `base-int8` | Qwen2.5 1.5B |
-| winzig | darunter | `tiny-int8` | **keins** |
+| Stufe | ab RAM | Whisper | Piper | Sprachmodell |
+|---|---|---|---|---|
+| groß | 15 GB | `small-int8` | `de_DE-thorsten-medium` | Qwen2.5 7B (4,7 GB) |
+| mittel | 7 GB | `base-int8` | `de_DE-thorsten-medium` | Qwen2.5 3B (2,0 GB) |
+| klein | 3,5 GB | `base-int8` | `de_DE-thorsten-low` | Qwen2.5 1.5B (1,1 GB) |
+| winzig | darunter | `tiny-int8` | `de_DE-thorsten-low` | **keins** |
 
-Eine erkannte Grafikkarte hebt die Stufe um eins. Ohne 64 Bit oder mit weniger
+Maßgeblich ist `templates/modelle.json`, nicht diese Tabelle — sie ist eine
+Abschrift. Weichen beide ab, gilt die Datei.
+
+Eine erkannte Grafikkarte hebt die Stufe um eins; erkannt wird sie über
+`nvidia-smi`, AMD und Intel zählen also nicht. Ohne 64 Bit oder mit weniger
 als zwei Kernen gibt es keine Empfehlung für ein Sprachmodell.
+
+### Die Dienste auf einem anderen Rechner betreiben
+
+Das lohnt sich, sobald das Sprachmodell mitspielen soll: auf einem Raspberry
+Pi rechnet es auf der CPU, auf einem x86-Rechner mit NVIDIA-Karte nicht.
+
+Das Plugin bleibt dabei auf dem LoxBerry, nur die Container ziehen um. Vier
+Felder im Reiter *Einstellungen* entscheiden darüber — `whisper_host`,
+`piper_host`, `wake_host`, `llm_host`. Steht dort etwas anderes als
+`127.0.0.1`, gilt der Dienst als ausgelagert, und das Plugin
+
+* fasst ihn **nicht** mit Docker an (der Befehl träfe sonst den LoxBerry),
+* zeigt statt des Containerzustands, ob unter der Adresse jemand antwortet,
+* zeigt die passende Aufrufzeile für den anderen Rechner an,
+* und misst mit *Jetzt messen* gegen diese Adresse.
+
+Auf dem anderen Rechner brauchen Sie nur Docker. Wichtig ist die
+Portbindung: die hiesigen Container binden bewusst auf `127.0.0.1` und sind
+darum von außen unerreichbar — die angezeigte Zeile für den ausgelagerten
+Betrieb bindet deshalb ans Netz. Sichern Sie diesen Rechner entsprechend ab;
+die Wyoming-Dienste kennen keine Anmeldung.
 
 **Es stehen nirgends Geschwindigkeitsangaben** — weder in der Oberfläche noch
 hier. Sie wären ohne Ihre Hardware geraten. Der Knopf *Messen* im Reiter

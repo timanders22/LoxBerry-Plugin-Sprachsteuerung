@@ -789,9 +789,80 @@ function sp_container_name($dienst)
     return 'sprachsteuerung-' . ($dienst !== '' ? $dienst : 'unbekannt');
 }
 
-/** 'laeuft', 'gestoppt', 'fehlt' oder 'kein_docker' */
-function sp_container_zustand($dienst)
+/**
+ * Adresse und Port eines Dienstes aus der Konfiguration.
+ *
+ * Die Schluessel heissen nicht durchgaengig wie die Dienste: der Wortwecker
+ * heisst im Dienst 'wakeword', in der Konfiguration aber 'wake_host' und
+ * 'wake_port' (so steht es in VORGABEN in bin/sprachsteuerung_dienst.py).
+ * Diese Abbildung steht genau hier und nirgends sonst.
+ */
+function sp_dienst_ziel($dienst, $cfg = null)
 {
+    if ($cfg === null) { $cfg = sp_config(); }
+    $schluessel = $dienst === 'wakeword' ? 'wake' : $dienst;
+    $tab = sp_modelle();
+    $vorgabe_port = isset($tab['dienste'][$dienst]['port'])
+                  ? (int) $tab['dienste'][$dienst]['port'] : 0;
+    $host = isset($cfg[$schluessel . '_host']) ? trim((string) $cfg[$schluessel . '_host']) : '';
+    $port = isset($cfg[$schluessel . '_port']) ? (int) $cfg[$schluessel . '_port'] : 0;
+    if ($host === '') { $host = '127.0.0.1'; }
+    if ($port < 1 || $port > 65535) { $port = $vorgabe_port; }
+    return array($host, $port);
+}
+
+/**
+ * Laeuft der Dienst auf DIESER Maschine?
+ *
+ * Nur dann darf das Plugin ihn mit Docker anfassen. Steht dort die Adresse
+ * eines anderen Rechners, wuerde jeder Docker-Befehl den FALSCHEN Rechner
+ * treffen - naemlich den LoxBerry, auf dem es gar keinen solchen Container
+ * gibt. Deshalb wird das geprueft und nicht angenommen.
+ */
+function sp_ist_lokal($host)
+{
+    $host = strtolower(trim((string) $host));
+    if ($host === '') { return true; }
+    return in_array($host, array('127.0.0.1', 'localhost', '::1', '0.0.0.0',
+                                 'localhost.localdomain'), true);
+}
+
+/**
+ * Antwortet an dieser Adresse etwas auf dem Port?
+ *
+ * NICHT sp_erreichbar() nennen: so heisst bereits eine Funktion in
+ * webfrontend/htmlauth/sp_test.php, die dasselbe misst, aber
+ * array(ok, Fehlertext) zurueckgibt. Die liegt im angemeldeten Bereich und
+ * steht dieser Datei nicht zur Verfuegung; gleicher Name waere ein
+ * "Cannot redeclare" gewesen, sobald beide geladen sind.
+ */
+function sp_port_offen($host, $port, $timeout = 2.0)
+{
+    $host = trim((string) $host);
+    $port = (int) $port;
+    if ($host === '' || $port < 1 || $port > 65535) { return false; }
+    $fehlernr = 0;
+    $fehlertext = '';
+    $verbindung = @fsockopen($host, $port, $fehlernr, $fehlertext, $timeout);
+    if ($verbindung === false) { return false; }
+    fclose($verbindung);
+    return true;
+}
+
+/**
+ * 'laeuft', 'gestoppt', 'fehlt', 'kein_docker' fuer eigene Container;
+ * 'extern' oder 'extern_weg' fuer Dienste auf einem anderen Rechner.
+ *
+ * Bei einem ausgelagerten Dienst ist die Frage nach dem Container sinnlos -
+ * es gibt hier keinen. Die einzige ehrliche Aussage ist, ob unter der
+ * eingetragenen Adresse jemand antwortet.
+ */
+function sp_container_zustand($dienst, $cfg = null)
+{
+    list($host, $port) = sp_dienst_ziel($dienst, $cfg);
+    if (!sp_ist_lokal($host)) {
+        return sp_port_offen($host, $port) ? 'extern' : 'extern_weg';
+    }
     if (!sp_docker_da()) { return 'kein_docker'; }
     list($ok, $aus) = sp_docker('inspect -f {{.State.Running}} '
                                 . escapeshellarg(sp_container_name($dienst)));
@@ -804,22 +875,28 @@ function sp_container_zustand($dienst)
  *
  * Absichtlich OHNE --network=host: diese Dienste brauchen kein Wirtsnetz,
  * eine Portweiterleitung genuegt. Das haelt sie vom uebrigen Netz fern.
+ *
+ * $fuer_extern = true liefert dieselbe Zeile zum Mitnehmen auf einen ANDEREN
+ * Rechner. Zwei Unterschiede sind noetig: der Port muss ans Netz gebunden
+ * werden (sonst kaeme der LoxBerry nicht heran), und der Modellordner liegt
+ * dort natuerlich woanders - deshalb ein neutraler Pfad statt des hiesigen.
+ * Diese Zeile wird NICHT ausgefuehrt, sie wird nur angezeigt.
  */
-function sp_container_befehl($dienst, $cfg = null, $emp = null)
+function sp_container_befehl($dienst, $cfg = null, $emp = null, $fuer_extern = false)
 {
     if ($cfg === null) { $cfg = sp_config(); }
     $p = sp_paths();
     $tab = sp_modelle();
     $d = isset($tab['dienste'][$dienst]) ? $tab['dienste'][$dienst] : null;
     if ($d === null) { return ''; }
-    $modelle = $p['datadir'] . '/modelle';
+    $modelle = $fuer_extern ? '/opt/sprachsteuerung/modelle' : $p['datadir'] . '/modelle';
     $name = sp_container_name($dienst);
     $port = (int) $d['port'];
     $abbild = (string) $d['abbild'];
 
     $zeile = 'run -d --name ' . escapeshellarg($name)
            . ' --restart=unless-stopped'
-           . ' -p 127.0.0.1:' . $port . ':' . $port
+           . ' -p ' . ($fuer_extern ? '' : '127.0.0.1:') . $port . ':' . $port
            . ' -v ' . escapeshellarg($modelle . '/' . $dienst . ':/data');
 
     if ($dienst === 'whisper') {
@@ -859,6 +936,19 @@ function sp_container($dienst, $was)
     if (!in_array($dienst, sp_dienste(), true)) {
         return array(0, 'Unbekannter Dienst.');
     }
+    // Ausgelagerter Dienst: abweisen statt den falschen Rechner anzufassen.
+    //
+    // Ohne diese Pruefung liefe der Docker-Befehl auf dem LoxBerry, wo es
+    // keinen solchen Container gibt. 'anlegen' wuerde dort einen ZWEITEN
+    // Dienst starten, den niemand benutzt, und 'stop' meldete einen Fehler,
+    // den man auf den entfernten Rechner beziehen wuerde. Beides ist
+    // schlimmer als eine klare Absage (Hausregel: Eingaben abweisen, nicht
+    // stillschweigend zurechtbiegen).
+    list($host, $port) = sp_dienst_ziel($dienst);
+    if (!sp_ist_lokal($host)) {
+        return array(0, 'Dieser Dienst ist auf ' . $host . ':' . $port
+                      . ' ausgelagert. Container dort verwalten, nicht hier.');
+    }
     $p = sp_paths();
     $name = sp_container_name($dienst);
     $tab = sp_modelle();
@@ -891,6 +981,13 @@ function sp_container($dienst, $was)
 
 function sp_container_log($dienst, $zeilen = 200)
 {
+    if (in_array($dienst, sp_dienste(), true)) {
+        list($host, $port) = sp_dienst_ziel($dienst);
+        if (!sp_ist_lokal($host)) {
+            return 'Dieser Dienst laeuft auf ' . $host . ':' . $port . '.' . "\n"
+                 . 'Sein Protokoll steht dort - hier gibt es keinen Container dazu.';
+        }
+    }
     list($ok, $aus) = sp_docker('logs --tail ' . (int) $zeilen . ' '
                                 . escapeshellarg(sp_container_name($dienst)));
     // Programmprotokolle vor dem Auswerten von Farbcodes befreien.
