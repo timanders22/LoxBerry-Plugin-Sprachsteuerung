@@ -28,7 +28,15 @@
 #   2. Der laufende Dienst. Er wird mit nohup gestartet und haengt an
 #      keinem Elternprozess, den LoxBerry beenden wuerde.
 #
-#   3. Die Container. Die werden ABSICHTLICH NICHT angefasst - siehe
+#   3. data/plugins/<ordner>.upgrade_sicherung
+#      Seit 0.9.10 liegt die Sicherung beim Aktualisieren NEBEN dem
+#      Datenordner, weil purge_installation ihn auch im Upgrade-Zweig
+#      bedingungslos loescht (sbin/plugininstall.pl :886, :1629 ff.).
+#      Genau deshalb uebersteht sie auch das Deinstallieren. Darin liegt
+#      verlauf.json - die Langzeitwerte, keine Zugangsdaten, aber sie
+#      gehoeren nach dem Entfernen nicht mehr auf die Karte.
+#
+#   4. Die Container. Die werden ABSICHTLICH NICHT angefasst - siehe
 #      unten.
 #
 # Was NICHT aufgeraeumt werden muss: MQTT. Der Dienst sendet mit
@@ -123,7 +131,15 @@ echo "<INFO> Miniserver-Zugangsdaten und Mikrofon-Schluessel sind damit"
 echo "<INFO> vom LoxBerry entfernt."
 
 # ---------------------------------------------------------------
-# 3. Container: bewusst NICHT anfassen
+# 3. Der Nachbar des Datenordners - siehe Punkt 3 oben
+# ---------------------------------------------------------------
+SICH="$BASE/data/plugins/$PFOLDER.upgrade_sicherung"
+if [ -d "$SICH" ]; then
+    rm -rf "$SICH" && echo "<OK> Sicherung des Aktualisierens entfernt: $PFOLDER.upgrade_sicherung"
+fi
+
+# ---------------------------------------------------------------
+# 4. Container: bewusst NICHT anfassen
 # ---------------------------------------------------------------
 # In den Datenordnern der Container liegen die heruntergeladenen
 # Modelle - Whisper und das Sprachmodell sind zusammen mehrere
