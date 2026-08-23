@@ -261,7 +261,6 @@ function sp_token()
 /* ---------------- Zwischenspeicher ---------------- */
 
 function sp_loxone()   { return sp_json_lesen(sp_paths()['datadir'] . '/loxone.json'); }
-function sp_zustand()  { return sp_json_lesen(sp_paths()['datadir'] . '/zustand.json'); }
 function sp_verlauf()
 {
     $d = sp_json_lesen(sp_paths()['datadir'] . '/verlauf.json');
@@ -294,18 +293,6 @@ function sp_log($text)
         @file_put_contents($p['log'], implode("\n", $rest) . "\n");
     }
     @file_put_contents($p['log'], '[' . date('Y-m-d H:i:s') . '] ' . $text . "\n", FILE_APPEND);
-}
-
-/** Dieselbe Meldung hoechstens einmal je Zeitfenster - sonst wird die
- *  Logdatei durch eine Dauerstoerung unlesbar. */
-function sp_log_gebremst($schluessel, $text, $sekunden = 3600)
-{
-    $f = sp_paths()['datadir'] . '/.meld_' . preg_replace('/[^a-z0-9_]/i', '', $schluessel);
-    $letzte = is_file($f) ? (int) @file_get_contents($f) : 0;
-    if (time() - $letzte >= $sekunden) {
-        @file_put_contents($f, (string) time());
-        sp_log($text);
-    }
 }
 
 /* ---------------- Dienst ---------------- */
@@ -551,21 +538,6 @@ function sp_befehl_absetzen($befehl, $wartezeit = null)
  * beantwortet also NICHT die Frage, ob Nachrichten ankommen koennen -
  * massgeblich ist Gatewayautostart.
  */
-/**
- * Einen Wert fuer den UDP-Eingang des MQTT-Gateways unschaedlich machen.
- *
- * Das Gateway liest ZEILENWEISE. Ein Zeilenumbruch im Wert - aus einer
- * Fehlermeldung des Betriebssystems, einem Geraetenamen oder der Ausgabe
- * eines Systembefehls - zerlegt die Uebertragung, und aus den Bruchstuecken
- * bildet das Gateway erfundene Themen. Ein Tabulator schadet ebenso, weil
- * Leerzeichen Thema und Wert trennt.
- */
-function sp_mqtt_wert_saeubern($v)
-{
-    $wert = str_replace(array("\r\n", "\r", "\n", "\t"), ' ', (string) $v);
-    return trim(preg_replace('/ {2,}/', ' ', $wert));
-}
-
 function sp_mqtt_zustand()
 {
     $p = sp_paths();
@@ -600,40 +572,6 @@ function sp_mqtt_zustand()
         'pw'         => (string) $hol('Brokerpass', 'brokerpass'),
         'lokal'      => in_array((string) $hol('Uselocalbroker', 'uselocalbroker'), array('1', 'true'), true) ? 1 : 0,
     );
-}
-
-/**
- * Werte ueber das LoxBerry-Gateway veroeffentlichen.
- *
- * Bewusst ueber den UDP-Eingang des Gateways und nicht mit einem eigenen
- * MQTT-Client: so muss das Plugin ueberhaupt keine Broker-Zugangsdaten
- * kennen, um zu senden. Das Gateway hat sie ohnehin.
- */
-function sp_mqtt_senden(array $paare, $praefix)
-{
-    $z = sp_mqtt_zustand();
-    if (!$z['udpport']) {
-        sp_log_gebremst('mqtt_kein_port', 'MQTT: kein UDP-Eingangsport in der general.json gefunden - nichts gesendet.');
-        return false;
-    }
-    if (!$z['autostart']) {
-        sp_log_gebremst('mqtt_aus', 'MQTT: das Gateway ist nicht auf Autostart gestellt '
-            . '(System, MQTT Gateway). Es wird gesendet, aber vermutlich hoert niemand zu.');
-    }
-    $s = @socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
-    if (!$s) {
-        sp_log_gebremst('mqtt_socket', 'MQTT: Socket nicht moeglich.');
-        return false;
-    }
-    foreach ($paare as $k => $v) {
-        if ($v === null || $v === '') {
-            continue;   // fehlender Wert: nichts senden statt eine erfundene 0
-        }
-        $msg = 'publish ' . $praefix . '/' . $k . ' ' . sp_mqtt_wert_saeubern($v);
-        @socket_sendto($s, $msg, strlen($msg), 0, '127.0.0.1', $z['udpport']);
-    }
-    socket_close($s);
-    return true;
 }
 
 /* ==================================================================
