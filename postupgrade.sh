@@ -43,5 +43,16 @@ if [ -d "$PBIN/__pycache__" ]; then
     echo "<OK> Alte Python-Zwischendateien entfernt."
 fi
 
+# Die Zwischendatei zustand.json ist seit 0.10.0 entfallen.
+#
+# Sie wurde bei JEDEM gesprochenen Satz geschrieben und von niemandem gelesen -
+# ein Schreibvorgang auf die SD-Karte ohne Nutzen. Ihr Inhalt steht jetzt in
+# loxone.json, die ohnehin im Sekundentakt entsteht.
+PDATA_ALT="$BASE/data/plugins/$PFOLDER"
+if [ -f "$PDATA_ALT/zustand.json" ]; then
+    rm -f "$PDATA_ALT/zustand.json"
+    echo "<OK> Nicht mehr benutzte zustand.json entfernt."
+fi
+
 echo "<OK> postupgrade abgeschlossen."
 exit 0

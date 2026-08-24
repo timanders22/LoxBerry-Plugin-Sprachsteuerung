@@ -5,13 +5,48 @@
     "eine Aktualisierung des Plugins ueberschreibt sie NIE.",
     "",
     "In den Mustern stehen Platzhalter in geschweiften Klammern:",
-    "  {ziel}  wird gegen die Liste 'ziele' samt ihrer Aliasnamen aufgeloest",
-    "  {wert}  nimmt eine Zahl auf",
-    "  {rest}  nimmt beliebigen Text auf",
+    "  {ziel}   wird gegen die Liste 'ziele' samt ihrer Aliasnamen aufgeloest.",
+    "           DARF FEHLEN: nennt der Satz kein Ziel, gilt der Raum, der am",
+    "           Mikrofon eingetragen ist ('mach an' im Wohnzimmer).",
+    "  {wert}   nimmt eine Zahl auf - als Ziffern ODER als Wort ('fuenfzig').",
+    "  {dauer}  nimmt eine Zeitangabe auf ('10 minuten', 'einer stunde').",
+    "           Der Befehl wird dann vorgemerkt und spaeter ausgefuehrt.",
+    "  {rest}   nimmt beliebigen Text auf und steht im Antworttext zur",
+    "           Verfuegung.",
     "Alternativen stehen in eckigen Klammern und mit senkrechtem Strich:",
     "  'mach [das|die] licht {ziel} an'",
     "Beim Vergleich werden Gross- und Kleinschreibung, Umlaute und",
-    "Zeichensetzung eingeebnet - 'Küche' und 'kueche' sind dasselbe."
+    "Zeichensetzung eingeebnet - 'Küche' und 'kueche' sind dasselbe.",
+    "",
+    "IM ANTWORTTEXT laesst sich jedes Feld des Ergebnisses einsetzen:",
+    "  {zielname} {wert} {einheit} {dauer_s} {rest} {istwert}",
+    "",
+    "EINEN ZUSTAND ERFRAGEN ({istwert}):",
+    "Ein Ziel kann ein Feld 'url_lesen' tragen. Das Plugin ruft die Adresse",
+    "auf und setzt die Antwort als {istwert} in den Antworttext ein. Damit",
+    "beantwortet die Anlage Fragen, statt nur zu schalten. Beispiel - beides",
+    "eintragen, sonst bleibt die Frage stumm:",
+    "",
+    "  Ziel:",
+    "    \"wohnzimmer_temperatur\": {",
+    "      \"name\": \"Temperatur im Wohnzimmer\",",
+    "      \"alias\": [\"wohnzimmer\", \"im wohnzimmer\"],",
+    "      \"thema\": \"wohnzimmer/temperatur\",",
+    "      \"einheit\": \"Grad\",",
+    "      \"url_lesen\": \"http://192.168.1.5/dev/sps/io/Temp_WZ/state\"",
+    "    }",
+    "  Regel:",
+    "    { \"muster\": \"wie [warm|kalt] ist es [im|in der|] {ziel}\",",
+    "      \"absicht\": \"frage\", \"aktion\": \"temperatur\",",
+    "      \"antwort\": \"Im {zielname} sind es {istwert} {einheit}\" }",
+    "",
+    "Verlangt der Miniserver eine Anmeldung, wird sie der Adresse in der",
+    "Form  benutzer:kennwort  vorangestellt, getrennt durch ein",
+    "At-Zeichen vor der IP. Die Konfigurationsdatei hat dafuer die",
+    "Rechte 0600, und die Oberflaeche zeigt solche Adressen maskiert.",
+    "",
+    "HEIKLE ZIELE: ein Ziel mit \"bestaetigen\": true wird nicht sofort",
+    "geschaltet - die Anlage fragt zurueck, und erst ein 'ja' loest aus."
   ],
 
   "ziele": {
@@ -32,7 +67,24 @@
     }
   },
 
+  "_hinweis_reihenfolge": [
+    "DIE REIHENFOLGE ENTSCHEIDET. Es gilt die ERSTE Regel, die passt.",
+    "Genauere Muster gehoeren deshalb nach oben - sonst verschluckt das",
+    "allgemeinere sie. Beispiel: '[schalte|mach] {ziel} [aus|ab]' passt auch",
+    "auf 'mach das wohnzimmer in 10 minuten aus', weil {ziel} den ganzen",
+    "Rest fassen kann; der Befehl waere dann SOFORT ausgefuehrt worden.",
+    "Der Selbsttest im Reiter Test prueft das und nennt die verdeckte Regel."
+  ],
+
   "regeln": [
+    { "muster": "[schalte|mach] {ziel} in {dauer} [aus|ab]",
+      "absicht": "schalten", "aktion": "aus",
+      "antwort": "Gut, {zielname} geht in {dauer_s} Sekunden aus" },
+
+    { "muster": "[schalte|mach] {ziel} in {dauer} [an|ein]",
+      "absicht": "schalten", "aktion": "ein",
+      "antwort": "Gut, {zielname} geht in {dauer_s} Sekunden an" },
+
     { "muster": "[schalte|mach] {ziel} [an|ein]",
       "absicht": "schalten", "aktion": "ein",
       "antwort": "{zielname} ist eingeschaltet" },
@@ -50,11 +102,7 @@
       "antwort": "{zielname} ist ausgeschaltet" },
 
     { "muster": "[dimme|stelle] {ziel} auf {wert} [prozent|]",
-      "absicht": "dimmen", "aktion": "wert",
-      "antwort": "{zielname} steht auf {wert} Prozent" },
-
-    { "muster": "wie [warm|kalt] ist es [im|in der|] {ziel}",
-      "absicht": "frage", "aktion": "temperatur",
-      "antwort": "" }
+      "absicht": "dimmen", "aktion": "wert", "einheit": "Prozent",
+      "antwort": "{zielname} steht auf {wert} Prozent" }
   ]
 }

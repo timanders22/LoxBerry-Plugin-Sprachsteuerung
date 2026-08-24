@@ -27,7 +27,10 @@ chmod 600 "$BASE/config/plugins/$PFOLDER.backup.sprachsteuerung.json" 2>/dev/nul
 echo "<OK> preupgrade abgeschlossen. Die Container bleiben unberuehrt."
 
 # ---------- Langzeitwerte retten ----------
-# der Verlauf der erkannten Befehle.
+# der Verlauf der erkannten Befehle, die Messreihe und die Ansagezeiten.
+# Die Messreihe ist seit 0.10.0 dabei: ohne sie laesst sich nach einem
+# Modellwechsel nicht mehr sagen, ob es schneller geworden ist - und genau
+# dafuer misst man.
 # Der Installer loescht data/plugins/<x>/ bei JEDEM Update - gemessen an
 # sbin/plugininstall.pl (Zweig master, 23.08.2026): &purge_installation steht
 # im Upgrade-Zweig (:886), und ihr Rumpf loescht ohne Bedingung (:1631).
@@ -36,7 +39,7 @@ echo "<OK> preupgrade abgeschlossen. Die Container bleiben unberuehrt."
 LANG_SICHER="$BASE/data/plugins/$PFOLDER.upgrade_sicherung"
 mkdir -p "$LANG_SICHER" 2>/dev/null
 chmod 0700 "$LANG_SICHER" 2>/dev/null
-for LANG_F in verlauf.json; do
+for LANG_F in verlauf.json messwerte.json ansagen.json; do
     [ -f "$BASE/data/plugins/$PFOLDER/$LANG_F" ] \
         && cp -p "$BASE/data/plugins/$PFOLDER/$LANG_F" "$LANG_SICHER/$LANG_F" 2>/dev/null
 done

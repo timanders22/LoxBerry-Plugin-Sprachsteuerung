@@ -31,7 +31,7 @@ PLOG="$BASE/log/plugins/$PFOLDER"
 PCONFIG="$BASE/config/plugins/$PFOLDER"
 VENV="$PBIN/venv"
 
-mkdir -p "$PDATA/befehle" "$PDATA/antworten" "$PDATA/modelle" "$PDATA/verlauf" \
+mkdir -p "$PDATA/befehle" "$PDATA/antworten" "$PDATA/modelle" "$PDATA/verlauf" "$PDATA/timer" \
          "$PLOG" "$PCONFIG" || {
     echo "<FAIL> Ordner konnten nicht angelegt werden."
     exit 1
@@ -42,9 +42,16 @@ chmod 755 "$PDATA" "$PLOG" "$PCONFIG" 2>/dev/null
 chmod 600 "$PCONFIG/sprachsteuerung.json"
 # Die Satzdatei ist Nutzerinhalt: nur anlegen, nie ueberschreiben.
 if [ ! -f "$PCONFIG/saetze.json" ]; then
-    if [ -f "$BASE/templates/plugins/$PFOLDER/saetze_de.json" ]; then
-        cp "$BASE/templates/plugins/$PFOLDER/saetze_de.json" "$PCONFIG/saetze.json"
-        echo "<OK> Beispielsaetze eingerichtet."
+    # Die Beispielsaetze richten sich nach der Oberflaechensprache des
+    # LoxBerry. Bis 0.9.11 lag nur die deutsche Fassung bei; die Oberflaeche
+    # war zweisprachig, das Verstehen nicht.
+    SPRACHE=$(sed -n 's/^ *"Lang" *: *"\([a-z][a-z]\)".*//p'               "$BASE/config/system/general.json" 2>/dev/null | head -n 1)
+    [ -n "$SPRACHE" ] || SPRACHE=de
+    QUELLE="$BASE/templates/plugins/$PFOLDER/saetze_$SPRACHE.json"
+    [ -f "$QUELLE" ] || QUELLE="$BASE/templates/plugins/$PFOLDER/saetze_de.json"
+    if [ -f "$QUELLE" ]; then
+        cp "$QUELLE" "$PCONFIG/saetze.json"
+        echo "<OK> Beispielsaetze eingerichtet ($(basename "$QUELLE"))."
     else
         echo '{"regeln":[],"ziele":{}}' > "$PCONFIG/saetze.json"
     fi
@@ -139,6 +146,18 @@ if [ -x "$PBIN/hardware.py" ]; then
     "$VENV/bin/python3" "$PBIN/hardware.py" --klartext 2>/dev/null | sed 's/^/<INFO> /'
 fi
 
+# ---------- Die gemeinsame Vorgabenliste ----------
+# Seit 0.10.0 lesen BEIDE Seiten - Oberflaeche und Dienst - ihre Vorgabewerte
+# aus templates/vorgaben.json. Fehlt die Datei, kennt keiner von beiden einen
+# Vorgabewert; das ist kein stiller Fehler, sondern einer, der gemeldet gehoert.
+if [ -f "$BASE/templates/plugins/$PFOLDER/vorgaben.json" ]; then
+    echo "<OK> Vorgabenliste eingerichtet."
+else
+    echo "<FAIL> templates/vorgaben.json fehlt nach der Installation."
+    echo "<INFO> Ohne diese Datei kennen weder Oberflaeche noch Dienst ihre"
+    echo "<INFO> Vorgabewerte. Das Plugin bitte erneut installieren."
+fi
+
 chmod 755 "$PBIN/dienst.sh" "$PBIN/sprachsteuerung_dienst.py" "$PBIN/hardware.py" 2>/dev/null
 chown -R loxberry:loxberry "$PBIN" "$PDATA" "$PLOG" "$PCONFIG" 2>/dev/null
 chmod 600 "$PCONFIG/sprachsteuerung.json"
@@ -154,7 +173,7 @@ echo "<INFO> Vorschlag fuer diese Hardware und die Knoepfe, die Container anzule
 # findet nichts vor und faengt sauber bei null an.
 LANG_SICHER="$BASE/data/plugins/$PFOLDER.upgrade_sicherung"
 if [ -d "$LANG_SICHER" ]; then
-    for LANG_F in verlauf.json; do
+    for LANG_F in verlauf.json messwerte.json ansagen.json; do
         if [ -f "$LANG_SICHER/$LANG_F" ] \
            && [ ! -s "$BASE/data/plugins/$PFOLDER/$LANG_F" ]; then
             mkdir -p "$BASE/data/plugins/$PFOLDER" 2>/dev/null

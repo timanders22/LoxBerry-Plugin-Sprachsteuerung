@@ -391,6 +391,72 @@ def ziel(cfg: dict, dienst: str, vorgabe_port: int) -> tuple[str, int]:
     return host, port
 
 
+def messen_wake(host: str, port: int) -> dict:
+    """Antwortet der Wortwecker, und welche Weckwoerter kennt er?
+
+    Gemessen wird hier bewusst KEINE Erkennungsguete - ob ein Weckwort in
+    einem bestimmten Raum anspringt, entscheidet die Raumakustik und nicht
+    dieses Skript. Gemessen wird, ob der Dienst antwortet, wie lange er dafuer
+    braucht und welche Modelle er fuehrt. Letzteres beantwortet die Frage, an
+    der ein Vertipper im Weckwort bisher unbemerkt blieb.
+
+    Bis 0.9.11 wurde der Wortwecker gar nicht gemessen: drei von vier
+    verwalteten Diensten standen im Ergebnis, der vierte fehlte.
+    """
+    try:
+        with socket.create_connection((host, port), timeout=10) as s:
+            datei = s.makefile("rb")
+            t0 = time.monotonic()
+            wy_senden(s, "describe", {})
+            s.settimeout(30)
+            while True:
+                ereignis = wy_lesen(datei)
+                if ereignis is None:
+                    return {"ok": 0, "fehler": "Verbindung wurde ohne Antwort geschlossen."}
+                if ereignis.get("type") == "info":
+                    daten = ereignis.get("data") or {}
+                    namen = []
+                    for eintrag in (daten.get("wake") or []):
+                        if not isinstance(eintrag, dict):
+                            continue
+                        for m in (eintrag.get("models") or []):
+                            if isinstance(m, dict) and m.get("name"):
+                                namen.append(str(m["name"]))
+                    return {"ok": 1, "sekunden": round(time.monotonic() - t0, 2),
+                            "weckwoerter": sorted(set(namen))}
+    except OSError as err:
+        return {"ok": 0, "fehler": str(err)}
+    except ValueError as err:
+        return {"ok": 0, "fehler": "Antwort war kein gueltiges JSON: " + str(err)}
+
+
+def messwerte_ablegen(messung: dict) -> str:
+    """Die Messung behalten, damit sich vorher und nachher vergleichen laesst.
+
+    Bis 0.9.11 wurde das Ergebnis angezeigt und dann verworfen. Nach einem
+    Modellwechsel liess sich nicht mehr sagen, ob es schneller geworden ist -
+    und genau dafuer misst man.
+    """
+    pfad = LBHOME / "data" / "plugins" / PNAME / "messwerte.json"
+    try:
+        pfad.parent.mkdir(parents=True, exist_ok=True)
+        alt = {}
+        if pfad.is_file():
+            try:
+                alt = json.loads(pfad.read_text(encoding="utf-8"))
+            except ValueError:
+                alt = {}
+        liste = alt.get("messungen") if isinstance(alt.get("messungen"), list) else []
+        liste.insert(0, {"ts": int(time.time()), "messung": messung})
+        tmp = pfad.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"messungen": liste[:20]},
+                                  ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, pfad)
+        return str(pfad)
+    except OSError as err:
+        return "nicht abgelegt: %s" % err
+
+
 def main() -> int:
     hw = hardware()
     emp = empfehlung(hw)
@@ -405,6 +471,7 @@ def main() -> int:
         messung = {}
         for dienst, messer, vorgabe in (("whisper", messen_whisper, 10300),
                                         ("piper", messen_piper, 10200),
+                                        ("wakeword", messen_wake, 10400),
                                         ("llm", messen_llm, 8080)):
             host, port = ziel(cfg, dienst, int(d.get(dienst, {}).get("port") or vorgabe))
             wert = messer(host, port)
@@ -415,6 +482,7 @@ def main() -> int:
             wert["ausgelagert"] = host not in ("127.0.0.1", "localhost", "::1", "0.0.0.0")
             messung[dienst] = wert
         erg["messung"] = messung
+        erg["abgelegt"] = messwerte_ablegen(messung)
     print(json.dumps(erg, ensure_ascii=False, indent=1))
     return 0
 

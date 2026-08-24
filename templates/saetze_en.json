@@ -1,0 +1,89 @@
+{
+  "_hinweis": [
+    "Sentence patterns and target devices, English sample.",
+    "",
+    "This file is copied to config/plugins/sprachsteuerung/saetze.json during",
+    "installation when the LoxBerry interface language is English, and is then",
+    "maintained by the user - a plugin update NEVER overwrites it.",
+    "",
+    "Placeholders in curly braces:",
+    "  {ziel}   resolved against the 'ziele' list including its aliases.",
+    "           MAY BE ABSENT: if the sentence names no target, the room",
+    "           configured on the microphone applies ('turn on' in the living",
+    "           room).",
+    "  {wert}   takes a number - as digits OR as a word ('fifty').",
+    "  {dauer}  takes a time span ('10 minutes', 'one hour'). The command is",
+    "           then scheduled and executed later.",
+    "  {rest}   takes arbitrary text and is available in the answer.",
+    "Alternatives go in square brackets separated by a vertical bar:",
+    "  'turn [the|] light {ziel} on'",
+    "Case, umlauts and punctuation are normalised for the comparison.",
+    "",
+    "IN THE ANSWER TEXT every field of the result can be used:",
+    "  {zielname} {wert} {einheit} {dauer_s} {rest} {istwert}",
+    "",
+    "ORDER MATTERS: the FIRST matching rule wins. More specific patterns",
+    "belong at the top - the self-test on the Test tab checks this and",
+    "names any shadowed rule.",
+    "",
+    "WHY on/off HAVE A FIXED POSITION HERE: a pattern like",
+    "  [turn|switch] [off|] {ziel} [off|]",
+    "looks convenient but is ambiguous - with both particles optional,",
+    "{ziel} swallows the word 'off' and the ON rule wins. Measured on",
+    "24.08.2026: 'switch off the kitchen' switched the kitchen ON.",
+    "",
+    "ASKING FOR A STATE ({istwert}): a target may carry a field 'url_lesen'.",
+    "The plugin fetches that address and inserts the answer as {istwert}.",
+    "",
+    "SENSITIVE TARGETS: a target with \"bestaetigen\": true is not switched at",
+    "once - the system asks back, and only a 'yes' triggers it."
+  ],
+
+  "ziele": {
+    "livingroom_light": {
+      "name": "living room light",
+      "alias": ["living room", "livingroom", "lounge"],
+      "thema": "livingroom/light"
+    },
+    "kitchen_light": {
+      "name": "kitchen light",
+      "alias": ["kitchen", "in the kitchen"],
+      "thema": "kitchen/light"
+    },
+    "all_lights": {
+      "name": "all lights",
+      "alias": ["all lights", "everywhere", "every light"],
+      "thema": "all/light"
+    }
+  },
+
+  "regeln": [
+    { "muster": "[turn|switch] {ziel} [off|down] in {dauer}",
+      "absicht": "schalten", "aktion": "aus",
+      "antwort": "All right, {zielname} goes off in {dauer_s} seconds" },
+
+    { "muster": "[turn|switch] {ziel} on in {dauer}",
+      "absicht": "schalten", "aktion": "ein",
+      "antwort": "All right, {zielname} comes on in {dauer_s} seconds" },
+
+    { "muster": "[turn|switch] off {ziel}",
+      "absicht": "schalten", "aktion": "aus",
+      "antwort": "{zielname} is off" },
+
+    { "muster": "[turn|switch] {ziel} off",
+      "absicht": "schalten", "aktion": "aus",
+      "antwort": "{zielname} is off" },
+
+    { "muster": "[turn|switch] on {ziel}",
+      "absicht": "schalten", "aktion": "ein",
+      "antwort": "{zielname} is on" },
+
+    { "muster": "[turn|switch] {ziel} on",
+      "absicht": "schalten", "aktion": "ein",
+      "antwort": "{zielname} is on" },
+
+    { "muster": "[dim|set] {ziel} to {wert} [percent|]",
+      "absicht": "dimmen", "aktion": "wert", "einheit": "percent",
+      "antwort": "{zielname} is at {wert} percent" }
+  ]
+}

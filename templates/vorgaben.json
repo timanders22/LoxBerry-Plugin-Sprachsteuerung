@@ -1,0 +1,89 @@
+{
+  "_hinweis": [
+    "DIE Vorgabenliste. EINE Datei fuer beide Sprachen.",
+    "",
+    "WARUM DIESE DATEI SEIT 0.10.0 EXISTIERT",
+    "Bis 0.9.11 stand die Liste zweimal: als VORGABEN in",
+    "bin/sprachsteuerung_dienst.py und als sp_vorgaben() in",
+    "webfrontend/html/sp_lib.php. Die Oberflaeche kannte 22 Schluessel, der",
+    "Dienst 19 - die drei Modellnamen fehlten drueben. Solange die drei nur",
+    "die Oberflaeche braucht, faellt das nicht auf; beim naechsten Schluessel,",
+    "den beide Seiten lesen, faellt es teuer auf. Bei Gardena bedeutete ein",
+    "fehlender Schluessel in der Oberflaeche 'an' und im Dienst 'aus'.",
+    "",
+    "Ueber die Sprachgrenze hinweg gibt es keine gemeinsame Funktion - also",
+    "eine gemeinsame Datei. sp_vorgaben() liest sie, VORGABEN liest sie, und",
+    "der Reiter Test zaehlt beide Seiten gegeneinander.",
+    "",
+    "Wer hier einen Schluessel ergaenzt, ergaenzt ihn fuer beide Seiten. Die",
+    "Datei wird bei der Installation nach templates/plugins/<ordner>/ kopiert",
+    "und NICHT vom Benutzer gepflegt - die Benutzerwerte stehen in",
+    "config/plugins/<ordner>/sprachsteuerung.json."
+  ],
+
+  "vorgaben": {
+    "satelliten": [],
+
+    "whisper_host": "127.0.0.1", "whisper_port": 10300,
+    "piper_host": "127.0.0.1",   "piper_port": 10200,
+    "wake_host": "127.0.0.1",    "wake_port": 10400,
+    "llm_host": "127.0.0.1",     "llm_port": 8080,
+
+    "llm_ein": 0,
+    "sprache": "de",
+    "wakeword": "ok_nabu",
+
+    "whisper_modell": "",
+    "piper_stimme": "",
+    "llm_modell": "",
+
+    "antwort_sprechen": 1,
+    "antwortweg": "beide",
+    "tts": { "mode": "musicserver", "ip": "", "port": 7091,
+             "zones": "1", "volume": 8, "lang": "de", "template": "",
+             "stimme": "" },
+
+    "mqtt_ein": 1,
+    "mqtt_topic": "sprachsteuerung",
+
+    "miniserver_url": "",
+    "aktionstoken": "",
+    "wartezeit": 10,
+    "verlauf_zeilen": 50,
+
+    "ruhe": { "ein": 0, "von": "22:00", "bis": "07:00" },
+
+    "ansage_abstand_s": 10,
+    "ansage_je_tag": 0,
+
+    "herzschlag_s": 60,
+    "kontext_s": 30,
+    "bestaetigung_s": 20,
+
+    "mitschnitt_bis": 0,
+    "messwerte": {}
+  },
+
+  "grenzen": {
+    "whisper_port":     [1, 65535],
+    "piper_port":       [1, 65535],
+    "wake_port":        [1, 65535],
+    "llm_port":         [1, 65535],
+    "wartezeit":        [1, 12],
+    "verlauf_zeilen":   [5, 500],
+    "ansage_abstand_s": [0, 3600],
+    "ansage_je_tag":    [0, 500],
+    "herzschlag_s":     [0, 3600],
+    "kontext_s":        [0, 300],
+    "bestaetigung_s":   [0, 120]
+  },
+
+  "auswahl": {
+    "antwortweg": ["satellit", "loxone", "beide"],
+    "tts_mode":   ["musicserver", "ms4h", "audioserver", "custom"]
+  },
+
+  "wakewords": [
+    "ok_nabu", "hey_jarvis", "alexa", "hey_mycroft", "hey_rhasspy"
+  ]
+}

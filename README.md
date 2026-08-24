@@ -1,92 +1,238 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
+Version 0.10.0
+
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
 LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 
-> **Fassung 0.9.8 — ungeprüft an echter Hardware.** Gebaut ohne Mikrofon;
+> **Weiterhin 0.x — ungeprüft an echter Hardware.** Gebaut ohne Mikrofon;
 > geprüft wurde die ganze Kette gegen Attrappen, die das **Originalpaket** des
-> Wyoming-Protokolls benutzen. Deshalb 0.9.x und nicht 1.0.0.
+> Wyoming-Protokolls benutzen. Was Raumakustik, Nachhall und Nebengeräusche
+> daraus machen, entscheidet sich erst bei Ihnen.
 
-## Neu in 0.9.8
+---
 
-**Ausgelagerte Dienste werden als solche behandelt.** Die Felder
-`whisper_host`, `piper_host`, `wake_host` und `llm_host` gab es schon immer —
-wer sie benutzte, bekam aber eine Oberfläche, die weiter so tat, als liefe
-alles hier:
+## Neu in 0.10.0
 
-* Der Reiter *Dienste* zeigte für einen ausgelagerten Dienst den Zustand des
-  **hiesigen** Containers, den es gar nicht gibt — also „fehlt". Jetzt steht
-  dort *läuft extern* oder *extern, antwortet nicht*, und das ist gemessen:
-  eine Verbindung auf die eingetragene Adresse.
-* *Anlegen*, *Starten*, *Anhalten* und *Entfernen* hätten den **falschen
-  Rechner** getroffen, nämlich den LoxBerry. `sp_container()` weist sie jetzt
-  ab und nennt die Adresse, auf der der Dienst wirklich läuft. Dasselbe gilt
-  für das Container-Protokoll.
-* Statt der Knöpfe steht dort die **fertige Aufrufzeile zum Mitnehmen**: mit
-  Portbindung ans Netz statt an `127.0.0.1`, sonst käme der LoxBerry nicht
-  heran.
-* Neben jedem Dienst steht jetzt seine Adresse.
+0.10.0 ist zum größeren Teil **keine Erweiterung, sondern das Fertigbauen von
+Dingen, die schon versprochen waren.** Vier davon meldeten Erfolg und taten
+nichts — die unangenehmste Sorte Lücke.
 
-**Der Knopf *Messen* mass immer gegen `127.0.0.1`.** Wer Whisper oder das
-Sprachmodell ausgelagert hatte, mass damit den leeren LoxBerry statt des
-Dienstes, den er tatsächlich benutzt — das Ergebnis war wertlos, sah aber
-nicht so aus. `bin/hardware.py` liest jetzt die Konfiguration und misst dort,
-wo der Dienst läuft; im Ergebnis stehen Adresse, Port und ein Kennzeichen
-`ausgelagert`.
+### Was versprochen war und jetzt wirkt
 
-**Die Modelltabelle in dieser README stimmte nicht mit
-`templates/modelle.json` überein** — sie nannte für „groß" `medium-int8` und
-für „mittel" `small-int8`, während die Datei `small-int8` beziehungsweise
-`base-int8` vorschlägt. Maßgeblich ist die Datei; die Tabelle unten ist
-berichtigt.
+**`aktion=sprechen` erzeugt keine Stille mehr.** Bis 0.9.11 rief die
+Warteschlange Piper auf, rechnete aus der Antwort die Audiodauer aus — und warf
+die Audioblöcke weg. Es ging weder etwas an einen Satelliten noch an den Music
+Server. Loxone bekam `SET;OK=1;…Sprachausgabe erzeugt: 1,80 s Audio`, und im
+Haus blieb es still. Die Ansage geht jetzt über den eingestellten Antwortweg
+hinaus, wahlweise in eine bestimmte Zone (`&zone=4`) oder an ein bestimmtes
+Mikrofon (`&mikrofon=Küche`).
 
-## Neu in 0.9.2
+**Der Wortwecker wird angesprochen.** Der Container wurde angelegt, gestartet,
+im Selbsttest geprüft und mit `--preload-model` versorgt — und nie befragt. Wer
+ein Mikrofon ohne eigenen Wortwecker anschloss, bekam einen grünen Haken und ein
+Mikrofon, das nicht reagiert. Verlangt ein Satellit die Verarbeitung ab der
+Stufe `wake`, läuft sein Audio jetzt durch openWakeWord, und erst ein Treffer
+startet die Aufnahme. Antwortet der Wortwecker nicht, wird ohne Weckwort
+aufgenommen **und das gesagt** — ein stummes Mikrofon wäre die schlechtere
+Antwort.
 
-**Der Plugin-Ordner wird ermittelt, nicht geraten.** `sp_paths()` fiel auf den
-festen Namen `sprachsteuerung` zurück, sobald `config/plugins/<ordner>` noch
-fehlte — etwa im Augenblick der Installation. Hängt LoxBerry bei einer
-Zweitinstallation einen Zähler an (`sprachsteuerung_01`, weil der Name schon
-belegt war), zeigten deren Pfade damit auf die **erste** Installation:
-gemeinsame Konfiguration, gemeinsame Warteschlange, gemeinsames Protokoll.
-Maßgeblich ist jetzt `LBPPLUGINDIR`; der feste Name greift nur noch, wo der
-ermittelte nachweislich kein Plugin-Ordner sein kann (aus dem ausgepackten
-Archiv heraus heißt er `html`).
+**ESPHome-Mikrofone haben einen Audioweg.** Bis 0.9.11 wurde verbunden,
+`device_info()` geholt und dann in einer Schleife eine Sekunde geschlafen. Kein
+Rückruf, kein Audio, kein Satz. Jetzt werden die Rückrufe der
+Voice-Assistant-Schnittstelle bedient. **Ob der Audioweg an einem echten Gerät
+trägt, ist mangels Gerät nicht gemessen** — der Selbsttest sagt das jetzt auch
+so, statt einen grünen Haken zu zeigen, weil ein Port offen ist.
 
-**Eine leere Befehlsdatei konnte in die Warteschlange geraten.**
-`sp_befehl_senden()` schrieb `json_encode($befehl)` direkt weiter. Gibt
-`json_encode` bei ungültigem UTF-8 `false` zurück, macht `file_put_contents`
-daraus eine leere Zeichenkette, schreibt null Byte und meldet **Erfolg** — der
-Rückgabewert ist `0`, nicht `false`, die Prüfung auf `=== false` greift also
-nicht. In der Warteschlange läge dann eine leere Datei, die der Dienst nicht
-deuten kann. Jetzt wird zuerst kodiert und der Rückgabewert angesehen, wie es
-`sp_json_schreiben()` schon immer tat.
+**Die Anlage kann Fragen beantworten.** Die mitgelieferte Regel „wie warm ist es
+im …" trug einen **leeren** Antworttext; auf die Frage blieb die Anlage stumm,
+und zwar ohne Fehlermeldung. Gleichzeitig las `miniserver_rufen()` die Antwort
+des Miniservers bereits ein und warf sie weg. Ein Ziel kann jetzt ein Feld
+`url_lesen` tragen; was dort steht, setzt der Platzhalter `{istwert}` in den
+Antworttext ein.
 
-## Neu in 0.9.1: der Rückweg nach Loxone
+**`{rest}` kommt an, `neu_laden` tut etwas.** Der Platzhalter war an drei
+Stellen angekündigt, wurde vom Ausdruck aufgesammelt und dann verworfen — ein
+Muster wie `sag mir {rest}` griff und kam leer an. Jetzt wird **jede** benannte
+Gruppe durchgereicht und steht im Antworttext zur Verfügung. Die
+Warteschlangen-Aktion `neu_laden` meldete „wird beim nächsten Satz neu gelesen"
+und tat nichts; niemand setzte sie ab. Jetzt lädt sie wirklich neu und nennt die
+Beanstandungen. Die Datei `zustand.json` wurde bei jedem Satz geschrieben und
+von niemandem gelesen — sie ist entfallen.
 
-Bis 0.9.0 sprach Piper ausschließlich in den Lautsprecher des Satelliten, der
-die Frage gehört hatte. Wer im Nebenzimmer stand, hörte nichts — und in der
-Visualisierung stand auch nichts. Beides holt 0.9.1 nach:
+**Der Modus „Originaler Loxone Audioserver" ist keine Sackgasse mehr.** Er hatte
+keinen Ausgabeweg; wer ihn wählte, hatte den Loxone-Antwortweg faktisch
+abgeschaltet. Der Text geht jetzt über das Thema `<präfix>/ansage` hinaus, das
+in Loxone Config am Textgenerator hängt.
 
-* **Als Text.** Der fertige Antwortsatz geht auf `<präfix>/antwort`, dazu
-  `<präfix>/ok` mit `1` für verstanden und `0` für nicht. Ein Virtueller
-  Texteingang zeigt damit an, was das Haus geantwortet hat.
-* **Als Ansage.** Wahlweise über **Music Server**, **Audioserver**,
-  **MS4H** oder eine **frei eingetragene Adresse** — Zone und Lautstärke
-  einstellbar.
+### Die Wache vor der Stimme
 
-Der Schalter dafür heißt *Antwortweg* und kennt drei Stellungen: `satellit`
-(wie bisher), `loxone` (nur Ansage) und `beide`. **Vorgabe ist `beide`** —
-bestehende Anlagen verlieren damit nichts und bekommen den Loxone-Weg erst
-dazu, sobald eine Adresse eingetragen ist.
+**Ruhezeit.** Das Ansageverfahren dieses Plugins ist die feldgleiche Übernahme
+aus dem Abfuhrkalender — übernommen wurde der Adressbau, **nicht die Wache
+davor.** Ohne sie konnte jeder Loxone-Baustein um drei Uhr nachts das Haus reden
+lassen. Es gibt jetzt ein Nachtfenster, das auch für den Lautsprecher des
+Mikrofons gilt; ein Alarm übergeht es mit `&dringend=1`, und Loxone kann die
+Ansagen über `aktion=ruhe&wert=1` jederzeit stilllegen.
 
-Eine ältere Konfigurationsdatei ohne diesen Abschnitt wird nicht ersetzt,
-sondern auf die Vorgaben gelegt: die neuen Felder sind danach vollständig
-vorhanden, ohne dass irgendwo im Code ein Ersatzwert stehen muss.
+**Wiederholungsbremse.** Ein Loxone-Baustein in einer Schleife erzeugte beliebig
+viele Ansagen hintereinander; die einzige Grenze war die Textlänge. Jetzt gibt
+es einen Mindestabstand und eine Tagesgrenze.
+
+**Formular-Merkmal.** `htmlauth/` schützt gegen den unangemeldeten Aufruf, nicht
+dagegen, dass der Browser eines angemeldeten Bedieners ein Formular abschickt,
+das auf einer fremden Seite steht. Dieses Plugin hat genau die Knöpfe, an denen
+das bei Docker NG zugeschlagen hat — *Token neu würfeln* und *Logdatei leeren* —
+und hatte den Schutz nicht.
+
+### Was dazugekommen ist
+
+**Der Raum, in dem gesprochen wurde.** Ein Mikrofon kann einen *Raum* (ein
+Vorgabeziel) und eine *Zone* tragen. Damit wird aus „mach das Licht im
+Wohnzimmer an" schlicht **„mach an"**, gesprochen im Wohnzimmer — und die
+Antwort kommt in dem Raum an, in dem gefragt wurde, statt im ganzen Haus. Wer
+zugehört hat, steht außerdem in `<präfix>/mikrofon`.
+
+**Kontext über zwei Sätze.** „Licht im Wohnzimmer an" — „heller" — „aus". Ein
+genanntes Ziel gilt für eine einstellbare Zeit weiter.
+
+**Verzögerte Befehle.** `mach das Licht in zehn Minuten aus`. Der Befehl wird
+vorgemerkt und später ausgeführt.
+
+**Rückfrage bei heiklen Zielen.** Ein Ziel mit `bestaetigen` wird nicht sofort
+geschaltet — die Anlage fragt zurück, und erst ein „ja" löst aus. Gedacht für
+Tore, Schlösser und alles, was man nicht versehentlich auslöst.
+
+**Zahlwörter und Einheiten.** „auf fünfzig Prozent" trifft jetzt genauso wie
+„auf 50". Übersetzt wird nur dort, wo das Muster eine Zahl erwartet — beim
+ersten Anlauf wurde global übersetzt, und damit war „schalte das Licht **ein**"
+zu „schalte das Licht **1**" geworden.
+
+**Meldungen im Benachrichtigungsbereich.** Störungen gingen ausschließlich in
+die eigene Logdatei — auf der Ramdisk, wo niemand hinsieht, solange das Haus noch
+reagiert. Ein toter Container fiel erst auf, wenn jemand davorstand und redete.
+
+**Herzschlag.** Über MQTT ging bis 0.9.11 nur etwas hinaus, wenn jemand sprach.
+Wer der Hausempfehlung folgt und MQTT als Regelweg nimmt, verlor damit die
+komplette Ausfallerkennung: ein totes Mikrofon war von einem stillen Haus nicht
+zu unterscheiden.
+
+**Trockenlauf.** *Nur deuten, nicht schalten* — zeigt, welche Regel greift,
+welches Ziel getroffen wäre und welche MQTT-Themen geschrieben würden, ohne dass
+das Licht angeht. Er braucht keinen laufenden Dienst.
+
+**Sichern und zurückspielen.** Die Satzdatei ist der eigentliche Wert dieses
+Plugins und war die einzige Datei ohne Rückfallebene: `sp_saetze()` griff — im
+Gegensatz zu `sp_config()` — nie auf die Zweitschrift zurück, obwohl sie brav
+angelegt wurde. Dazu ein Herunterladen und Einspielen als Datei; Token,
+Miniserver-Adresse und Mikrofon-Schlüssel bleiben absichtlich draußen.
+
+**Ziele aus Loxone übernehmen.** Der Miniserver kennt die Geräteliste
+bereits — jeden Baustein mit Raum und Anzeigenamen. Statt sie abzutippen, holt
+das Plugin die Strukturdatei einmal ab und legt eine Vorschlagsliste zum
+Anhaken vor. Drei Dinge dazu, und sie stehen auch in der Oberfläche: es bleibt
+ein *Vorschlag*; die Zugangsdaten werden **einmal benutzt und nicht
+gespeichert**; und die Satzmuster bleiben unberührt — es kommen nur Ziele dazu.
+
+**Eine Stimme probehören**, ohne einen Container anzulegen: das Plugin lässt
+Piper einen Satz sprechen und liefert das Ergebnis als WAV-Datei aus.
+
+**Englische Beispielsätze.** `templates/saetze_en.json` liegt bei, und
+`postinstall.sh` wählt nach der Oberflächensprache des LoxBerry. Zahlwörter
+versteht die Deutung jetzt in beiden Sprachen, einschließlich der englischen
+Zweiwortform („seventy five"). Die Oberfläche war seit jeher zweisprachig, das
+Verstehen nicht.
+
+**Eine Maske für die Ziele.** Bis 0.9.11 war der Inhalt, den man am häufigsten
+anfasst, ein einziges JSON-Textfeld. Der Rohtext bleibt als Expertenweg
+darunter stehen.
+
+**Was regelmäßig nicht verstanden wird**, steht jetzt als gezählte Liste im
+Reiter Test — mit einem Knopf, der die gehörte Bezeichnung als Alias beim
+gewählten Ziel nachträgt.
+
+**Ein befristeter Mitschnitt.** Fünf Gegenstellen, und bei einem verlorenen Satz
+zeigte das Protokoll nur das Ergebnis, nicht den Weg. Als Frist, nicht als
+Schalter: er schaltet sich selbst ab, weil `log/plugins` auf einer Ramdisk liegt.
+
+**Auswahllisten statt Freitext** für Whisper-Modell, Piper-Stimme, Sprachmodell
+und Weckwort. Ein Vertipper wurde bisher gespeichert und schlug erst als
+Docker-Fehler auf. Der Knopf *Dienste befragen* zeigt, welche Modelle,
+Stimmen und Weckwörter die Container **wirklich** geladen haben.
+
+### Loxone-Anbindung
+
+**`?selftest=1`.** Ein Token muss sich prüfen lassen, **ohne dass etwas
+passiert** — bei diesem Plugin wäre die Alternative, das Haus zum Reden zu
+bringen oder das Licht zu schalten.
+
+**`?aktion=diag`** liefert einen Klartextbefund samt nummerierten Handgriffen.
+
+**Drei Importdateien statt einer.** Neu sind die Vorlage für den virtuellen
+**Ausgang** (Ansage, Satz, Ruhe) und eine Vorlage mit **einem Texteingang je
+Ziel**. Bisher standen die Ausgangsbefehle nur zum Abtippen da — die längsten
+und fehleranfälligsten Zeichenketten der ganzen Oberfläche.
+
+**Statuszeile und Vorlage haben eine Quelle.** `sp_status_felder()` kannte vier
+Felder, die Zeile lieferte sechs: `REGELN` und `ZIELE` kamen in Loxone nie an.
+Jetzt sind es neun Felder, und Zeile, Tabelle und Vorlage entstehen aus
+derselben Liste. Dazu **realistische Grenzen** je Feld statt pauschal
+±2147483647, `MinVal="-1"` überall dort, wo −1 „nicht bekannt" heißt, und die
+Attribute, die Loxone Config selbst schreibt: `HintText`, `<Info templateType…>`
+und `Unit`.
+
+**Suchmuster mit Semikolon** (`\i;NAME=\i\v`), aus einer Funktion — Loxone nimmt
+die erste Fundstelle, und ein Feldname, der Endstück eines anderen ist, würde
+sonst vom längeren getroffen.
+
+**Der MQTT-Reiter ist vollständig**: Gateway-Zustand, das einzutragende Abo und
+die gesamte Themenliste stehen jetzt dort und nicht mehr verstreut. Und der Satz
+„Ohne diesen Eintrag kommt am Miniserver nichts an" hängt an
+`Mqtt.Gatewayversion` — unter Gateway V2 gibt es das Eingabefeld nicht mehr, und
+der unbedingte Satz schickte jeden V2-Anwender zu einem Feld, das es nicht gibt.
+
+### Kleinigkeiten mit Biss
+
+* **Lebenszeichen zum Satelliten.** Die Lesefrist lag bei 3600 Sekunden. Bricht
+  ein WLAN-Mikrofon weg, ohne dass TCP es meldet, zeigte die Oberfläche bis zu
+  einer **Stunde** „verbunden". Jetzt 30 Sekunden plus Ping.
+* **Nach einem Verbindungsabbruch galten wieder die alten Sätze.** Die Zusage
+  „der Dienst liest die Datei von selbst neu" galt nur bis zum ersten Wackler.
+* **Mikrofone werden ohne Neustart übernommen.**
+* **`OK` und `BEREIT` sind zwei Dinge.** `OK` stand auf „irgendein Mikrofon ist
+  verbunden" — eine Anlage ohne Mikrofon, die es geben darf, meldete damit
+  dauerhaft Störung.
+* **Das Feld „Wartezeit" ging bis 120 und wirkte bis 12.** Die Grenze steht
+  jetzt an einer Stelle und im Formular.
+* **Die Miniserver-Adresse wird maskiert angezeigt**, und ein versehentlich
+  geleertes Feld löscht sie nicht mehr.
+* **`{ziel}` fing auch ein reines Leerzeichen.** „mach an" traf damit das Muster
+  mit `ziel=" "`, und die Anlage antwortete „Ich kenne kein Gerät mit der
+  Bezeichnung .".
+* **`hardware.py` misst jetzt alle vier Dienste** und behält die Messreihe —
+  ohne sie ließ sich nach einem Modellwechsel nicht sagen, ob es schneller wurde.
+* **`templates/modelle.json` beschrieb die eigene Schwelle falsch** („freier"
+  statt gesamter Speicher, „unterschritten" statt erreicht).
+* **Die Selbstprüfung lief bei jedem Seitenaufbau mit.** Gemessen unter PHP 8.4
+  gegen die SDK-Attrappe: **6,36 s je Seite, jetzt 0,08 s.** Die Prüfungen
+  laufen nur noch, wenn ihr Reiter offen ist — dort dann vollständig.
+
+### Eine Datei für die Vorgaben
+
+Die Vorgabewerte standen zweimal: als `VORGABEN` im Dienst und als
+`sp_vorgaben()` in der Oberfläche. Die Oberfläche kannte 22 Schlüssel, der
+Dienst 19. Über die Sprachgrenze hinweg gibt es keine gemeinsame Funktion —
+also eine gemeinsame **Datei**, `templates/vorgaben.json`. Der Reiter Test zählt
+beide Seiten gegeneinander, und beim Speichern wird die Konfiguration
+**vervollständigt**: danach heißt „fehlt" nie mehr „gilt als Vorgabewert".
+
+---
 
 ## Der Weg eines Satzes
 
     Mikrofon ──Wyoming/ESPHome──> Sprachdienst (dieses Plugin)
+                                        │
+                                  Wortwecker (nur wenn der Satellit keinen hat)
                                         │
                                   Whisper (Container)   „schalte das Licht
                                         │                im Wohnzimmer ein"
@@ -95,6 +241,7 @@ vorhanden, ohne dass irgendwo im Code ein Ersatzwert stehen muss.
                                   MQTT / HTTP ──> Miniserver
                                         │
                                   Piper (Container) ──> Antwort ins Mikrofon
+                                                   └──> Ansage über Music Server
 
 Das Plugin **entscheidet nichts**. Es sagt Loxone, WAS gemeint war —
 `aktion=ein`, `ziel=wohnzimmer/licht`. Was daraus wird, macht der Miniserver.
@@ -132,7 +279,8 @@ und schlägt vier Stufen vor (`templates/modelle.json`):
 | winzig | darunter | `tiny-int8` | `de_DE-thorsten-low` | **keins** |
 
 Maßgeblich ist `templates/modelle.json`, nicht diese Tabelle — sie ist eine
-Abschrift. Weichen beide ab, gilt die Datei.
+Abschrift. Weichen beide ab, gilt die Datei. Gemeint ist der **gesamte**
+Arbeitsspeicher, und es gilt die erste Stufe, deren Schwelle **erreicht** ist.
 
 Eine erkannte Grafikkarte hebt die Stufe um eins; erkannt wird sie über
 `nvidia-smi`, AMD und Intel zählen also nicht. Ohne 64 Bit oder mit weniger
@@ -161,8 +309,7 @@ die Wyoming-Dienste kennen keine Anmeldung.
 
 **Es stehen nirgends Geschwindigkeitsangaben** — weder in der Oberfläche noch
 hier. Sie wären ohne Ihre Hardware geraten. Der Knopf *Messen* im Reiter
-*Dienste* misst stattdessen: er schickt drei Sekunden Prüfton durch Whisper,
-einen Satz durch Piper, eine Frage an das Sprachmodell und nennt die Zeiten.
+*Dienste* misst stattdessen und behält die letzten zwanzig Messungen.
 
 ## Mikrofone
 
@@ -178,18 +325,31 @@ Zwei Familien, gemischt und gleichzeitig, acht Zeilen in der Tabelle:
 Der ESPHome-Weg ist der **am wenigsten erprobte** Teil. Er läuft deshalb
 getrennt, damit ein Fehler dort die Wyoming-Mikrofone nicht mitreißt.
 
+**Raum und Zone lohnen sich.** Im Feld *Raum* steht ein Ziel aus der Zielliste;
+es gilt, wenn der Satz selbst keines nennt. Im Feld *Zone* steht die
+Music-Server-Zone dieses Raums.
+
 ## Wie gedeutet wird
 
 Zuerst Muster (`templates/saetze_de.json`):
 
     [schalte|mach] {ziel} [an|ein]
     [dimme|stelle] {ziel} auf {wert} [prozent|]
+    [schalte|mach] {ziel} in {dauer} [aus|ab]
 
 Eckige Klammern = Alternativen (eine leere Alternative heißt: darf fehlen),
 geschweifte Klammern = Platzhalter: `{ziel}` wird gegen die Zielliste samt
-Aliasnamen aufgelöst, `{wert}` nimmt eine Zahl, `{rest}` beliebigen Text. Der
-längste passende Zielname gewinnt, damit „wohnzimmer" nicht „wohnzimmer decke"
-verdrängt. Umlaute, Groß-/Kleinschreibung und Satzzeichen sind egal.
+Aliasnamen aufgelöst und **darf fehlen** (dann gilt der Raum des Mikrofons),
+`{wert}` nimmt eine Zahl als Ziffern oder als Wort, `{dauer}` eine Zeitangabe,
+`{rest}` beliebigen Text. Der längste passende Zielname gewinnt, damit
+„wohnzimmer" nicht „wohnzimmer decke" verdrängt. Umlaute, Groß-/Kleinschreibung
+und Satzzeichen sind egal.
+
+**Die Reihenfolge entscheidet:** es gilt die erste Regel, die passt. Genauere
+Muster gehören nach oben — `[schalte|mach] {ziel} [aus|ab]` passt auch auf „mach
+das Wohnzimmer in 10 Minuten aus", und der Befehl wäre dann sofort ausgeführt
+statt vorgemerkt. Der Selbsttest prüft das und nennt die verdeckte Regel beim
+Namen.
 
 Passt kein Muster **und** ist das Sprachmodell eingeschaltet, wird es gefragt.
 Es muss reines JSON antworten und darf nur Ziele nennen, die in der Liste
@@ -199,25 +359,35 @@ schneller und liefern immer dasselbe Ergebnis.
 ## Loxone spricht auch zurück
 
 Ein virtueller Ausgang kann die Anlage etwas ansagen lassen
-(`aktion=sprechen`) oder ihr einen Satz unterschieben, als hätte ihn jemand
-gesprochen (`aktion=satz`). Damit meldet sich das Haus von selbst — „Das
-Garagentor steht seit einer Stunde offen", im richtigen Raum gesprochen,
-erreicht mehr als jede Meldung auf einem Bildschirm.
+(`aktion=sprechen`), ihr einen Satz unterschieben, als hätte ihn jemand
+gesprochen (`aktion=satz`), oder die Ansagen stilllegen (`aktion=ruhe`). Die
+Vorlage im Reiter *Einbindung in Loxone* baut den Ausgang fertig.
 
 ## Aufbau
 
-    bin/sprachsteuerung_dienst.py     Sprachdienst: Wyoming-Client, Pipeline,
-                              ESPHome, MQTT, Warteschlange, Selbsttest
+    bin/sprachsteuerung_dienst.py  Sprachdienst: Wyoming-Client, Wortwecker,
+                              Pipeline, ESPHome, MQTT, Warteschlange, Timer,
+                              Selbsttest
     bin/hardware.py           Hardware erkennen, empfehlen, messen
                               (läuft ohne venv)
     bin/verstehen.py          Satzmuster: Deutung und Prüfung
+    bin/sp_notify.php         Meldung in den Benachrichtigungsbereich
     bin/dienst.sh             Start, Stopp, Wächter
     cron/cron.01min           minütlicher Wächter
+    templates/vorgaben.json   Vorgabewerte und Grenzen — EINE Datei für
+                              Dienst und Oberfläche
     templates/modelle.json    Stufen und Container — EINE Datei für
                               Dienst und Oberfläche
-    templates/saetze_de.json  Satzmuster und Ziele
-    webfrontend/htmlauth/     Oberfläche (sieben Reiter)
+    templates/saetze_de.json  Satzmuster und Ziele, deutsch
+    templates/saetze_en.json  dasselbe auf englisch - postinstall.sh waehlt
+                              nach der Oberflaechensprache
+    webfrontend/htmlauth/     Oberfläche (acht Reiter)
     webfrontend/html/         Endpunkt für den Miniserver + Bibliothek
+
+Die beiden Sprachdateien werden **erzeugt**, nicht von Hand gepflegt:
+`Werkzeuge/sp_sprache_erzeugen.py` hält jeden Text einmal, deutsch und englisch
+nebeneinander, und schreibt beide Dateien. Bei 531 Schlüsseln je Sprache laufen
+zwei handgepflegte Dateien sonst auseinander.
 
 Im venv liegen zwei Pakete: **`wyoming`** (Pflicht — das offizielle Paket,
 nicht nachgebaut) und `aioesphomeapi` (freiwillig, nur für ESPHome-Mikrofone).
@@ -232,14 +402,22 @@ liefert 3.11.
 
 ## Sicherheit
 
-- Zugangsdaten stehen in einer **eigenen Datei mit 0600**, nie in der
-  Konfiguration, die die Oberfläche anzeigt, und nie im Loxone-Projekt.
+- Zugangsdaten stehen in einer Konfiguration mit **0600** und werden in der
+  Oberfläche **maskiert** angezeigt — Länge zeigen, Inhalt nicht.
 - Keine Zugangsdaten auf der Kommandozeile — sie stünden in der Prozessliste.
 - Der Endpunkt im unangemeldeten Bereich hat eine **Positivliste** erlaubter
-  Aktionen; das Token wird mit `hash_equals` verglichen.
+  Aktionen; das Token wird mit `hash_equals` verglichen, und `?selftest=1`
+  beantwortet die Tokenfrage, ohne etwas auszulösen.
+- **Der Endpunkt schreibt nichts.** Auch ein abgewiesener Aufruf legt keine
+  Datei an; alles Schreibende macht der Dienst über die Warteschlange.
+- Jedes Formular der Oberfläche trägt ein **Merkmal gegen fremde Absender**,
+  abgeleitet aus dem Aktionstoken. Eine Prüfzeile im Reiter Test zählt nach, ob
+  wirklich jedes es hat.
 - Eingaben, die nicht zum Muster passen, werden **abgelehnt und benannt**, nie
   stillschweigend zurechtgebogen.
 - Die Container-Ports hören nur auf `127.0.0.1`.
+- Die Sicherungsdatei enthält **weder Token noch Miniserver-Adresse noch
+  Mikrofon-Schlüssel**.
 
 ## Was ungeprüft bleibt
 
@@ -248,160 +426,10 @@ in Ihrem Raum anspricht; ob ESPHome-Mikrofone den Audioweg tragen. Das zeigt
 nur echte Hardware. Alles davor — Wyoming-Aufbau, Pipeline, Satzdeutung,
 Oberfläche, Endpunkt — ist gemessen, nicht behauptet.
 
-## Fassung 0.9.2 — nachgemessen und korrigiert
-
-Zwölf Punkte aus einer Durchsicht. Sechs trafen zu, drei teilweise, drei
-nicht. Alles wurde am Code nachgestellt, bevor etwas geändert wurde.
-
-### postinstall lief bei jedem Upgrade zweimal
-
-Der schwerste Fund, und keiner aus der Liste. `postupgrade.sh` rief
-`postinstall.sh` auf. Das sah nach Sorgfalt aus, war aber eine Verdopplung:
-der LoxBerry-Installer führt `postinstall` **ohne Bedingung** aus
-(`plugininstall.pl`, kein `if ($isupgrade)` davor) und `postupgrade` danach
-zusätzlich. Mit demselben Ablauf nachgestellt: **zwei Durchläufe**.
-
-Das ist nicht bloß unschön — `postinstall.sh` legt die virtuelle Umgebung an
-und holt `wyoming` und `aioesphomeapi` über pip aus dem Netz. Auf einem
-Raspberry Pi dauert das Minuten, und es geschah doppelt. `postupgrade.sh`
-enthält jetzt nur noch das, was ein Upgrade zusätzlich braucht.
-
-### Der Befehl wartete 20 Sekunden auf einen toten Dienst
-
-Trifft zu. Gemessen mit gestopptem Dienst:
-
-| | Dauer |
-|---|---|
-| bisher | **20,06 s** |
-| jetzt, Dienst läuft nicht | **0,00 s** |
-
-Es wird dabei auch kein Befehl mehr eingereiht — er läge sonst herum, bis der
-Dienst irgendwann startet, und würde dann verspätet ausgeführt. Bei einer
-Sprachausgabe ist das keine Kleinigkeit, sondern eine Stimme aus dem Nichts.
-
-Die Wartezeit selbst liegt jetzt bei 12 Sekunden statt 20. Zur Beanstandung,
-der Test-Reiter übergebe 30 bzw. 60 Sekunden: das stimmt so nicht — die
-Funktion stutzte schon vorher auf 20. Die Zahlen im Aufruf kamen nie zur
-Wirkung und waren damit irreführend; sie sind entfallen.
-
-### Antwortdateien blieben liegen
-
-Trifft zu. Nach dem Lesen fehlte das `unlink`. Der Dienst räumt sie nach
-900 Sekunden weg — bis dahin sammeln sie sich bei einem gesprächigen Loxone
-an, und jedes Aufräumen muss sie alle durchgehen. Jetzt wird die Datei sofort
-nach dem Lesen entfernt.
-
-### Umlaute galten als zwei Zeichen
-
-Trifft zu. `strlen()` zählt Bytes:
-
-| Eingabe | Zeichen | Bytes | bisher | jetzt |
-|---|---|---|---|---|
-| 201 × `ü` | 201 | 402 | **abgewiesen** | angenommen |
-| normaler deutscher Satz, 347 Zeichen | 347 | 365 | angenommen | angenommen |
-
-Gezählt wird jetzt mit PCRE (`/./us`), **nicht** mit `mb_strlen`. Das war
-Absicht: mbstring ist eine eigene Erweiterung, dieses Plugin bringt keine
-`dpkg/apt`-Liste mit und benutzt mbstring sonst nirgends. Ein
-„Call to undefined function" wäre hier ein toter Endpunkt — Loxone bekäme auf
-jeden Satz eine leere Antwort. PCRE kann das ohne zusätzliches Paket.
-
-### `\S` ließ Steuerzeichen durch — `filter_var` hätte das Plugin zerlegt
-
-Befund richtig, vorgeschlagene Abhilfe falsch. `\S` schließt nur Leerraum
-aus; `\x01` kam durch. Aber `filter_var(FILTER_VALIDATE_URL)` hätte beide
-Felder unbrauchbar gemacht, denn beide arbeiten mit Platzhaltern in
-geschweiften Klammern. Gemessen, 7.4 und 8.1 gleich:
-
-| Eingabe | bisher | `filter_var` | jetzt |
-|---|---|---|---|
-| `http://{ip}:{port}/tts?text={text}` (der Platzhaltertext des Feldes!) | angenommen | **abgewiesen** | angenommen |
-| `http://192.168.1.10/dev/sps/io/{ziel}/{aktion}` | angenommen | abgewiesen | angenommen |
-| `http://192.168.1.10/x<01>y` | **angenommen** | abgewiesen | abgewiesen |
-| `http://a` | abgewiesen | **angenommen** | abgewiesen |
-| `file:///etc/passwd` | abgewiesen | abgewiesen | abgewiesen |
-
-Zum SSRF-Argument: die Miniserver-Adresse *soll* auf ein internes Gerät
-zeigen — das ist der Zweck des Feldes, nicht sein Fehler.
-
-### Das Protokoll wurde ganz eingelesen
-
-Befund richtig, `tail` ist der falsche Weg — zum sechsten Mal in dieser
-Plugin-Reihe nachgemessen, an einer Datei an der Rotationsgrenze:
-
-| Verfahren | Zeit | Speicherspitze |
-|---|---|---|
-| `file()` + `array_reverse` | 0,3 ms | ~1,4 MB |
-| `exec("tail -n 400")` | 1,9 ms | ~75 kB |
-| rückwärts mit `fseek` | **0,05 ms** | ~125 kB |
-
-Ein Prozessstart kostet mehr, als das Einlesen je gespart hat. Anzeige *und*
-Rotation laufen jetzt über dieselbe `fseek`-Funktion.
-
-### Steuerzeichen in der Satzdatei
-
-Trifft zu, und mit Folgen: ein Steuerzeichen in einem Alias oder Thema landete
-unbesehen in der `saetze.json` — und von dort in ein MQTT-Thema oder in einen
-Text, der vorgelesen wird. Gereinigt wird jetzt rekursiv, **einschließlich der
-Schlüssel** (sie werden zu MQTT-Themen), und zwar erst nach den Prüfungen:
-die sollen sehen, was eingegeben wurde. Zeilenumbrüche werden zu Leerzeichen
-statt gelöscht, damit ein mehrzeiliger Antworttext nicht zusammenklebt.
-
-### Docker-Gruppe
-
-Umgesetzt, mit einem neuen `postroot.sh`. Es fügt `loxberry` der Gruppe
-`docker` hinzu, wenn Docker da ist und die Zuordnung fehlt. Was dabei
-ausdrücklich im Installationsprotokoll steht: wer in dieser Gruppe ist, kann
-Container mit beliebigen Rechten starten und damit faktisch alles auf dem
-Gerät tun. Das ist die Bauweise von Docker, nicht eine Eigenheit dieses
-Plugins — aber es gehört gesagt, samt dem Weg zurück
-(`sudo gpasswd -d loxberry docker`) und dem Hinweis, dass das Plugin die
-Sprachdienste auch auf einem anderen Rechner nutzen kann.
-
-Ebenfalls im Protokoll: eine neue Gruppenzugehörigkeit wirkt erst für neu
-gestartete Prozesse. Bis zum nächsten Neustart kann die Oberfläche weiter
-melden, Docker antworte nicht — das ist dann kein Fehler.
-
-### Mehrfache `<FAIL>`-Zeilen
-
-Umgesetzt. Eine Fehlerlage bekommt genau ein `<FAIL>`, die erklärenden Sätze
-danach sind `<INFO>` — fünf Zeilen umgestellt.
-
-### Was nicht zutraf
-
-**Der Sicherungsort in `preupgrade.sh`.** Beanstandet war, die Sicherung lande
-„direkt im Konfigurationsordner des Plugins". Sie landet **daneben**:
-`config/plugins/<ordner>.backup.<datei>` ist ein Geschwister des Ordners, kein
-Kind. Genau deshalb übersteht sie eine Neuinstallation, bei der LoxBerry
-`config/plugins/<ordner>/` löscht — das ist der Zweck.
-
-Bei der Prüfung fiel allerdings etwas anderes auf: **es gab kein
-Uninstall-Skript.** Die Sicherung mit der Miniserver-Adresse samt
-Zugangsdaten und dem Noise-Schlüssel des Mikrofons wäre nach dem
-Deinstallieren für immer auf der Karte liegen geblieben — die Datei ist nicht
-umsonst mit 0600 angelegt. `uninstall/uninstall` gibt es jetzt: es hält den
-Dienst an (über die Befehlszeile, argumentweise geprüft), überschreibt die
-beiden Sicherungen und entfernt sie. Die Container bleiben absichtlich
-unberührt: dort liegen die heruntergeladenen Modelle, mehrere Gigabyte.
-
-**`sp_sauber` filtere Freitext.** Durch diese Funktion geht kein Freitext.
-Geprüft wurde jedes Feld: Sprache, Weckwort, MQTT-Thema, Antwortweg,
-TTS-Modus, TTS-Adresse, Anschluss, Lautstärke, Zonen, TTS-Sprache, die
-Modellnamen sowie Rechner und Anschluss der Dienste — alles Kennungen, Hosts,
-Anschlussnummern und Auswahlwerte, bei denen Anführungszeichen zu entfernen
-richtig ist. Die TTS-Vorlage läuft ausdrücklich nicht hierdurch.
-
-Ein echtes Freitextfeld gibt es aber doch, nur ein anderes als genannt: die
-**Bezeichnung eines Mikrofons**. Sie wurde von einer eigenen Hilfsfunktion
-ebenfalls von Anführungszeichen befreit. Eine Bezeichnung wie
-`Küche "oben"` bleibt jetzt stehen — der Wert landet in JSON und im
-Protokoll, nie in einer Shell.
-
-**Nebenbefund:** Im Paket lagen übersetzte Python-Zwischendateien
-(`bin/__pycache__/*.cpython-310.pyc`). Die sind draußen; `postupgrade.sh`
-räumt sie auf bestehenden Installationen weg. Eine Zwischendatei, die älter
-ist als der Quelltext daneben, kann im unglücklichen Fall statt des neuen
-Codes geladen werden.
+Der Wortwecker-Weg (1.2) und der ESPHome-Audioweg (1.3) sind in 0.10.0 **neu
+gebaut und nicht an Gerät gemessen.** Sie sind gegen das Protokoll geschrieben,
+nicht gegen eine Erinnerung — aber ein Protokoll richtig zu lesen und ein Gerät
+zu bedienen sind zweierlei.
 
 ## Grundlage
 

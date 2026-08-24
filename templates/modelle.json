@@ -9,9 +9,17 @@
     "dessen misst das Plugin im Reiter Test die tatsaechliche Laufzeit auf der",
     "Maschine, auf der es laeuft.",
     "",
-    "'ab_mb' ist der freie Arbeitsspeicher in Megabyte, ab dem die Stufe",
-    "vorgeschlagen wird. Die Reihenfolge ist absteigend zu lesen: es gilt die",
-    "erste Stufe, deren Schwelle unterschritten wird."
+    "'ab_mb' ist der GESAMTE Arbeitsspeicher in Megabyte, ab dem die Stufe",
+    "vorgeschlagen wird - nicht der freie. Der freie schwankt, und ein Modell",
+    "laedt man einmal. Die Stufen werden absteigend durchgegangen; es gilt die",
+    "erste, deren Schwelle ERREICHT ist.",
+    "",
+    "Berichtigt am 24.08.2026: hier stand 'der freie Arbeitsspeicher' und 'die",
+    "erste Stufe, deren Schwelle unterschritten wird'. Beides war falsch -",
+    "empfehlung() in bin/hardware.py rechnet mit hw['speicher_mb'] (gesamt) und",
+    "vergleicht mit 'mb >= ab_mb'. Die README verweist auf diese Datei als",
+    "massgeblich; eine Datei, die ihre eigene Schwelle falsch beschreibt, ist",
+    "eine Fehlerquelle."
   ],
 
   "stufen": [
