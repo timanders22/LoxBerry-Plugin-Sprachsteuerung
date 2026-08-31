@@ -1120,10 +1120,11 @@ foreach ($sp_ww_liste as $sp_w) { ?>
 </div>
 
 <h3><?= sp_e(sp_t('MQTT.H_ABO')) ?></h3>
+<div class="sm-step"><?= sp_t('MQTT.ABO_EINLEITUNG') ?>
+<p><span class="sm-mono"><?= sp_e($sp_praefix) ?>/#</span></p></div>
 <?php if ($sp_gw['v1']) { ?>
 <div class="sm-step"><b><?= sp_e(sp_t('MQTT.ABO_V1_TITEL')) ?></b><br>
 <?= sp_t('MQTT.ABO_V1') ?>
-<p><span class="sm-mono"><?= sp_e($sp_praefix) ?>/#</span></p>
 <div class="sm-warnung"><?= sp_t('MQTT.ABO_V1_WARNUNG') ?></div>
 </div>
 <?php } ?>
