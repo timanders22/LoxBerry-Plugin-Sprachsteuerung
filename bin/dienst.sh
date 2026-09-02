@@ -50,7 +50,14 @@ PLOG="$LBHOMEDIR/log/plugins/$PNAME"
 PCONFIG="$LBHOMEDIR/config/plugins/$PNAME"
 PID="$PDATA/dienst.pid"
 SOLL="$PDATA/soll_laufen"
+# ZWEI Dateien, mit Absicht: sprachsteuerung.log gehoert dem Python-Dienst
+# und wird von ihm rotiert. Wuerde die Schale mit ">>" dieselbe Datei
+# fuehren, schriebe ihr Deskriptor nach der ersten Rotation in die
+# umbenannte Datei weiter - unsichtbar fuer die Oberflaeche und auf einer
+# Ramdisk. Der Starttext (auch ein Absturz-Rueckverfolgungsprotokoll)
+# gehoert deshalb in eine eigene.
 LOGDATEI="$PLOG/sprachsteuerung.log"
+STARTLOG="$PLOG/start.log"
 SKRIPT="$SELF/sprachsteuerung_dienst.py"
 PY="$SELF/venv/bin/python3"
 
@@ -61,8 +68,12 @@ laeuft() {
     P=$(cat "$PID" 2>/dev/null)
     [ -n "$P" ] || return 1
     kill -0 "$P" 2>/dev/null || return 1
-    # Nummernrecycling ausschliessen: der Prozess muss unser Skript sein
-    grep -qa "sprachsteuerung_dienst.py" "/proc/$P/cmdline" 2>/dev/null || return 1
+    # Nummernrecycling ausschliessen: der Prozess muss GENAU unser Skript
+    # sein. Ein grep ueber cmdline traefe auch einen Editor, der die Datei
+    # offen hat, und bei einer Zweitinstallation den Nachbarn (REGELN_2).
+    ARGS=$(tr '\0' '\n' < "/proc/$P/cmdline" 2>/dev/null)
+    [ "$(printf '%s\n' "$ARGS" | sed -n '2p')" = "$SKRIPT" ] || return 1
+    printf '%s\n' "$ARGS" | sed -n '1p' | grep -qE '(^|/)python3?[0-9.]*$' || return 1
     return 0
 }
 
@@ -86,15 +97,27 @@ starten() {
     touch "$SOLL"
     # Ausgabe geht in die Logdatei. Das Python-Skript protokolliert deshalb
     # NICHT zusaetzlich nach stdout - sonst stuende jede Zeile doppelt darin.
-    nohup "$PY" "$SKRIPT" >> "$LOGDATEI" 2>&1 &
+    # Die Startdatei kappen, bevor etwas dazukommt: sie liegt auf einer
+    # Ramdisk und niemand rotiert sie.
+    if [ -f "$STARTLOG" ] && [ "$(wc -c < "$STARTLOG" 2>/dev/null || echo 0)" -gt 65536 ]; then
+        tail -c 16384 "$STARTLOG" > "$STARTLOG.neu" 2>/dev/null \
+            && mv "$STARTLOG.neu" "$STARTLOG"
+    fi
+    nohup "$PY" "$SKRIPT" >> "$STARTLOG" 2>&1 &
     echo $! > "$PID"
     sleep 1
     if laeuft; then
         echo "gestartet (PID $(cat "$PID"))"
         return 0
     fi
-    echo "FEHLER: Start fehlgeschlagen - siehe $LOGDATEI"
+    echo "FEHLER: Start fehlgeschlagen - siehe $STARTLOG und $LOGDATEI"
+    tail -n 5 "$STARTLOG" 2>/dev/null | sed "s/^/  /"
     rm -f "$PID"
+    # 2 | Der Sollmerker darf einen gescheiterten Start NICHT ueberleben.
+    #     Sonst versucht der minuetliche Waechter es 1440-mal am Tag und
+    #     schreibt je Lauf zwei Zeilen auf die Ramdisk, waehrend die
+    #     Oberflaeche "gestoppt" zeigt. REGELN_2, Dashboard-Sitzung.
+    rm -f "$SOLL"
     return 1
 }
 
@@ -136,8 +159,8 @@ case "$1" in
         # Nur neu starten, wenn der Dienst laufen SOLL. Ein bewusst
         # angehaltener Dienst bleibt angehalten.
         if [ -f "$SOLL" ] && ! laeuft; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Waechter: Dienst lief nicht, wird neu gestartet." >> "$LOGDATEI"
-            starten >> "$LOGDATEI" 2>&1
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Waechter: Dienst lief nicht, wird neu gestartet." >> "$STARTLOG"
+            starten >> "$STARTLOG" 2>&1
         fi
         ;;
     *)

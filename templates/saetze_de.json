@@ -56,7 +56,7 @@
       "thema": "wohnzimmer/licht"
     },
     "kueche_licht": {
-      "name": "Licht in der Kueche",
+      "name": "Licht in der Küche",
       "alias": ["kueche", "kuechenlicht", "licht kueche", "in der kueche"],
       "thema": "kueche/licht"
     },

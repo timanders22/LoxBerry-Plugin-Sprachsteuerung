@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.10.1
+Version 0.10.2
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,52 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.10.2
+
+Eine Durchsicht Zeile für Zeile, mit vier kritischen Zuarbeiten. Das
+Freigabetor war vorher grün (14 Prüfungen, 0 Beanstandungen) — grün heißt
+nicht fehlerfrei. Die schwersten vier standen dort, wo kein Werkzeug
+hinsieht:
+
+* **Der Reiter Einstellungen speicherte gar nichts.** Er führt zwei
+  Formulare, beide mit demselben Merkmal `speichern`; der Speichern-Knopf
+  sitzt im zweiten. Die Felder des ersten kamen nie mit, der Handler
+  behandelte „fehlt" wie „leer" und wies neun davon ab — und weil er nur
+  speichert, wenn die Beanstandungsliste leer ist, blieb **alles** stehen.
+  Jedes Formular trägt jetzt ein Kennzeichen, und der Handler fasst nur an,
+  was wirklich mitgeschickt wurde.
+* **Die Reiterumschaltung ohne Neuladen war tot.** Der Reitername ging
+  maskiert in den Skriptblock; in einem `<script>`-Element löst der Browser
+  keine Entitäten auf. Das war ein Syntaxfehler, und er nahm den einzigen
+  Skriptblock der Seite mit. Aufgefallen ist es nie, weil der Server
+  `sm-active` selbst setzt und die Seite deshalb bedienbar blieb.
+* **Die Satzmuster und Ziele überlebten kein Update.** Die Zweitschrift lag
+  richtig neben dem Plugin-Ordner — nur legte `postinstall.sh` die Vorlage
+  an, *bevor* es zurückspielte, und danach war die Datei weder leer noch
+  `{}`. Ebenso verloren gingen der Sollmerker (der Dienst blieb nach jedem
+  Update stehen, ohne dass irgendetwas es meldete) und die
+  heruntergeladenen Modelle, mehrere Gigabyte.
+* **Der Reiter Test brach unter PHP 8 mitten in der Tabelle ab.** Ein
+  `sprintf` bekam ein Argument zu wenig; unter PHP 7.4 stand dort ein Haken
+  ohne Text, unter PHP 8 ein `ArgumentCountError`.
+
+Dazu drei Prüfzeilen, die auf jeder Installation ein Kreuz zeigten, ohne
+dass etwas falsch war; ein Steuerzeichen in `postinstall.sh`, das die
+englischen Beispielsätze unerreichbar machte; ein Platzhalter, der den an
+Loxone gesendeten Befehl überschreiben konnte; und die Baustein-Liste, die
+das MQTT-Präfix als festen Text führte, obwohl es einstellbar ist.
+
+Die Prüfstücke dazu liegen unter `Pruefung-Sprachsteuerung-0.10.2/` und
+sind gegen den kaputten Stand geeicht: jedes wird rot, wenn man die
+Korrektur zurückbaut.
+
+## Neu in 0.10.1
+
+Kein eigener Durchgang, sondern der hausweite vom 31.08.2026: `bin/dienst.sh`
+steigt selbst von root ab (kein `sudo` mehr in der Anleitung), und der Text
+zum MQTT-Abo unterscheidet jetzt Gateway V1 und V2, statt den V1-Satz
+unbedingt hinzuschreiben.
 
 ## Neu in 0.10.0
 
@@ -307,9 +353,12 @@ darum von außen unerreichbar — die angezeigte Zeile für den ausgelagerten
 Betrieb bindet deshalb ans Netz. Sichern Sie diesen Rechner entsprechend ab;
 die Wyoming-Dienste kennen keine Anmeldung.
 
-**Es stehen nirgends Geschwindigkeitsangaben** — weder in der Oberfläche noch
-hier. Sie wären ohne Ihre Hardware geraten. Der Knopf *Messen* im Reiter
-*Dienste* misst stattdessen und behält die letzten zwanzig Messungen.
+**Wie schnell die Modelle auf Ihrer Maschine laufen, steht nirgends** — weder
+in der Oberfläche noch hier. Solche Zahlen hängen an CPU, Takt, Kühlung und
+Speicherbandbreite und wären ohne Ihre Hardware geraten. Der Knopf *Messen*
+im Reiter *Dienste* misst stattdessen und behält die letzten zwanzig
+Messungen. (Die Zahlen, die weiter oben stehen, sind etwas anderes: sie
+messen die Oberfläche gegen die Prüfattrappe, nicht die Sprachdienste.)
 
 ## Mikrofone
 
@@ -386,7 +435,7 @@ Vorlage im Reiter *Einbindung in Loxone* baut den Ausgang fertig.
 
 Die beiden Sprachdateien werden **erzeugt**, nicht von Hand gepflegt:
 `Werkzeuge/sp_sprache_erzeugen.py` hält jeden Text einmal, deutsch und englisch
-nebeneinander, und schreibt beide Dateien. Bei 531 Schlüsseln je Sprache laufen
+nebeneinander, und schreibt beide Dateien. Bei 566 Schlüsseln je Sprache laufen
 zwei handgepflegte Dateien sonst auseinander.
 
 Im venv liegen zwei Pakete: **`wyoming`** (Pflicht — das offizielle Paket,
@@ -429,7 +478,25 @@ Oberfläche, Endpunkt — ist gemessen, nicht behauptet.
 Der Wortwecker-Weg (1.2) und der ESPHome-Audioweg (1.3) sind in 0.10.0 **neu
 gebaut und nicht an Gerät gemessen.** Sie sind gegen das Protokoll geschrieben,
 nicht gegen eine Erinnerung — aber ein Protokoll richtig zu lesen und ein Gerät
-zu bedienen sind zweierlei.
+zu bedienen sind zweierlei. In 0.10.2 hat sich daran nichts geändert: hier
+steht weiterhin kein Mikrofon und kein Container.
+
+**Ebenfalls ungemessen, und zwar ausdrücklich:**
+
+* **`retain` am laufenden MQTT-Gateway.** Das Plugin sendet über den
+  UDP-Eingang des Gateways; ob und wie das Gateway die Werte behält, ist
+  hier nicht gemessen worden. Im Haus läuft Gateway **Version 1**.
+* **Das Mithören fremder Themen am Broker.** Das Plugin abonniert nichts;
+  gemessen ist das nicht.
+* **Die Blockade der Ereignisschleife.** Fünf Netzabrufe des Dienstes sind
+  synchron und werden aus asynchronem Code gerufen; ein einzelner Satz kann
+  die Schleife rechnerisch bis zu rund 161 Sekunden anhalten, in denen kein
+  anderes Mikrofon und keine Warteschlange bedient wird. Der Befund ist am
+  Quelltext belegt, die **Auflösung ist es nicht** — sie wäre neuer Code an
+  der empfindlichsten Stelle des Dienstes, und ohne Mikrofon lässt sie sich
+  hier nicht messen. Am Gerät nachzumessen an der Lücke zwischen zwei
+  Herzschlag-Zeitstempeln in `<präfix>/ts` während eines Satzes mit
+  eingeschaltetem Sprachmodell.
 
 ## Grundlage
 

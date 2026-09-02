@@ -177,8 +177,17 @@ _DAUER_EINHEIT = {"sekunde": 1, "sekunden": 1, "minute": 60, "minuten": 60,
 
 
 def dauer_in_sekunden(text: str):
-    """'10 minuten' oder 'einer minute' -> Sekunden. None bei Unbekanntem."""
-    t = re.match(r"^\s*(\S+)\s*([a-z]+)\s*$", (text or "").strip())
+    """'10 minuten' oder 'einer minute' -> Sekunden. None bei Unbekanntem.
+
+    Die Einheit wird VOM ENDE HER abgetrennt, der Rest ist die Zahl. Bis
+    0.10.1 verlangte der Ausdruck fuer die Zahl genau EIN Wort ohne
+    Leerzeichen. Damit griff das Muster bei
+    'turn kitchen off in twenty five minutes' (der Ausdruck kennt die
+    zweiwortigen englischen Zahlwoerter seit dem 24.08.2026), und die
+    Umrechnung scheiterte danach mit 'dauer_unklar'. Deutsch war nie
+    betroffen, weil es ein Wort bildet: fuenfundzwanzig.
+    """
+    t = re.match(r"^\s*(.+?)\s+([a-z]+)\s*$", (text or "").strip())
     if not t:
         return None
     faktor = _DAUER_EINHEIT.get(t.group(2))
@@ -241,6 +250,20 @@ def muster_zu_regex(muster: str) -> re.Pattern:
     return re.compile(r"^\s*" + ausdruck + r"\s*$")
 
 
+# Namen, die ein Platzhalter NICHT tragen darf: sie sind Ergebnisfelder von
+# erkennen() und wuerden von gesprochenem Text ueberschrieben. 'wert',
+# 'ziel' und 'dauer' fehlen hier mit Absicht - genau die sind gemeint.
+# Alles in geschweiften Klammern, das muster_zu_regex NICHT als
+# Platzhalter liest - also alles ausser {kleinbuchstaben}.
+_UNGEDEUTET = re.compile(r"\{(?![a-z]+\})[^{}]*\}")
+
+GESPERRTE_PLATZHALTER = (
+    "ok", "grund", "absicht", "aktion", "muster", "satz", "dauer_s",
+    "zielname", "thema", "einheit", "url", "url_lesen", "bestaetigen",
+    "gesucht",
+)
+
+
 class Verstehen:
     """Haelt Regeln und Ziele und beantwortet Saetze."""
 
@@ -255,6 +278,23 @@ class Verstehen:
             except re.error as err:
                 # Ein kaputtes Muster darf nicht alle anderen mitreissen.
                 self.regeln.append((None, dict(regel, _fehler=str(err))))
+                continue
+            # Ein Platzhalter, den muster_zu_regex nicht erkennt, wird zu
+            # Literaltext: aus '{Ziel}' mit grossem Z wurde bis 0.10.1 der
+            # Text 'ziel', die Regel war wirkungslos, und nichts wurde rot.
+            uebrig = _UNGEDEUTET.findall(muster)
+            if uebrig:
+                # ausdruck=None: die Regel greift nicht mehr UND pruefen()
+                # meldet sie. Bis 0.10.1 wurde aus '{Ziel}' der Literaltext
+                # 'ziel', die Regel war damit wirkungslos - und nichts wurde
+                # rot. Eine Regel, die etwas anderes tut als sie sagt, ist
+                # schlimmer als eine, die abgewiesen wird.
+                self.regeln[-1] = (None,
+                                   dict(regel, _fehler=(
+                                       "unbekannter Platzhalter %s - bekannt sind "
+                                       "{ziel}, {wert}, {dauer} und beliebige "
+                                       "kleingeschriebene Namen"
+                                       % ", ".join(uebrig))))
         self.ziele = {}
         for schluessel, ziel in (saetze.get("ziele") or {}).items():
             # Kurzschreibweise zulassen: "wohnzimmer": "wohnzimmer/licht".
@@ -357,9 +397,21 @@ class Verstehen:
             # drei Dateien angekuendigt, wurde vom Ausdruck auch aufgesammelt -
             # und dann verworfen. Ein Muster wie 'sag mir {rest}' griff damit
             # und kam leer an.
+            #
+            # Bis 0.10.1 durfte ein Platzhalter dabei ein ERGEBNISFELD
+            # ueberschreiben. Gemessen: 'setze {aktion}' mit dem Satz 'setze
+            # kaputt' ergab aktion='kaputt' - und die Aktion geht unveraendert
+            # an den Miniserver und ins MQTT-Thema. Gesprochenes bestimmte den
+            # gesendeten Befehl. Ein Platzhalter, der so heisst wie ein
+            # Ergebnisfeld, ist ein MUSTERFEHLER und wird gemeldet, nicht
+            # stillschweigend angenommen (REGELN_1, Abschnitt 4).
             for name, wert in felder.items():
                 if name in ("wert", "ziel", "dauer") or wert is None:
                     continue
+                if name in GESPERRTE_PLATZHALTER:
+                    return {"ok": 0, "grund": "muster_fehler",
+                            "gesucht": name,
+                            "muster": str(regel.get("muster") or "")}
                 erg[name] = wert.strip()
             gesucht_ziel = felder.get("ziel")
             # Ein Fang, der nach dem Einebnen nichts uebrig laesst, ist kein

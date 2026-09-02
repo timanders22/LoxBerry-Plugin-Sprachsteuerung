@@ -43,21 +43,26 @@ function sp_pruefungen()
         is_file($venv) ? '<span class="sm-mono">' . sp_e($venv) . '</span>'
                        : sprintf(sp_t('TEST.A_VENV_FEHLT'), sp_e($venv)));
 
+    // Adresse und Port kommen aus sp_dienst_ziel() - derselben Stelle, die
+    // auch der Endpunkt benutzt. Bis 0.10.1 las diese Schleife die
+    // Konfiguration roh; bei leerem Rechnernamen meldete sie eine Stoerung,
+    // waehrend diag mit 127.0.0.1 richtig antwortete. Zwei Abrufwege, zwei
+    // Antworten auf dieselbe Frage.
     foreach (array('whisper' => 'TEST.F_WHISPER', 'piper' => 'TEST.F_PIPER',
                    'wake' => 'TEST.F_WAKE') as $dienst => $schluessel) {
-        $host = $cfg[$dienst . '_host'];
-        $port = (int) $cfg[$dienst . '_port'];
+        list($host, $port) = sp_dienst_ziel($dienst === 'wake' ? 'wakeword' : $dienst, $cfg);
         list($ok, $grund) = sp_erreichbar($host, $port);
         $zeilen[] = sp_pruefzeile($ok, sp_t($schluessel),
             $ok ? sp_e($host . ':' . $port)
                 : sprintf(sp_t('TEST.A_DIENST_STUMM'), sp_e($host . ':' . $port), sp_e($grund)));
     }
     if (!empty($cfg['llm_ein'])) {
-        list($ok, $grund) = sp_erreichbar($cfg['llm_host'], (int) $cfg['llm_port']);
+        list($llm_h, $llm_p) = sp_dienst_ziel('llm', $cfg);
+        list($ok, $grund) = sp_erreichbar($llm_h, $llm_p);
         $zeilen[] = sp_pruefzeile($ok, sp_t('TEST.F_LLM'),
-            $ok ? sp_e($cfg['llm_host'] . ':' . $cfg['llm_port'])
+            $ok ? sp_e($llm_h . ':' . $llm_p)
                 : sprintf(sp_t('TEST.A_DIENST_STUMM'),
-                          sp_e($cfg['llm_host'] . ':' . $cfg['llm_port']), sp_e($grund)));
+                          sp_e($llm_h . ':' . $llm_p), sp_e($grund)));
     } else {
         $zeilen[] = sp_pruefzeile(-1, sp_t('TEST.F_LLM'), sp_t('TEST.A_LLM_AUS'));
     }
@@ -117,9 +122,15 @@ function sp_pruefungen()
     if (empty($cfg['ruhe']['ein'])) {
         $zeilen[] = sp_pruefzeile(-1, sp_t('TEST.F_RUHE'), sp_t('TEST.A_RUHE_AUS'));
     } else {
-        $zeilen[] = sp_pruefzeile($ruhe ? -1 : 1, sp_t('TEST.F_RUHE'),
-            sprintf(sp_t($ruhe ? 'TEST.A_RUHE_AKTIV' : 'TEST.A_RUHE_EIN'),
-                    sp_e($cfg['ruhe']['von']), sp_e($cfg['ruhe']['bis'])));
+        // Der Schluessel steht NICHT in einem Ternaer innerhalb von sp_t():
+        // sprachplatzhalter_pruefen.py liest die Aufrufstelle woertlich und
+        // meldete beide Schluessel sonst als 'nirgends durch sprintf gereicht'.
+        $antwort = $ruhe
+            ? sprintf(sp_t('TEST.A_RUHE_AKTIV'),
+                      sp_e($cfg['ruhe']['von']), sp_e($cfg['ruhe']['bis']))
+            : sprintf(sp_t('TEST.A_RUHE_EIN'),
+                      sp_e($cfg['ruhe']['von']), sp_e($cfg['ruhe']['bis']));
+        $zeilen[] = sp_pruefzeile($ruhe ? -1 : 1, sp_t('TEST.F_RUHE'), $antwort);
     }
 
     // Vorgaben, Zweitschrift, Suchmuster, Vorlage, Oberflaeche
@@ -130,9 +141,11 @@ function sp_pruefungen()
     list($st, $tx) = sp_suchmuster_probe();
     $zeilen[] = sp_pruefzeile($st, sp_t('TEST.F_MUSTER'), $tx);
 
-    $befunde = sp_vorlage_pruefen();
+    $sp_vg = 0; $sp_vges = 0;
+    $befunde = sp_vorlage_pruefen($sp_vg, $sp_vges);
     $zeilen[] = sp_pruefzeile($befunde ? 0 : 1, sp_t('TEST.F_VORLAGE'),
-        $befunde ? sp_e(implode('; ', $befunde)) : sp_t('TEST.A_VORLAGE_OK'));
+        $befunde ? sp_e(implode('; ', $befunde))
+                 : sprintf(sp_t('TEST.A_VORLAGE_OK'), $sp_vg, $sp_vges));
 
     list($st, $tx) = sp_smactive_probe();
     $zeilen[] = sp_pruefzeile($st, sp_t('TEST.F_SMACTIVE'), $tx);
@@ -225,7 +238,14 @@ function sp_test_aktion($aktion)
             return sp_befehl_absetzen(array('aktion' => 'neu_laden'));
 
         case 'dienste':
-            list($ok, $meldung, $a) = sp_befehl_absetzen(array('aktion' => 'dienste'));
+            // Die Funktion liefert an vier von sechs Stellen nur zwei
+            // Elemente. Ein list() mit drei Zielen erzeugt unter PHP 8
+            // eine Warnung auf der Seite - der dritte Wert wird deshalb
+            // einzeln geholt.
+            $sp_erg = sp_befehl_absetzen(array('aktion' => 'dienste'));
+            $ok = $sp_erg[0];
+            $meldung = $sp_erg[1];
+            $a = isset($sp_erg[2]) && is_array($sp_erg[2]) ? $sp_erg[2] : array();
             if (!$ok || empty($a['dienste'])) { return array($ok, $meldung); }
             $zeilen = array();
             foreach ($a['dienste'] as $name => $d) {

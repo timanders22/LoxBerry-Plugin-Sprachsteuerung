@@ -43,10 +43,29 @@ header('Content-Type: text/plain; charset=utf-8');
 
 $sp_cfg = sp_config(false);
 
+/* ---------------- Die Parameter EINMAL einsammeln ----------------
+ *
+ * Was kein Skalar ist, wird abgewiesen - vor jeder Umwandlung. Bis
+ * 0.10.1 stand an acht Stellen (string) $_GET[...]; ein Aufruf mit
+ * ?token[]=x erzeugte unter PHP 8 eine Warnung, und die geht hinaus,
+ * BEVOR http_response_code(403) laufen kann - die Abweisung erreichte
+ * den Miniserver dann als HTTP 200. */
+$sp_par = function ($name) {
+    if (!isset($_GET[$name])) { return ''; }
+    if (!is_scalar($_GET[$name])) {
+        http_response_code(400);
+        echo "FEHLER;OK=0;GRUND=PARAMETER\n";
+        echo 'Der Parameter ' . htmlspecialchars($name, ENT_QUOTES, 'UTF-8')
+           . " muss ein einzelner Wert sein.\n";
+        exit;
+    }
+    return (string) $_GET[$name];
+};
+
 /* ---------------- Token ---------------- */
 $sp_soll = (string) $sp_cfg['aktionstoken'];
-$sp_ist = isset($_GET['token']) ? (string) $_GET['token'] : '';
-$sp_selftest = isset($_GET['selftest']) && (string) $_GET['selftest'] !== '0';
+$sp_ist = $sp_par('token');
+$sp_selftest = isset($_GET['selftest']) && $sp_par('selftest') !== '0';
 
 /* Der Selbsttest steht unmittelbar hinter der Tokenpruefung und VOR jeder
  * Wirkung. Hausregel: ein Token muss sich pruefen lassen, ohne dass etwas
@@ -88,8 +107,18 @@ if (!in_array($sp_aktion, array_merge($sp_lesend, $sp_schaltend), true)) {
 /* Der gesprochene Text wird NICHT gefiltert - nur Steuerzeichen fallen weg.
  * Ein hartes Filtern zerstoerte gueltige Saetze, und was ein Satz enthalten
  * darf, weiss hier niemand besser als der Sprecher. */
-$sp_text = isset($_GET['text']) ? (string) $_GET['text'] : '';
-$sp_text = trim(preg_replace('/[\x00-\x1F\x7F]/u', ' ', $sp_text));
+$sp_text = $sp_par('text');
+$sp_sauber = preg_replace('/[\x00-\x1F\x7F]/u', ' ', $sp_text);
+if ($sp_sauber === null) {
+    // Abweisen und benennen, nicht zurechtbiegen: bis 0.10.1 wurde aus
+    // ungueltigem UTF-8 stillschweigend ein leerer Text, und die Antwort
+    // lautete TEXT_FEHLT - der Text fehlte aber nicht.
+    http_response_code(400);
+    echo "FEHLER;OK=0;GRUND=TEXT_UNGUELTIG\n";
+    echo "Der Text ist kein gueltiges UTF-8.\n";
+    exit;
+}
+$sp_text = trim($sp_sauber);
 /* Gezaehlt werden ZEICHEN, nicht Bytes. strlen() zaehlt Bytes, und ein
  * Umlaut belegt in UTF-8 zwei davon. Nachgemessen: 201 Umlaute sind 201
  * Zeichen, aber 402 Bytes - und wurden bis 0.9.1 abgewiesen. */
@@ -101,21 +130,29 @@ if (sp_zeichen($sp_text) > 400) {
 }
 
 /* Zone, Mikrofon und Dringlichkeit: enge Muster, alles andere abgewiesen. */
-$sp_zone = isset($_GET['zone']) ? (string) $_GET['zone'] : '';
+$sp_zone = $sp_par('zone');
 if ($sp_zone !== '' && !preg_match('/^[0-9~,]{1,80}$/', $sp_zone)) {
     http_response_code(400);
     echo "FEHLER;OK=0;GRUND=ZONE_UNGUELTIG\n";
     echo "Zonen bestehen aus Ziffern, Komma und der Tilde, zum Beispiel 2,4 oder 2~15.\n";
     exit;
 }
-$sp_mikro = isset($_GET['mikrofon']) ? (string) $_GET['mikrofon'] : '';
-$sp_mikro = trim(preg_replace('/[\x00-\x1F\x7F]/u', '', $sp_mikro));
+$sp_mikro = $sp_par('mikrofon');
+$sp_mikro_sauber = preg_replace('/[\x00-\x1F\x7F]/u', '', $sp_mikro);
+if ($sp_mikro_sauber === null) {
+    // Ein still weggefallenes Mikrofon schickt die Ansage an ALLE
+    // Lautsprecher statt an einen.
+    http_response_code(400);
+    echo "FEHLER;OK=0;GRUND=MIKROFON_UNGUELTIG\n";
+    exit;
+}
+$sp_mikro = trim($sp_mikro_sauber);
 if (sp_zeichen($sp_mikro) > 40) {
     http_response_code(400);
     echo "FEHLER;OK=0;GRUND=MIKROFON_ZU_LANG\n";
     exit;
 }
-$sp_dringend = isset($_GET['dringend']) && (string) $_GET['dringend'] === '1' ? 1 : 0;
+$sp_dringend = $sp_par('dringend') === '1' ? 1 : 0;
 
 $sp_lox = sp_loxone();
 $sp_sats = sp_satelliten();
@@ -182,6 +219,13 @@ if ($sp_aktion === 'diag') {
         count($sp_sats), (int) (isset($sp_lox['bereit']) ? $sp_lox['bereit'] : 0));
     foreach (sp_dienste() as $sp_d) {
         list($sp_h, $sp_pt) = sp_dienst_ziel($sp_d, $sp_cfg);
+        // Ein abgeschaltetes Sprachmodell ist keine Stoerung. Bei der
+        // Werksvorgabe llm_ein=0 meldete diese Zeile auf JEDER Anlage
+        // 'ANTWORTET NICHT' - ein Kreuz, das nichts bedeutet.
+        if ($sp_d === 'llm' && empty($sp_cfg['llm_ein'])) {
+            printf("%-20s: abgeschaltet\n", $sp_d);
+            continue;
+        }
         printf("%-20s: %s auf %s:%d\n", $sp_d,
             sp_port_offen($sp_h, $sp_pt, 2.0) ? 'antwortet' : 'ANTWORTET NICHT',
             $sp_h, $sp_pt);

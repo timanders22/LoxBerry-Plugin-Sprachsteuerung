@@ -1,6 +1,7 @@
 #!/bin/bash
 # Sprachsteuerung lokal - uninstall
-# command <TEMPFOLDER> <NAME> <FOLDER> <VERSION> <BASEFOLDER>
+# command <TEMPFOLDER-KENNUNG> <NAME> <FOLDER> <VERSION> <WORKDIR>
+# ($1 ist eine zehnstellige Zufallskennung, KEIN Pfad - REGELN_2)
 #
 # Laeuft als root beim Deinstallieren.
 #
@@ -49,9 +50,27 @@ BASE="${ARGV5:-$LBHOMEDIR}"
 # Dritter Rueckfall: der eigene Ablageort. Bewusst kein fest verdrahteter
 # Systempfad - LoxBerry laesst sich anderswohin installieren, und der
 # Plugin-Pruefer sucht die Zeichenkette, ohne den Zusammenhang zu sehen.
-# Dieses Skript liegt unter <home>/data/plugins/<ordner>/uninstall/
+#
+# GESUCHT wird aufwaerts, nicht gezaehlt. Bis 0.10.1 standen hier vier
+# feste '..' mit der Begruendung, das Skript liege unter
+# <home>/data/plugins/<ordner>/uninstall/. Der Plugin-Pruefer sieht es
+# aber unter .../uploads/<zufall>/uninstall/ - dort sind es andere
+# Ebenen, und eine feste Zahl ist nur die naechste Wette.
 if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
-    BASE=$(cd "$(dirname "$(readlink -f "$0")")/../../../.." 2>/dev/null && pwd)
+    SUCH=$(dirname "$(readlink -f "$0")")
+    for _ in 1 2 3 4 5 6 7 8; do
+        if [ -d "$SUCH/config/plugins" ] && [ -d "$SUCH/webfrontend" ]; then
+            BASE="$SUCH"
+            break
+        fi
+        ELTERN=$(dirname "$SUCH")
+        [ "$ELTERN" = "$SUCH" ] && break
+        SUCH="$ELTERN"
+    done
+fi
+if [ -z "$BASE" ] || [ ! -d "$BASE/config/plugins" ]; then
+    echo "<INFO> LoxBerry-Wurzel nicht ermittelbar - es wurde nichts entfernt."
+    exit 0
 fi
 
 PDATA="$BASE/data/plugins/$PFOLDER"
@@ -119,8 +138,11 @@ rm -f "$PIDDATEI" "$PDATA/soll_laufen" 2>/dev/null
 for f in sprachsteuerung.json saetze.json; do
     BK="$PCONFIG/$PFOLDER.backup.$f"
     if [ -f "$BK" ]; then
-        # Ueberschreiben, dann entfernen: nur unlink liesse den Inhalt
-        # auf der Karte stehen, bis der Platz neu vergeben wird.
+        # Ueberschreiben, dann entfernen. Das ist eine Erschwernis, keine
+        # Zusicherung: auf SD- und eMMC-Speicher schreibt der Baustein die
+        # neuen Bytes wegen Wear-Levelling an eine ANDERE Stelle, und der
+        # alte Block bleibt physisch liegen. Es kostet nichts und nimmt den
+        # einfachen Fall (Wiederherstellung ueber das Dateisystem) weg.
         LAENGE=$(stat -c %s "$BK" 2>/dev/null || echo 0)
         [ "$LAENGE" -gt 0 ] && dd if=/dev/zero of="$BK" bs=1 count="$LAENGE" \
             conv=notrunc >/dev/null 2>&1
@@ -152,5 +174,19 @@ echo "<INFO> Die Container fuer Whisper, Piper, Wortwecker und Sprachmodell"
 echo "<INFO> bleiben unberuehrt - dort liegen die heruntergeladenen Modelle"
 echo "<INFO> (mehrere Gigabyte). Wer sie nicht mehr braucht, entfernt sie"
 echo "<INFO> ueber das Docker-Plugin oder mit 'docker rm -f <name>'."
+
+# ---------------------------------------------------------------
+# 5. Was bleibt, wird gesagt
+# ---------------------------------------------------------------
+# postroot.sh hat 'loxberry' in die Gruppe docker aufgenommen. Blind
+# zuruecknehmen waere falsch: das Docker-Plugin und andere Plugins
+# brauchen dieselbe Gruppe. Verschweigen aber auch - es ist eine
+# dauerhafte Rechteerweiterung, von der sonst niemand mehr weiss.
+if id -nG loxberry 2>/dev/null | tr ' ' '
+' | grep -qx docker; then
+    echo "<INFO> Der Benutzer loxberry bleibt in der Gruppe 'docker' (von diesem"
+    echo "<INFO> Plugin gesetzt). Ruecknahme, falls KEIN anderes Plugin Docker"
+    echo "<INFO> benutzt: sudo gpasswd -d loxberry docker"
+fi
 
 exit 0

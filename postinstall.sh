@@ -1,6 +1,7 @@
 #!/bin/bash
 # Sprachsteuerung lokal - postinstall
-# command <TEMPFOLDER> <NAME> <FOLDER> <VERSION> <BASEFOLDER>
+# command <TEMPFOLDER-KENNUNG> <NAME> <FOLDER> <VERSION> <WORKDIR>
+# ($1 ist eine zehnstellige Zufallskennung, KEIN Pfad - REGELN_2)
 #
 # Das Plugin ist die Vermittlung: es verbindet Mikrofone, Spracherkennung,
 # Sprachausgabe und Loxone. Die schweren Teile (Whisper, Piper, Wortwecker,
@@ -31,21 +32,40 @@ PLOG="$BASE/log/plugins/$PFOLDER"
 PCONFIG="$BASE/config/plugins/$PFOLDER"
 VENV="$PBIN/venv"
 
-mkdir -p "$PDATA/befehle" "$PDATA/antworten" "$PDATA/modelle" "$PDATA/verlauf" "$PDATA/timer" \
+mkdir -p "$PDATA/befehle" "$PDATA/antworten" "$PDATA/modelle" "$PDATA/timer" \
          "$PLOG" "$PCONFIG" || {
     echo "<FAIL> Ordner konnten nicht angelegt werden."
     exit 1
 }
 chmod 755 "$PDATA" "$PLOG" "$PCONFIG" 2>/dev/null
 
+# ---------- Zweitschriften ZUERST ----------
+# Die Reihenfolge ist hier alles. purge_installation loescht
+# config/plugins/<x>/ bei JEDEM Upgrade (plugininstall.pl:886 -> :1631).
+# Bis 0.10.1 stand die Vorlagenanlage VOR dieser Schleife: saetze.json war
+# danach weder leer noch "{}", die Ruecknahme sprang nicht an, und die
+# gepflegten Satzmuster und Ziele waren nach jedem Update fort - waehrend
+# die Zweitschrift unversehrt daneben lag.
+for f in sprachsteuerung.json saetze.json; do
+    BK="$BASE/config/plugins/$PFOLDER.backup.$f"
+    CF="$PCONFIG/$f"
+    if [ -f "$BK" ]; then
+        INHALT=$(cat "$CF" 2>/dev/null)
+        if [ ! -s "$CF" ] || [ "$INHALT" = "{}" ]; then
+            cp -p "$BK" "$CF" && echo "<OK> $f aus Sicherung wiederhergestellt."
+        fi
+    fi
+done
+
 [ -f "$PCONFIG/sprachsteuerung.json" ] || echo '{}' > "$PCONFIG/sprachsteuerung.json"
 chmod 600 "$PCONFIG/sprachsteuerung.json"
-# Die Satzdatei ist Nutzerinhalt: nur anlegen, nie ueberschreiben.
+# Die Satzdatei ist Nutzerinhalt: nur anlegen, nie ueberschreiben. Nach der
+# Schleife oben greift das nur noch bei einer Neuinstallation.
 if [ ! -f "$PCONFIG/saetze.json" ]; then
     # Die Beispielsaetze richten sich nach der Oberflaechensprache des
     # LoxBerry. Bis 0.9.11 lag nur die deutsche Fassung bei; die Oberflaeche
     # war zweisprachig, das Verstehen nicht.
-    SPRACHE=$(sed -n 's/^ *"Lang" *: *"\([a-z][a-z]\)".*//p'               "$BASE/config/system/general.json" 2>/dev/null | head -n 1)
+    SPRACHE=$(sed -n 's/.*"Lang"[[:space:]]*:[[:space:]]*"\([a-z][a-z]\)".*/\1/p'               "$BASE/config/system/general.json" 2>/dev/null | head -n 1)
     [ -n "$SPRACHE" ] || SPRACHE=de
     QUELLE="$BASE/templates/plugins/$PFOLDER/saetze_$SPRACHE.json"
     [ -f "$QUELLE" ] || QUELLE="$BASE/templates/plugins/$PFOLDER/saetze_de.json"
@@ -57,17 +77,63 @@ if [ ! -f "$PCONFIG/saetze.json" ]; then
     fi
 fi
 
-for f in sprachsteuerung.json saetze.json; do
-    BK="$BASE/config/plugins/$PFOLDER.backup.$f"
-    CF="$PCONFIG/$f"
-    if [ -f "$BK" ]; then
-        INHALT=$(cat "$CF" 2>/dev/null)
-        if [ ! -s "$CF" ] || [ "$INHALT" = "{}" ]; then
-            cp -p "$BK" "$CF" && echo "<OK> $f aus Sicherung wiederhergestellt."
+
+# ---------- Das Rueckgabefenster ----------
+# Alles, was ueber das Update gerettet wurde, kommt HIER zurueck - noch
+# vor Architekturpruefung, venv und Docker. Bis 0.10.2 stand dieser Teil
+# am Dateiende: waere die venv gescheitert, haette postinstall.sh vorher
+# mit exit 1 aufgehoert, und die geretteten Werte waeren im Nachbarordner
+# liegengeblieben - gerettet und nie zurueckgegeben.
+# ---------- Langzeitwerte zurueckholen ----------
+# Gegenstueck zu preupgrade.sh. Zwischen beiden Skripten hat der Installer
+# data/plugins/<x>/ vollstaendig geloescht; der Nachbar mit dem Punkt hat es
+# ueberstanden. Zurueckgeholt wird nur, was fehlt - eine Neuinstallation
+# findet nichts vor und faengt sauber bei null an.
+LANG_SICHER="$BASE/data/plugins/$PFOLDER.upgrade_sicherung"
+if [ -d "$LANG_SICHER" ]; then
+    for LANG_F in verlauf.json messwerte.json ansagen.json; do
+        if [ -f "$LANG_SICHER/$LANG_F" ] \
+           && [ ! -s "$BASE/data/plugins/$PFOLDER/$LANG_F" ]; then
+            mkdir -p "$BASE/data/plugins/$PFOLDER" 2>/dev/null
+            cp -p "$LANG_SICHER/$LANG_F" "$BASE/data/plugins/$PFOLDER/$LANG_F" \
+                2>/dev/null && echo "<OK> $LANG_F ueber das Update gerettet."
         fi
+    done
+    rm -rf "$LANG_SICHER" 2>/dev/null
+fi
+
+# ---------- Der Sollmerker ----------
+# Er liegt unter data/plugins/<x>/ und wird beim Upgrade mitgeloescht.
+# preupgrade.sh haelt den Dienst an; startet ihn danach niemand, steht das
+# Plugin still, die Installation meldet Erfolg, und in Loxone sieht es aus
+# wie ein ruhiges Haus. Der Merker ist eine LEERE Datei - '[ ! -s ]' traefe
+# ihn nicht, deshalb '[ ! -e ]'.
+if [ -e "$BASE/data/plugins/$PFOLDER.soll_laufen" ]; then
+    if [ ! -e "$PDATA/soll_laufen" ]; then
+        touch "$PDATA/soll_laufen" \
+            && echo "<OK> Der Dienst lief vor dem Update - der Waechter holt ihn"
+        echo "<INFO> binnen einer Minute zurueck."
     fi
-done
-chmod 600 "$PCONFIG/sprachsteuerung.json"
+    rm -f "$BASE/data/plugins/$PFOLDER.soll_laufen" 2>/dev/null
+fi
+
+# ---------- Die heruntergeladenen Modelle ----------
+# Sie liegen unter data/plugins/<x>/modelle und werden von den Containern
+# eingehaengt. preupgrade.sh hat den Ordner NEBEN den Plugin-Ordner
+# verschoben (mv auf demselben Dateisystem, also ohne die Gigabyte zu
+# kopieren); hier kommt er zurueck an seinen Platz.
+UMZUG="$BASE/data/plugins/$PFOLDER.modelle_umzug"
+if [ -d "$UMZUG" ]; then
+    # Der frisch angelegte leere Ordner muss weg, bevor der alte zurueckkann.
+    # rmdir schlaegt fehl, wenn doch etwas darin liegt - das ist gewollt.
+    rmdir "$PDATA/modelle" 2>/dev/null
+    if [ ! -e "$PDATA/modelle" ] && mv "$UMZUG" "$PDATA/modelle" 2>/dev/null; then
+        echo "<OK> Die heruntergeladenen Modelle sind ueber das Update gerettet."
+    else
+        echo "<INFO> Die Modelle liegen unter $UMZUG und mussten dort bleiben."
+        echo "<INFO> Bitte den Ordner von Hand nach $PDATA/modelle verschieben."
+    fi
+fi
 
 # ---------- Architektur ----------
 ARCH=$(uname -m)
@@ -156,6 +222,8 @@ else
     echo "<FAIL> templates/vorgaben.json fehlt nach der Installation."
     echo "<INFO> Ohne diese Datei kennen weder Oberflaeche noch Dienst ihre"
     echo "<INFO> Vorgabewerte. Das Plugin bitte erneut installieren."
+    # Ein <FAIL>, nach dem 'Installation abgeschlossen' folgt, ist keines.
+    exit 1
 fi
 
 chmod 755 "$PBIN/dienst.sh" "$PBIN/sprachsteuerung_dienst.py" "$PBIN/hardware.py" 2>/dev/null
@@ -165,22 +233,4 @@ chmod 600 "$PCONFIG/sprachsteuerung.json"
 echo "<OK> Installation abgeschlossen."
 echo "<INFO> Weiter in der Plugin-Oberflaeche, Reiter Dienste: dort stehen der"
 echo "<INFO> Vorschlag fuer diese Hardware und die Knoepfe, die Container anzulegen."
-
-# ---------- Langzeitwerte zurueckholen ----------
-# Gegenstueck zu preupgrade.sh. Zwischen beiden Skripten hat der Installer
-# data/plugins/<x>/ vollstaendig geloescht; der Nachbar mit dem Punkt hat es
-# ueberstanden. Zurueckgeholt wird nur, was fehlt - eine Neuinstallation
-# findet nichts vor und faengt sauber bei null an.
-LANG_SICHER="$BASE/data/plugins/$PFOLDER.upgrade_sicherung"
-if [ -d "$LANG_SICHER" ]; then
-    for LANG_F in verlauf.json messwerte.json ansagen.json; do
-        if [ -f "$LANG_SICHER/$LANG_F" ] \
-           && [ ! -s "$BASE/data/plugins/$PFOLDER/$LANG_F" ]; then
-            mkdir -p "$BASE/data/plugins/$PFOLDER" 2>/dev/null
-            cp -p "$LANG_SICHER/$LANG_F" "$BASE/data/plugins/$PFOLDER/$LANG_F" \
-                2>/dev/null && echo "<OK> $LANG_F ueber das Update gerettet."
-        fi
-    done
-    rm -rf "$LANG_SICHER" 2>/dev/null
-fi
 exit 0

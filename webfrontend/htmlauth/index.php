@@ -54,6 +54,14 @@ if (isset($_POST['activetab']) && preg_match($sp_muster, (string) $_POST['active
 
 $sp_meldungen = array();
 $sp_fehler = array();
+/* Hinweise sind Beanstandungen, die nichts blockieren.
+ * Der Anlass: 'Der Antwortweg fuehrt ueber Loxone, aber es ist keine
+ * Adresse fuer die Audioausgabe eingetragen' steht auf JEDER frischen
+ * Anlage da (Vorgaben: antwortweg=beide, tts.mode=musicserver, tts.ip='').
+ * In $sp_fehler verhinderte er das Speichern SAEMTLICHER Felder - auch
+ * des Whisper-Rechnernamens, der damit nichts zu tun hat.
+ * REGELN_2: 'Beanstandungen melden, nicht das ganze Speichern verhindern'. */
+$sp_hinweise = array();
 $sp_ausgabe = '';
 $sp_post = (isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') === 'POST';
 
@@ -186,18 +194,27 @@ if ($sp_post && isset($_POST['mqtt_save'])) {
 /* ---------------- Einstellungen speichern ---------------- */
 if ($sp_post && isset($_POST['speichern'])) {
     $sp_cfg = sp_config();
+    /* WELCHES der beiden Formulare kam? Ein Feld, das nicht mitgeschickt
+     * wurde, ist nicht leer - es wurde nicht angezeigt. Nur Ankreuzfelder
+     * lassen sich davon nicht unterscheiden (ein nicht angehaktes schickt
+     * ebenfalls nichts); fuer sie entscheidet das Kennzeichen. */
+    $sp_formular = isset($_POST['formular']) ? (string) $_POST['formular'] : '';
     foreach (array('whisper', 'piper', 'wake', 'llm') as $sp_d) {
-        $host = $sp_sauber($sp_d . '_host');
-        if ($host !== '' && !preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-:_]{0,80}$/', $host)) {
-            $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_HOST'), sp_t('EINST.L_' . strtoupper($sp_d)));
-        } elseif ($host !== '') {
-            $sp_cfg[$sp_d . '_host'] = $host;
+        if (isset($_POST[$sp_d . '_host'])) {
+            $host = $sp_sauber($sp_d . '_host');
+            if ($host !== '' && !preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-:_]{0,80}$/', $host)) {
+                $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_HOST'), sp_t('EINST.L_' . strtoupper($sp_d)));
+            } elseif ($host !== '') {
+                $sp_cfg[$sp_d . '_host'] = $host;
+            }
         }
-        $port = $sp_sauber($sp_d . '_port');
-        if (!preg_match('/^[0-9]+$/', $port) || (int) $port < 1 || (int) $port > 65535) {
-            $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_PORT'), sp_t('EINST.L_' . strtoupper($sp_d)));
-        } else {
-            $sp_cfg[$sp_d . '_port'] = (int) $port;
+        if (isset($_POST[$sp_d . '_port'])) {
+            $port = $sp_sauber($sp_d . '_port');
+            if (!preg_match('/^[0-9]+$/', $port) || (int) $port < 1 || (int) $port > 65535) {
+                $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_PORT'), sp_t('EINST.L_' . strtoupper($sp_d)));
+            } else {
+                $sp_cfg[$sp_d . '_port'] = (int) $port;
+            }
         }
     }
     /* Die Grenzen stehen in templates/vorgaben.json - EINE Stelle fuer
@@ -219,11 +236,13 @@ if ($sp_post && isset($_POST['speichern'])) {
             $sp_cfg[$f] = (int) $w;
         }
     }
-    $sp_spr = $sp_sauber('sprache');
-    if (!preg_match('/^[a-z]{2}$/', $sp_spr)) {
-        $sp_fehler[] = sp_t('EINST.FEHLER_SPRACHE');
-    } else {
-        $sp_cfg['sprache'] = $sp_spr;
+    if (isset($_POST['sprache'])) {
+        $sp_spr = $sp_sauber('sprache');
+        if (!preg_match('/^[a-z]{2}$/', $sp_spr)) {
+            $sp_fehler[] = sp_t('EINST.FEHLER_SPRACHE');
+        } else {
+            $sp_cfg['sprache'] = $sp_spr;
+        }
     }
     $sp_ww = $sp_sauber('wakeword');
     if ($sp_ww === '' && isset($_POST['wakeword_frei'])) {
@@ -240,7 +259,7 @@ if ($sp_post && isset($_POST['speichern'])) {
      * versehentlich geleertes Feld nahm damit die Anmeldung mit. Wer sie
      * wirklich entfernen will, setzt den Haken darunter. */
     $sp_url = trim((string) (isset($_POST['miniserver_url']) ? $_POST['miniserver_url'] : ''));
-    if (isset($_POST['miniserver_url_loeschen'])) {
+    if ($sp_formular === 'ansagen' && isset($_POST['miniserver_url_loeschen'])) {
         $sp_cfg['miniserver_url'] = '';
     } elseif ($sp_url !== '' && $sp_url !== sp_url_maskiert((string) $sp_cfg['miniserver_url'])) {
         if (!sp_url_ok($sp_url)) {
@@ -249,76 +268,115 @@ if ($sp_post && isset($_POST['speichern'])) {
             $sp_cfg['miniserver_url'] = $sp_url;
         }
     }
-    $sp_cfg['llm_ein'] = isset($_POST['llm_ein']) ? 1 : 0;
-    $sp_cfg['antwort_sprechen'] = isset($_POST['antwort_sprechen']) ? 1 : 0;
+    /* Beide Haken stehen im Formular 'dienste'. Ohne diese Bedingung
+     * haette jedes Speichern aus dem anderen Formular sie genullt -
+     * abgeschaltetes Sprechen und abgeschaltetes Sprachmodell, ohne dass
+     * jemand einen Haken angefasst haette. */
+    if ($sp_formular === 'dienste') {
+        $sp_cfg['llm_ein'] = isset($_POST['llm_ein']) ? 1 : 0;
+        $sp_cfg['antwort_sprechen'] = isset($_POST['antwort_sprechen']) ? 1 : 0;
+    }
 
     /* ---- Rueckweg nach Loxone ---- */
-    $sp_weg = $sp_sauber('antwortweg');
-    if (!in_array($sp_weg, sp_auswahl('antwortweg'), true)) {
-        $sp_fehler[] = sp_t('EINST.FEHLER_ANTWORTWEG');
-    } else {
-        $sp_cfg['antwortweg'] = $sp_weg;
+    if (isset($_POST['antwortweg'])) {
+        $sp_weg = $sp_sauber('antwortweg');
+        if (!in_array($sp_weg, sp_auswahl('antwortweg'), true)) {
+            $sp_fehler[] = sp_t('EINST.FEHLER_ANTWORTWEG');
+        } else {
+            $sp_cfg['antwortweg'] = $sp_weg;
+        }
     }
     $sp_tts = is_array(isset($sp_cfg['tts']) ? $sp_cfg['tts'] : null) ? $sp_cfg['tts'] : array();
-    $sp_modus = $sp_sauber('tts_mode');
-    if (!in_array($sp_modus, sp_auswahl('tts_mode'), true)) {
-        $sp_fehler[] = sp_t('EINST.FEHLER_TTS_MODUS');
-    } else {
-        $sp_tts['mode'] = $sp_modus;
+    if (isset($_POST['tts_mode'])) {
+        $sp_modus = $sp_sauber('tts_mode');
+        if (!in_array($sp_modus, sp_auswahl('tts_mode'), true)) {
+            $sp_fehler[] = sp_t('EINST.FEHLER_TTS_MODUS');
+        } else {
+            $sp_tts['mode'] = $sp_modus;
+        }
     }
-    $sp_tts_ip = $sp_sauber('tts_ip');
-    if ($sp_tts_ip !== '' && !preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-:_]{0,80}$/', $sp_tts_ip)) {
-        $sp_fehler[] = sp_t('EINST.FEHLER_TTS_IP');
-    } else {
-        $sp_tts['ip'] = $sp_tts_ip;
+    if (isset($_POST['tts_ip'])) {
+        $sp_tts_ip = $sp_sauber('tts_ip');
+        if ($sp_tts_ip !== '' && !preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-:_]{0,80}$/', $sp_tts_ip)) {
+            $sp_fehler[] = sp_t('EINST.FEHLER_TTS_IP');
+        } else {
+            $sp_tts['ip'] = $sp_tts_ip;
+        }
     }
-    $sp_tts_port = $sp_sauber('tts_port');
-    if (!preg_match('/^[0-9]+$/', $sp_tts_port) || (int) $sp_tts_port < 1 || (int) $sp_tts_port > 65535) {
-        $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_PORT'), sp_t('EINST.L_TTS_PORT'));
-    } else {
-        $sp_tts['port'] = (int) $sp_tts_port;
+    if (isset($_POST['tts_port'])) {
+        $sp_tts_port = $sp_sauber('tts_port');
+        if (!preg_match('/^[0-9]+$/', $sp_tts_port) || (int) $sp_tts_port < 1 || (int) $sp_tts_port > 65535) {
+            $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_PORT'), sp_t('EINST.L_TTS_PORT'));
+        } else {
+            $sp_tts['port'] = (int) $sp_tts_port;
+        }
     }
-    $sp_tts_laut = $sp_sauber('tts_volume');
-    if (!preg_match('/^[0-9]+$/', $sp_tts_laut) || (int) $sp_tts_laut < 1 || (int) $sp_tts_laut > 100) {
-        $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_BEREICH'), sp_t('EINST.L_TTS_VOLUME'), 1, 100);
-    } else {
-        $sp_tts['volume'] = (int) $sp_tts_laut;
+    if (isset($_POST['tts_volume'])) {
+        $sp_tts_laut = $sp_sauber('tts_volume');
+        if (!preg_match('/^[0-9]+$/', $sp_tts_laut) || (int) $sp_tts_laut < 1 || (int) $sp_tts_laut > 100) {
+            $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_BEREICH'), sp_t('EINST.L_TTS_VOLUME'), 1, 100);
+        } else {
+            $sp_tts['volume'] = (int) $sp_tts_laut;
+        }
     }
-    $sp_tts_zonen = $sp_sauber('tts_zones');
-    if ($sp_tts_zonen !== '' && !preg_match('/^[0-9~,\s]{1,80}$/', $sp_tts_zonen)) {
-        $sp_fehler[] = sp_t('EINST.FEHLER_TTS_ZONEN');
-    } else {
-        $sp_tts['zones'] = $sp_tts_zonen !== '' ? $sp_tts_zonen : '1';
+    /* Ein leeres Feld loescht nichts und wird auch nicht auf einen Wert
+     * gebogen, den niemand gewaehlt hat: bis 0.10.1 wurde aus einer leeren
+     * Zonenangabe still '1' und aus einer leeren Sprache still 'de'. */
+    if (isset($_POST['tts_zones'])) {
+        $sp_tts_zonen = $sp_sauber('tts_zones');
+        if ($sp_tts_zonen !== '' && !preg_match('/^[0-9~,\s]{1,80}$/', $sp_tts_zonen)) {
+            $sp_fehler[] = sp_t('EINST.FEHLER_TTS_ZONEN');
+        } elseif ($sp_tts_zonen !== '') {
+            $sp_tts['zones'] = $sp_tts_zonen;
+        }
     }
-    $sp_tts_spr = $sp_sauber('tts_lang');
-    if ($sp_tts_spr !== '' && !preg_match('/^[a-z]{2,5}$/', $sp_tts_spr)) {
-        $sp_fehler[] = sp_t('EINST.FEHLER_SPRACHE');
-    } else {
-        $sp_tts['lang'] = $sp_tts_spr !== '' ? $sp_tts_spr : 'de';
+    if (isset($_POST['tts_lang'])) {
+        $sp_tts_spr = $sp_sauber('tts_lang');
+        if ($sp_tts_spr !== '' && !preg_match('/^[a-z]{2,5}$/', $sp_tts_spr)) {
+            $sp_fehler[] = sp_t('EINST.FEHLER_SPRACHE');
+        } elseif ($sp_tts_spr !== '') {
+            $sp_tts['lang'] = $sp_tts_spr;
+        }
     }
-    $sp_tts_stimme = $sp_sauber('tts_stimme');
-    if ($sp_tts_stimme !== '' && !preg_match('/^[A-Za-z0-9_.\-]{0,60}$/', $sp_tts_stimme)) {
-        $sp_fehler[] = sprintf(sp_t('DIENST.FEHLER_MODELL'), sp_t('EINST.L_TTS_STIMME'));
-    } else {
-        $sp_tts['stimme'] = $sp_tts_stimme;
+    if (isset($_POST['tts_stimme'])) {
+        $sp_tts_stimme = $sp_sauber('tts_stimme');
+        if ($sp_tts_stimme !== '' && !preg_match('/^[A-Za-z0-9_.\-]{0,60}$/', $sp_tts_stimme)) {
+            $sp_fehler[] = sprintf(sp_t('DIENST.FEHLER_MODELL'), sp_t('EINST.L_TTS_STIMME'));
+        } else {
+            $sp_tts['stimme'] = $sp_tts_stimme;
+        }
     }
     // Die Vorlage traegt Platzhalter in geschweiften Klammern und darf
     // deshalb NICHT durch den Filter oben laufen.
-    $sp_tts_vorl = trim((string) (isset($_POST['tts_template']) ? $_POST['tts_template'] : ''));
-    if ($sp_tts_vorl !== '' && !sp_url_ok($sp_tts_vorl)) {
-        $sp_fehler[] = sp_t('EINST.FEHLER_TTS_VORLAGE');
-    } else {
-        $sp_tts['template'] = $sp_tts_vorl;
+    if (isset($_POST['tts_template'])) {
+        $sp_tts_vorl = trim((string) $_POST['tts_template']);
+        if ($sp_tts_vorl !== '' && !sp_url_ok($sp_tts_vorl)) {
+            $sp_fehler[] = sp_t('EINST.FEHLER_TTS_VORLAGE');
+        } else {
+            $sp_tts['template'] = $sp_tts_vorl;
+        }
     }
-    if ($sp_weg !== 'satellit' && $sp_modus !== 'audioserver' && $sp_tts_ip === '') {
-        $sp_fehler[] = sp_t('EINST.FEHLER_TTS_FEHLT');
+    /* Ein HINWEIS, keine Sperre - und nur, wenn das Formular kam, das die
+     * drei Werte fuehrt. Sonst urteilt er ueber Felder, die gar nicht da
+     * waren. Der Satz stimmt trotzdem: ohne Adresse geht keine Ansage
+     * ueber Loxone hinaus. */
+    if ($sp_formular === 'dienste'
+        && isset($_POST['antwortweg'], $_POST['tts_mode'], $_POST['tts_ip'])
+        && $sp_sauber('antwortweg') !== 'satellit'
+        && $sp_sauber('tts_mode') !== 'audioserver'
+        && $sp_sauber('tts_ip') === '') {
+        $sp_hinweise[] = sp_t('EINST.FEHLER_TTS_FEHLT');
     }
     $sp_cfg['tts'] = $sp_tts;
 
     /* ---- Ruhezeit ---- */
     $sp_ruhe = is_array(isset($sp_cfg['ruhe']) ? $sp_cfg['ruhe'] : null) ? $sp_cfg['ruhe'] : array();
-    $sp_ruhe['ein'] = isset($_POST['ruhe_ein']) ? 1 : 0;
+    // Der Haken steht im Formular 'ansagen' - siehe oben zu llm_ein.
+    if ($sp_formular === 'ansagen') {
+        $sp_ruhe['ein'] = isset($_POST['ruhe_ein']) ? 1 : 0;
+    }
     foreach (array('von', 'bis') as $sp_f) {
+        if (!isset($_POST['ruhe_' . $sp_f])) { continue; }
         $sp_w = $sp_sauber('ruhe_' . $sp_f);
         if ($sp_w !== '' && !preg_match('/^\d{1,2}:\d{2}$/', $sp_w)) {
             $sp_fehler[] = sp_t('EINST.FEHLER_RUHEZEIT');
@@ -767,6 +825,17 @@ if ($sp_rahmen) {
 .sm-tbl th, .sm-tbl td { border: 1px solid #ccc; padding: 5px 7px; text-align: left; vertical-align: top; }
 .sm-tbl th { background: #eef3e6; font-weight: 600; }
 .sm-roll { overflow-x: auto; }
+/* Ein Auswahlfeld muss man als Auswahlfeld erkennen - wortgetreu aus
+   VORLAGE_hausstandard.css.html. Ohne diese Regel nimmt die Rahmen-CSS
+   des LoxBerry den Pfeil weg, und hinter einem Feld, das wie ein
+   Textfeld aussieht, findet niemand die Vorlagen. Zweimal am Geraet
+   gemeldet, nie von einem Werkzeug: rendern.py sieht HTML, kein Bild. */
+.sm-wrap select {
+    appearance: none; -webkit-appearance: none; -moz-appearance: none;
+    background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='9' viewBox='0 0 14 9'%3E%3Cpath d='M1 1l6 6 6-6' fill='none' stroke='%234f7d17' stroke-width='2'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 10px center;
+    padding-right: 32px; cursor: pointer; }
+.sm-tbl select { padding-right: 28px; background-position: right 7px center; }
 .sm-mono { font-family: Consolas, "Courier New", monospace; background: #f0f0f0;
     padding: 1px 4px; border-radius: 3px; font-size: 0.94em; word-break: break-all; }
 .sm-pre { background: #f4f4f4; border: 1px solid #ccc; padding: 10px; font-size: 0.85em;
@@ -819,6 +888,12 @@ if ($sp_rahmen) {
 <div class="sm-fehler"><b><?= sp_e(sp_t('ALLG.BEANSTANDUNG')) ?></b>
 <ul style="margin:6px 0 0 18px;padding:0;">
 <?php foreach ($sp_fehler as $sp_f) { ?><li><?= $sp_f ?></li><?php } ?>
+</ul></div>
+<?php } ?>
+<?php if ($sp_hinweise) { ?>
+<div class="sm-warnung"><b><?= sp_e(sp_t('ALLG.HINWEIS')) ?></b>
+<ul style="margin:6px 0 0 18px;padding:0;">
+<?php foreach ($sp_hinweise as $sp_h) { ?><li><?= $sp_h ?></li><?php } ?>
 </ul></div>
 <?php } ?>
 
@@ -909,9 +984,15 @@ $sp_hidden = function ($tab) use ($sp_fmt) {
   </form>
 </div>
 
+<?php /* Zwei Formulare tragen name="speichern", weil der Knopf 'Probe
+   holen' dazwischenliegt und kein Formular im Formular stehen darf. Das
+   Kennzeichen sagt dem Handler, WELCHES abgeschickt wurde - ohne das
+   behandelte er die Felder des jeweils anderen als leer und wies sie ab.
+   Gemessen am 02.09.2026: der Speichern-Knopf speicherte gar nichts. */ ?>
 <form action="index.php" method="post" autocomplete="off">
 <?php $sp_hidden('tab-settings'); ?>
 <input data-role="none" type="hidden" name="speichern" value="1">
+<input data-role="none" type="hidden" name="formular" value="dienste">
 
 <h2><?= sp_e(sp_t('EINST.H_DIENSTE')) ?></h2>
 <p class="sm-hilfe"><?= sp_t('EINST.DIENSTE_ERKLAERUNG') ?></p>
@@ -1021,6 +1102,7 @@ $sp_hidden = function ($tab) use ($sp_fmt) {
 <form action="index.php" method="post" autocomplete="off">
 <?php $sp_hidden('tab-settings'); ?>
 <input data-role="none" type="hidden" name="speichern" value="1">
+<input data-role="none" type="hidden" name="formular" value="ansagen">
 <div class="sm-feld">
   <label for="tts_template"><?= sp_e(sp_t('EINST.L_TTS_TEMPLATE')) ?></label>
   <input data-role="none" type="text" id="tts_template" name="tts_template" value="<?= sp_e($sp_cfg['tts']['template']) ?>" placeholder="http://{ip}:{port}/tts?text={text}&amp;zone={zones}&amp;vol={vol}">
@@ -1139,6 +1221,7 @@ foreach ($sp_ww_liste as $sp_w) { ?>
 
 <h3><?= sp_e(sp_t('MQTT.H_THEMEN')) ?></h3>
 <p class="sm-hilfe"><?= sp_t('MQTT.THEMEN_ERKLAERUNG') ?></p>
+<div class="sm-warnung"><?= sp_t('MQTT.ABO_UNGEMESSEN') ?></div>
 <div class="sm-roll">
 <table class="sm-tbl">
 <tr><th><?= sp_e(sp_t('MQTT.T_THEMA')) ?></th><th><?= sp_e(sp_t('MQTT.T_BEDEUTUNG')) ?></th></tr>
@@ -1148,10 +1231,13 @@ $sp_themen = array(
     'ziel' => 'MQTT.B_ZIEL', 'wert' => 'MQTT.B_WERT', 'einheit' => 'MQTT.B_EINHEIT',
     'quelle' => 'MQTT.B_QUELLE', 'mikrofon' => 'MQTT.B_MIKROFON', 'zeit' => 'MQTT.B_ZEIT',
     '&lt;Thema&gt;/aktion' => 'MQTT.B_ZIELTHEMA',
+    '&lt;Thema&gt;/wert' => 'MQTT.B_ZIELWERT',
     'antwort' => 'MQTT.B_ANTWORT', 'ok' => 'MQTT.B_OK', 'grund' => 'MQTT.B_GRUND',
     'ansage' => 'MQTT.B_ANSAGE',
-    'online' => 'MQTT.B_ONLINE', 'ts' => 'MQTT.B_TS', 'bereit' => 'MQTT.B_BEREIT',
-    'dienste_ok' => 'MQTT.B_DIENSTE_OK', 'regeln' => 'MQTT.B_REGELN',
+    'online' => 'MQTT.B_ONLINE', 'ts' => 'MQTT.B_TS',
+    'mikrofone' => 'MQTT.B_MIKROFONE', 'bereit' => 'MQTT.B_BEREIT',
+    'dienste_ok' => 'MQTT.B_DIENSTE_OK',
+    'dienste_gesamt' => 'MQTT.B_DIENSTE_GESAMT', 'regeln' => 'MQTT.B_REGELN',
     'ziele' => 'MQTT.B_ZIELE', 'ruhe' => 'MQTT.B_RUHE',
     'letzter_satz_alter' => 'MQTT.B_LETZTER',
 );
@@ -1710,12 +1796,37 @@ foreach ($sp_lvor as $sp_k4 => $sp_v4) {
  */
 function sp_bausteine()
 {
+    /* Suchtext und Themen werden GEBILDET, nicht abgeschrieben.
+     * Der Suchtext entsteht in sp_check() - das ist laut Kommentar dort
+     * die einzige Stelle, an der das Muster entsteht. Das Themenpraefix
+     * ist einstellbar; bis 0.10.1 stand in dieser Tabelle fest
+     * 'sprachsteuerung/aktion', waehrend der Reiter MQTT daneben das
+     * eingestellte Praefix zeigte. Der Anwender tippt DIESE Tabelle ab. */
+    $mono = function ($s) { return '<span class="sm-mono">' . sp_e($s) . '</span>'; };
+    $praefix = trim((string) sp_config(false)['mqtt_topic'], '/');
+    if ($praefix === '') { $praefix = 'sprachsteuerung'; }
+    /* Die fuenf sprintf-Aufrufe stehen AUSGESCHRIEBEN und nicht in einer
+     * Huelle: sprachplatzhalter_pruefen.py liest die Aufrufstelle und
+     * zaehlt Platzhalter gegen Argumente. Ueber eine Huelle saehe es
+     * nichts mehr und meldete fuenf Schluessel je Sprache als 'nirgends
+     * durch sprintf gereicht'. Ein Werkzeug blind zu machen ist dasselbe,
+     * wie es abzuschaffen. */
     return array(
-        array(1,  'BAUSTEIN.T_VE',      'BAUSTEIN.N01', 'BAUSTEIN.P01', '&mdash;'),
-        array(2,  'BAUSTEIN.T_VE',      'BAUSTEIN.N02', 'BAUSTEIN.P02', '&mdash;'),
-        array(3,  'BAUSTEIN.T_VET',     'BAUSTEIN.N03', 'BAUSTEIN.P03', '&mdash;'),
-        array(4,  'BAUSTEIN.T_VET',     'BAUSTEIN.N04', 'BAUSTEIN.P04', '&mdash;'),
-        array(5,  'BAUSTEIN.T_VET',     'BAUSTEIN.N05', 'BAUSTEIN.P05', '&mdash;'),
+        array(1,  'BAUSTEIN.T_VE',      'BAUSTEIN.N01',
+              array('text' => sprintf(sp_t('BAUSTEIN.P01'), $mono(sp_check('OK')))),
+              '&mdash;'),
+        array(2,  'BAUSTEIN.T_VE',      'BAUSTEIN.N02',
+              array('text' => sprintf(sp_t('BAUSTEIN.P02'), $mono(sp_check('ALTER')))),
+              '&mdash;'),
+        array(3,  'BAUSTEIN.T_VET',     'BAUSTEIN.N03',
+              array('text' => sprintf(sp_t('BAUSTEIN.P03'), $mono($praefix . '/aktion'))),
+              '&mdash;'),
+        array(4,  'BAUSTEIN.T_VET',     'BAUSTEIN.N04',
+              array('text' => sprintf(sp_t('BAUSTEIN.P04'), $mono($praefix . '/ziel'))),
+              '&mdash;'),
+        array(5,  'BAUSTEIN.T_VET',     'BAUSTEIN.N05',
+              array('text' => sprintf(sp_t('BAUSTEIN.P05'), $mono($praefix . '/grund'))),
+              '&mdash;'),
         array(6,  'BAUSTEIN.T_VERGL',   'BAUSTEIN.N06', 'BAUSTEIN.P06', 'I1 &larr; #3'),
         array(7,  'BAUSTEIN.T_VERGL',   'BAUSTEIN.N07', 'BAUSTEIN.P07', 'I1 &larr; #3'),
         array(8,  'BAUSTEIN.T_UND',     'BAUSTEIN.N08', '',             'I1 &larr; #6, I2 &larr; #4'),
@@ -1739,7 +1850,9 @@ function sp_bausteine()
     <th><?= sp_e(sp_t('LOX.T_PARAMETER')) ?></th><th><?= sp_e(sp_t('LOX.T_EINGAENGE')) ?></th></tr>
 <?php foreach (sp_bausteine() as $sp_b) { ?>
 <tr><td><?= (int) $sp_b[0] ?></td><td><?= sp_t($sp_b[1]) ?></td><td><?= sp_t($sp_b[2]) ?></td>
-    <td><?= $sp_b[3] !== '' ? sp_t($sp_b[3]) : '&mdash;' ?></td><td><?= $sp_b[4] ?></td></tr>
+    <td><?= is_array($sp_b[3]) ? $sp_b[3]['text']
+                               : ($sp_b[3] !== '' ? sp_t($sp_b[3]) : '&mdash;') ?></td>
+    <td><?= $sp_b[4] ?></td></tr>
 <?php } ?>
 </table>
 </div>
@@ -1984,7 +2097,15 @@ if (class_exists('LBWeb', false) && method_exists('LBWeb', 'loglist_html')) {
 	});
 	// Der Server hat sm-active bereits gesetzt; dieser Aufruf richtet nur die
 	// versteckten activetab-Felder aus und ist ansonsten wirkungslos.
-	zeige(<?= sp_e(json_encode($sp_tab)) ?>);
+	// KEIN sp_e() hier: in einem <script>-Block loest der Browser keine
+	// Entitaeten auf. Bis 0.10.1 kam der Reitername hier maskiert an, mit
+	// den Anfuehrungszeichen als Entitaet - ein Syntaxfehler, der den
+	// EINZIGEN Skriptblock der Seite mitnahm. Der Wortlaut steht bewusst
+	// NICHT hier: js_pruefen.py weist jede Entitaet im Skriptblock ab und
+	// wuerde sonst auf diesen Kommentar anschlagen.
+	// Die Regel 'json_encode gehoert durch die Maskierfunktion' gilt fuer
+	// ATTRIBUTE. json_encode maskiert < > & selbst.
+	zeige(<?= json_encode($sp_tab) ?>);
 })();
 </script>
 <?php

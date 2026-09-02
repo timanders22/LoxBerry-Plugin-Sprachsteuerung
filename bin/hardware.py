@@ -54,16 +54,66 @@ def lb_wurzel_ermitteln():
 
 SELF = Path(__file__).resolve().parent
 PNAME = SELF.name
-if len(SELF.parents) >= 3:
+
+
+def _wurzel_pruefen(k) -> bool:
+    """Ist das wirklich eine LoxBerry-Wurzel? Siehe sprachsteuerung_dienst.py.
+
+    Bis 0.10.1 war die Bedingung 'len(SELF.parents) >= 3' - auf jedem realen
+    Pfad wahr. Aus dem entpackten Archiv heraus ergab das PNAME='bin' und
+    eine Konfiguration, die es nicht gibt: gemessen wurde dann wieder gegen
+    127.0.0.1, also genau die Fehlmessung, die 0.9.7 abgestellt hatte.
+    """
+    try:
+        return (k / "config" / "plugins").is_dir() and (k / "webfrontend").is_dir()
+    except OSError:
+        return False
+
+
+if len(SELF.parents) >= 3 and _wurzel_pruefen(SELF.parents[2]):
     LBHOME = SELF.parents[2]
 else:
-    LBHOME = Path(os.environ.get("LBHOMEDIR") or lb_wurzel_ermitteln())
+    # Die Reihenfolge zaehlt: die Auskunft von LoxBerry selbst, dann die
+    # Suche aufwaerts, und erst als LETZTES wieder die feste Zahl "..".
+    # lb_wurzel_ermitteln() gibt bei Misserfolg eine LEERE Zeichenkette
+    # zurueck - daraus wuerde Path(".") und damit ein Schreibweg in das
+    # gerade aktuelle Verzeichnis. Genau das steht in REGELN_1 als
+    # "ein Pruefling schreibt dorthin, wo seine Umgebung hinzeigt".
+    _kandidat = os.environ.get("LBHOMEDIR") or lb_wurzel_ermitteln()
+    LBHOME = Path(_kandidat) if _kandidat else SELF.parents[2]
+
+# Aus dem entpackten Archiv heraus heisst der Ordner ueber bin/ nicht wie
+# das Plugin. Dann gilt die Auskunft von LoxBerry, sonst der feste Name -
+# dieselbe Regel wie in sp_paths() auf der PHP-Seite.
+if PNAME in ("bin", "", ".", "/"):
+    PNAME = os.environ.get("LBPPLUGINDIR") or "sprachsteuerung"
 PTEMPLATES = LBHOME / "templates" / "plugins" / PNAME
+
+def _fassung() -> str:
+    """Die Fassungsnummer aus der plugin.cfg - EINE Quelle.
+
+    Bis 0.10.1 stand sie als Zahl im User-Agent und veraltete still:
+    hardware.py fuehrte 0.9, waehrend die plugin.cfg 0.10.1 sagte.
+    """
+    for k in (LBHOME / "config" / "plugins" / PNAME / "plugin.cfg",
+              SELF.parent / "plugin.cfg"):
+        try:
+            for zeile in k.read_text(encoding="utf-8", errors="replace").splitlines():
+                if zeile.startswith("VERSION="):
+                    return zeile.split("=", 1)[1].strip() or "0"
+        except OSError:
+            continue
+    return "0"
+
+
+FASSUNG = _fassung()
 
 
 def tabelle() -> dict:
+    # SELF ist bereits bin/; SELF.parent ist die Pluginwurzel im Archiv.
+    # Ein dritter Kandidat eine Ebene darueber traf nie etwas - weder
+    # installiert noch im Archiv.
     for kandidat in (PTEMPLATES / "modelle.json",
-                     SELF.parent.parent / "templates" / "modelle.json",
                      SELF.parent / "templates" / "modelle.json"):
         if kandidat.is_file():
             try:
@@ -304,7 +354,7 @@ def messen_llm(host: str, port: int, frage: str = "Antworte mit genau einem Wort
     anfrage = urllib.request.Request(
         f"http://{host}:{port}/v1/chat/completions", data=koerper,
         headers={"Content-Type": "application/json",
-                 "User-Agent": "LoxBerry-Sprachsteuerung-Plugin/0.9",
+                 "User-Agent": "LoxBerry-Sprachsteuerung-Plugin/" + FASSUNG,
                  "Accept": "application/json"})
     t0 = time.monotonic()
     try:
@@ -319,7 +369,12 @@ def messen_llm(host: str, port: int, frage: str = "Antworte mit genau einem Wort
     try:
         text = d["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
-        pass
+        # Eine Antwort ist kein Lebenszeichen. Bis 0.10.1 meldete diese
+        # Funktion ok=1 mit leerem Text und 0 Tokens, wenn die Gegenstelle
+        # etwas anderes als eine Chat-Antwort schickte - ein gruener Haken
+        # fuer einen Dienst, der nicht antwortet.
+        return {"ok": 0, "fehler": "Die Antwort enthaelt keinen Text "
+                                   "(choices[0].message.content fehlt)."}
     tokens = ((d.get("usage") or {}).get("completion_tokens")) or 0
     return {"ok": 1, "sekunden": dauer, "tokens": tokens,
             "tokens_je_sekunde": round(tokens / dauer, 1) if dauer > 0 and tokens else None,
@@ -448,7 +503,7 @@ def messwerte_ablegen(messung: dict) -> str:
                 alt = {}
         liste = alt.get("messungen") if isinstance(alt.get("messungen"), list) else []
         liste.insert(0, {"ts": int(time.time()), "messung": messung})
-        tmp = pfad.with_suffix(".json.tmp")
+        tmp = pfad.with_suffix(".json.tmp.%d" % os.getpid())
         tmp.write_text(json.dumps({"messungen": liste[:20]},
                                   ensure_ascii=False, indent=1), encoding="utf-8")
         os.replace(tmp, pfad)

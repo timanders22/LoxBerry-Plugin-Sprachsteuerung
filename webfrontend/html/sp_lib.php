@@ -131,11 +131,21 @@ function sp_json_schreiben($pfad, $daten, $rechte = null)
 {
     $ordner = dirname($pfad);
     if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) { return false; }
-    $tmp = $pfad . '.tmp';
+    // Die PID im Namen: der Dienst schreibt dieselben Dateien und benutzte
+    // bis 0.10.1 denselben .tmp-Namen. Zwei Schreiber, ein Name, keine Sperre.
+    $tmp = $pfad . '.tmp.' . getmypid();
     $json = json_encode($daten, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
-    if ($json === false || @file_put_contents($tmp, $json) === false) { @unlink($tmp); return false; }
+    if ($json === false) { return false; }
+    // Rechte VOR dem Inhalt: sonst steht die Miniserver-Anmeldung einen
+    // Augenblick lang mit den Vorgaberechten auf der Platte.
+    if (@file_put_contents($tmp, '') === false) { @unlink($tmp); return false; }
     if ($rechte !== null) { @chmod($tmp, $rechte); }
-    return @rename($tmp, $pfad);
+    $n = @file_put_contents($tmp, $json);
+    // Eine Kurzschreibung ist ein Fehler, kein Erfolg - eine halbe
+    // JSON-Datei liest sich hinterher als leere Konfiguration.
+    if ($n === false || $n !== strlen($json)) { @unlink($tmp); return false; }
+    if (!@rename($tmp, $pfad)) { @unlink($tmp); return false; }
+    return true;
 }
 
 /* ==================================================================
@@ -609,12 +619,24 @@ function sp_dienst($befehl)
  * Mal, weil ueber die Sprachgrenze hinweg keine gemeinsame Funktion moeglich
  * ist - die WERTE kommen aber aus derselben Konfiguration, und der Reiter
  * Test zeigt das Ergebnis beider Seiten nebeneinander.
+ *
+ * Bis 0.10.1 fehlte hier die ERSTE der beiden Quellen des Dienstes: die
+ * Stilllegung durch Loxone (data/.../ruhe.json, Schluessel 'still'). Damit
+ * meldete die Statuszeile RUHE=0, waehrend der Dienst schwieg und ueber
+ * MQTT 1 schickte - zwei Wege, zwei Antworten auf dieselbe Frage.
  */
 function sp_ruhe_aktiv($cfg = null, $jetzt = null)
 {
     // sp_config(false): diese Funktion wird auch aus dem unangemeldeten
     // Endpunkt heraus benutzt und darf deshalb nichts anlegen.
     if ($cfg === null) { $cfg = sp_config(false); }
+    // Erste Quelle: von Loxone stillgelegt. Der Merker liegt unter data/,
+    // weil der unangemeldete Endpunkt nichts schreiben darf - umgelegt
+    // wird er vom Dienst ueber die Warteschlange.
+    $still = sp_json_lesen(sp_paths()['datadir'] . '/ruhe.json');
+    if (!empty($still['still'])) {
+        return array(1, sp_t('TEST.A_RUHE_LOXONE'));
+    }
     $r = isset($cfg['ruhe']) && is_array($cfg['ruhe']) ? $cfg['ruhe'] : array();
     if (empty($r['ein'])) { return array(0, ''); }
     $minuten = function ($hhmm) {
@@ -1086,14 +1108,21 @@ function sp_xml_virtual_out($kopf, $cmds)
 }
 
 /** Ist die erzeugte Vorlage wohlgeformt? Gehoert in den Reiter Test. */
-function sp_vorlage_pruefen()
+function sp_vorlage_pruefen(&$geprueft = null, &$gesamt = null)
 {
+    /* Gezaehlt wird, was WIRKLICH gemessen wurde. Bis 0.10.1 meldete die
+     * Pruefzeile 'alle drei Vorlagen', nachdem sie zwei angesehen hatte: eine
+     * leere Zielliste ergibt eine leere Vorlage, und die wird uebersprungen.
+     * 'Alle 0 von 0 sind in Ordnung' ist kein Haken (REGELN_1). */
     $befunde = array();
     $vorlagen = array('Eingang' => sp_vorlage(), 'Ausgang' => sp_vorlage_ausgang(),
                       'Ziele' => sp_vorlage_ziele());
+    $gesamt = count($vorlagen);
+    $geprueft = 0;
     foreach ($vorlagen as $art => $paar) {
         list($name, $inhalt) = $paar;
         if ($inhalt === '') { continue; }
+        $geprueft++;
         $vorher = libxml_use_internal_errors(true);
         $x = simplexml_load_string($inhalt);
         libxml_clear_errors();
@@ -1626,8 +1655,11 @@ function sp_endpunkt_probe()
     $basis = 'http://' . sp_hostname() . '/plugins/' . $p['plugin'] . '/index.php';
     $token = sp_token();
     $hol = function ($url) {
+        // Auch hier keine Weiterleitung: in der Adresse steht das
+        // Aktionstoken, und es soll nirgendwo sonst ankommen.
         $ctx = stream_context_create(array('http' => array(
             'timeout' => 5, 'ignore_errors' => true,
+            'follow_location' => 0, 'max_redirects' => 1,
             'header' => "User-Agent: LoxBerry-Sprachsteuerung-Selbsttest\r\n")));
         $rumpf = @file_get_contents($url, false, $ctx);
         $code = 0;
@@ -1660,19 +1692,41 @@ function sp_endpunkt_probe()
  * Geeicht durch Rueckbau: nimmt man das serverseitige sm-active an einem
  * Bereich weg, muss diese Zeile rot werden.
  */
+function sp_oberflaechendatei()
+{
+    $p = sp_paths();
+    $kandidaten = array();
+    $auth = getenv('LBPHTMLAUTHDIR');
+    if ($auth) { $kandidaten[] = $auth . '/index.php'; }
+    if ($p['home'] !== '') {
+        $kandidaten[] = $p['home'] . '/webfrontend/htmlauth/plugins/'
+                      . $p['plugin'] . '/index.php';
+    }
+    // Der Archivfall: html/ und htmlauth/ liegen nebeneinander.
+    $kandidaten[] = dirname(dirname(__FILE__)) . '/htmlauth/index.php';
+    foreach ($kandidaten as $k) {
+        if (is_file($k)) { return $k; }
+    }
+    return '';
+}
+
 function sp_smactive_probe()
 {
-    $datei = dirname(dirname(__FILE__)) . '/htmlauth/index.php';
-    if (!is_file($datei)) {
-        $datei = __DIR__ . '/../htmlauth/index.php';
-    }
-    $s = (string) @file_get_contents($datei);
+    $datei = sp_oberflaechendatei();
+    $s = $datei === '' ? '' : (string) @file_get_contents($datei);
     if ($s === '') { return array(0, sp_t('TEST.A_SMACTIVE_NICHTS')); }
-    preg_match_all('/data-ziel="tab-([a-z]+)"/', $s, $y);
-    $anzahl   = count($y[1]);
+    // Leiste und Bereiche entstehen aus EINER Liste; die Zahl der
+    // Reiter steht deshalb dort und nicht in der gerenderten Leiste.
+    // Bis 0.10.1 wurde 'data-ziel="tab-..."' gezaehlt - das kommt in
+    // der Schleifenform genau einmal vor, und die Zeile war dauerhaft
+    // rot (gemessen: Leiste 1, Bereiche 8, von 0).
+    $anzahl = 0;
+    if (preg_match('/\$sp_reiter_ids\s*=\s*array\(([^)]*)\)/', $s, $r)) {
+        $anzahl = preg_match_all("/'[a-z_]+'/", $r[1]);
+    }
     $leiste   = preg_match_all('/class="sm-tab<\?=[^>]*sm-active/', $s);
     $bereiche = preg_match_all('/class="sm-seite<\?=[^>]*sm-active/', $s);
-    if ($anzahl > 0 && $leiste >= $anzahl && $bereiche >= $anzahl) {
+    if ($anzahl > 0 && $leiste >= 1 && $bereiche >= $anzahl) {
         return array(1, sprintf(sp_t('TEST.A_SMACTIVE_OK'), $anzahl));
     }
     return array(0, sprintf(sp_t('TEST.A_SMACTIVE_FEHL'), $leiste, $bereiche, $anzahl));
@@ -1681,17 +1735,23 @@ function sp_smactive_probe()
 /** Traegt JEDES Formular das Merkmal gegen fremde Absender? */
 function sp_formularprobe($datei = null)
 {
-    if ($datei === null) {
-        $datei = dirname(dirname(__FILE__)) . '/htmlauth/index.php';
+    if ($datei === null) { $datei = sp_oberflaechendatei(); }
+    $s = $datei === '' ? '' : (string) @file_get_contents($datei);
+    // Die Huelle muss das Merkmal auch wirklich ausgeben. Ohne diese
+    // Probe wuerde ein Aufruf von sp_hidden() genuegen, um gruen zu
+    // sein - auch dann, wenn die Huelle es gar nicht mehr schreibt.
+    if ($s !== '' && strpos($s, '$sp_hidden = function') !== false
+        && strpos($s, 'name="fmt"') === false) {
+        return array(0, sp_t('TEST.A_FORM_HUELLE'));
     }
-    $s = (string) @file_get_contents($datei);
     $gesamt = 0; $ohne = 0;
     if (preg_match_all('/<form\s/', $s, $y, PREG_OFFSET_CAPTURE)) {
         foreach ($y[0] as $f) {
             $gesamt++;
             $ende = strpos($s, '</form>', $f[1]);
             $blk  = substr($s, $f[1], ($ende === false ? 600 : $ende - $f[1]));
-            if (strpos($blk, 'name="fmt"') === false) { $ohne++; }
+            if (strpos($blk, 'name="fmt"') === false
+                && strpos($blk, 'sp_hidden(') === false) { $ohne++; }
         }
     }
     // Die leere Menge zuerst: "alle 0 von 0 sind in Ordnung" ist kein Haken.
@@ -1703,9 +1763,12 @@ function sp_formularprobe($datei = null)
 /**
  * Kennen beide Sprachen dieselbe Vorgabenliste?
  *
- * Die Datei ist gemeinsam, aber ob der Dienst sie auch FINDET, sagt nur der
- * Dienst. Verglichen wird deshalb die Zahl der Schluessel hier mit der Zahl,
- * die der Selbsttest des Dienstes nennt.
+ * Verglichen wird die Zahl der Schluessel in templates/vorgaben.json mit
+ * der Zahl, die in der Konfiguration wirklich steht. Fehlt einer, gilt die
+ * Vorgabe - das ist kein Fehler, aber es gehoert sichtbar dazu.
+ *
+ * Bis 0.10.1 stand hier, verglichen werde mit der Zahl aus dem Selbsttest
+ * des DIENSTES. Das hat die Funktion nie getan.
  */
 function sp_vorgaben_probe()
 {
@@ -1723,7 +1786,8 @@ function sp_vorgaben_probe()
                                 count($vor) - count($fehlend), count($vor),
                                 sp_e(implode(', ', array_slice($fehlend, 0, 6)))));
     }
-    return array(1, sprintf(sp_t('TEST.A_VORGABEN_OK'), count($vor)));
+    return array(1, sprintf(sp_t('TEST.A_VORGABEN_OK'),
+                            count($vor), count($vor)));
 }
 
 /** Gibt es eine Zweitschrift, und wie alt ist sie? */
@@ -1845,8 +1909,11 @@ function sp_lox_struktur_holen($host, $benutzer, $kennwort)
         // Adresse landet im Protokoll des Webservers, ein Kopf nicht.
         $kopf .= 'Authorization: Basic ' . base64_encode($benutzer . ':' . $kennwort) . "\r\n";
     }
+    // KEINE Weiterleitung: der Authorization-Kopf ginge sonst an ein
+    // Ziel, das die Gegenstelle bestimmt.
     $ctx = stream_context_create(array('http' => array(
-        'timeout' => 15, 'ignore_errors' => true, 'header' => $kopf)));
+        'timeout' => 15, 'ignore_errors' => true, 'header' => $kopf,
+        'follow_location' => 0, 'max_redirects' => 1)));
     $roh = @file_get_contents($url, false, $ctx);
     $code = 0;
     if (isset($http_response_header) && is_array($http_response_header)) {

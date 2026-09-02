@@ -93,15 +93,64 @@ def mqtt_wert_saeubern(wert):
 
 SELF = Path(__file__).resolve().parent
 PNAME = SELF.name
-if len(SELF.parents) >= 3:
+
+
+def _wurzel_pruefen(k) -> bool:
+    """Ist das wirklich eine LoxBerry-Wurzel?
+
+    Bis 0.10.1 stand hier nur 'len(SELF.parents) >= 3'. Das ist auf jedem
+    realen Pfad wahr - der else-Zweig lief nie, LBHOMEDIR und
+    lb_wurzel_ermitteln() waren tot, und aus dem entpackten Archiv heraus
+    ergab die feste Zahl '..' einen Pfad irgendwo im Arbeitsordner.
+    Eine Bedingung, die nie zutreffen kann, sieht aus wie Vorsicht.
+    """
+    try:
+        return (k / "config" / "plugins").is_dir() and (k / "webfrontend").is_dir()
+    except OSError:
+        return False
+
+
+if len(SELF.parents) >= 3 and _wurzel_pruefen(SELF.parents[2]):
     LBHOME = SELF.parents[2]
 else:
-    LBHOME = Path(os.environ.get("LBHOMEDIR") or lb_wurzel_ermitteln())
+    # Die Reihenfolge zaehlt: die Auskunft von LoxBerry selbst, dann die
+    # Suche aufwaerts, und erst als LETZTES wieder die feste Zahl "..".
+    # lb_wurzel_ermitteln() gibt bei Misserfolg eine LEERE Zeichenkette
+    # zurueck - daraus wuerde Path(".") und damit ein Schreibweg in das
+    # gerade aktuelle Verzeichnis. Genau das steht in REGELN_1 als
+    # "ein Pruefling schreibt dorthin, wo seine Umgebung hinzeigt".
+    _kandidat = os.environ.get("LBHOMEDIR") or lb_wurzel_ermitteln()
+    LBHOME = Path(_kandidat) if _kandidat else SELF.parents[2]
+
+# Aus dem entpackten Archiv heraus heisst der Ordner ueber bin/ nicht wie
+# das Plugin. Dann gilt die Auskunft von LoxBerry, sonst der feste Name -
+# dieselbe Regel wie in sp_paths() auf der PHP-Seite.
+if PNAME in ("bin", "", ".", "/"):
+    PNAME = os.environ.get("LBPPLUGINDIR") or "sprachsteuerung"
 
 PDATA = LBHOME / "data" / "plugins" / PNAME
 PLOG = LBHOME / "log" / "plugins" / PNAME
 PCONFIG = LBHOME / "config" / "plugins" / PNAME
 PTEMPLATES = LBHOME / "templates" / "plugins" / PNAME
+
+def _fassung() -> str:
+    """Die Fassungsnummer aus der plugin.cfg - EINE Quelle.
+
+    Bis 0.10.1 stand sie als Zahl im User-Agent und veraltete still:
+    hardware.py fuehrte 0.9, waehrend die plugin.cfg 0.10.1 sagte.
+    """
+    for k in (LBHOME / "config" / "plugins" / PNAME / "plugin.cfg",
+              SELF.parent / "plugin.cfg"):
+        try:
+            for zeile in k.read_text(encoding="utf-8", errors="replace").splitlines():
+                if zeile.startswith("VERSION="):
+                    return zeile.split("=", 1)[1].strip() or "0"
+        except OSError:
+            continue
+    return "0"
+
+
+FASSUNG = _fassung()
 
 DATEI_CONFIG = PCONFIG / "sprachsteuerung.json"
 DATEI_SAETZE = PCONFIG / "saetze.json"
@@ -237,8 +286,16 @@ def melden(schwere: int, text: str, schluessel: str = "", stunden: int = 24) -> 
         # LoxBerry-Umgebungsvariablen fehlen, und bei einer Zweitinstallation
         # heisst der Ordner sprachsteuerung_01. Eine Meldung unter einem
         # Paketnamen, den es nicht gibt, findet niemand.
-        subprocess.run(["php", str(skript), str(int(schwere)), text, PNAME],
-                       capture_output=True, timeout=15, check=False)
+        aus = subprocess.run(["php", str(skript), str(int(schwere)), text, PNAME],
+                             capture_output=True, timeout=15, check=False)
+        if aus.returncode != 0:
+            # check=False bleibt richtig - eine misslungene Meldung darf den
+            # Dienst nicht anhalten. Verschweigen darf man sie trotzdem nicht.
+            melde_gebremst("melden_rc",
+                           "sp_notify.php endete mit %d: %s"
+                           % (aus.returncode,
+                              (aus.stderr or b"").decode("utf-8", "replace")[:200]),
+                           3600)
     except (OSError, subprocess.SubprocessError) as err:
         # Eine misslungene Meldung darf den Dienst nicht anhalten.
         melde_gebremst("melden_fehler", "Meldung liess sich nicht ablegen: %s" % err, 3600)
@@ -418,7 +475,26 @@ def mqtt_senden(paare: dict, praefix: str, cfg: dict | None = None) -> None:
         return
     try:
         for k, v in paare.items():
-            if v is None or v == "":
+            # None heisst 'kein Wert' und wird nicht gesendet. Eine LEERE
+            # Zeichenkette ist etwas anderes: sie loescht. Bis 0.10.1 wurde
+            # sie mit uebersprungen - der virtuelle Eingang in Loxone behielt
+            # damit den letzten Grund, und in der Visu stand 'verstanden'
+            # neben 'kein Muster gefunden'. Ein blanker Wert hinter dem Thema
+            # waere fuer den UDP-Eingang des Gateways nicht sauber, deshalb
+            # der Strich.
+            if v is None:
+                continue
+            if v == "":
+                v = "-"
+            # Auch der SCHLUESSEL wird geprueft, nicht nur der Wert: das
+            # Gateway trennt Thema und Wert am Leerzeichen. Ein Thema
+            # 'wohn zimmer' ergaebe das erfundene Thema '<praefix>/wohn' mit
+            # dem Wert 'zimmer/aktion ein'. Abweisen und melden, nicht
+            # zurechtbiegen (REGELN_1, Abschnitt 4).
+            if not re.match(r"^[A-Za-z0-9_/\-]+$", str(k)):
+                melde_gebremst("mqtt_thema",
+                               "MQTT: das Thema %r enthaelt unerlaubte Zeichen "
+                               "und wurde nicht gesendet." % k)
                 continue
             nachricht = f"publish {praefix}/{k} {mqtt_wert_saeubern(v)}".encode("utf-8")
             s.sendto(nachricht, ("127.0.0.1", z["udpport"]))
@@ -466,9 +542,18 @@ async def wy_verbinden(host: str, port: int, zeit: float = 10.0):
     return leser, schreiber
 
 
-async def wy_senden(schreiber, ereignis) -> None:
+async def wy_senden(schreiber, ereignis, zeit: float = 10.0) -> None:
+    """Wie wy_lesen, nur andersherum - und mit derselben Zeitschranke.
+
+    async_write_event endet auf writer.drain(). Das wartet unbegrenzt,
+    solange der Schreibpuffer ueber der Hochwassermarke steht: eine
+    Gegenstelle, die die Verbindung annimmt und nicht mehr liest, hielte
+    den Aufrufer sonst fuer immer fest - und mit ihm die Lesefrist, den
+    Ping und den Wiederanlauf dieses Satelliten. Bis 0.10.1 war dies der
+    einzige Wyoming-Weg ohne Schranke.
+    """
     from wyoming.event import async_write_event
-    await async_write_event(ereignis, schreiber)
+    await asyncio.wait_for(async_write_event(ereignis, schreiber), timeout=zeit)
 
 
 async def wy_lesen(leser, zeit: float = 60.0):
@@ -536,8 +621,15 @@ async def spracherkennung(cfg: dict, rahmen: list, rate: int = 16000) -> dict:
         await wy_senden(schreiber, AudioStop().event())
         mitschnitt(cfg, "ASR>", "%d Bloecke, %d Byte, %d Hz"
                    % (len(rahmen), sum(len(b) for b in rahmen), rate))
-        while True:
-            ereignis = await wy_lesen(leser, 180)
+        # Gesamtfrist UND Rundenobergrenze, wie in dienst_befragen(). Ohne
+        # sie haelt eine Gegenstelle, die alle 179 s irgendetwas schickt,
+        # diese Schleife unbegrenzt am Laufen.
+        ende = time.monotonic() + 180.0
+        for _ in range(2000):
+            if time.monotonic() >= ende:
+                return {"ok": 0, "fehler": "Spracherkennung: keine Abschrift "
+                                           "innerhalb der Frist."}
+            ereignis = await wy_lesen(leser, max(1.0, ende - time.monotonic()))
             if ereignis is None:
                 return {"ok": 0, "fehler": "Spracherkennung hat die Verbindung geschlossen."}
             if Transcript.is_type(ereignis.type):
@@ -545,6 +637,8 @@ async def spracherkennung(cfg: dict, rahmen: list, rate: int = 16000) -> dict:
                 mitschnitt(cfg, "ASR<", text)
                 return {"ok": 1, "text": text.strip(),
                         "sekunden": round(time.monotonic() - t0, 2)}
+        return {"ok": 0, "fehler": "Spracherkennung: zu viele Ereignisse "
+                                   "ohne Abschrift."}
     except (OSError, asyncio.TimeoutError) as err:
         return {"ok": 0, "fehler": "Spracherkennung: " + fehlertext(err)}
     finally:
@@ -584,17 +678,31 @@ async def sprachausgabe(cfg: dict, text: str, stimme: str = "") -> dict:
                                "Stimme aus der Aufrufzeile des Containers.", 86400)
         await wy_senden(schreiber, synth.event())
         mitschnitt(cfg, "TTS>", text)
-        while True:
-            ereignis = await wy_lesen(leser, 180)
+        # Wie oben - und dazu eine Obergrenze fuer das, was sich hier
+        # ansammelt. Ein gesprochener Antwortsatz liegt bei wenigen hundert
+        # Kilobyte; 16 MB sind bei 22050 Hz und 16 Bit rund sechs Minuten.
+        ende = time.monotonic() + 180.0
+        gesamt = 0
+        for _ in range(20000):
+            if time.monotonic() >= ende:
+                return {"ok": 0, "fehler": "Sprachausgabe: kein Abschluss "
+                                           "innerhalb der Frist."}
+            ereignis = await wy_lesen(leser, max(1.0, ende - time.monotonic()))
             if ereignis is None:
                 return {"ok": 0, "fehler": "Sprachausgabe hat die Verbindung geschlossen."}
             if AudioChunk.is_type(ereignis.type):
                 block = AudioChunk.from_event(ereignis)
                 rate, breite, kanaele = block.rate, block.width, block.channels
+                gesamt += len(block.audio)
+                if gesamt > 16 * 1024 * 1024:
+                    return {"ok": 0, "fehler": "Sprachausgabe: die Antwort ist "
+                                               "laenger als 16 MB - abgebrochen."}
                 bloecke.append(block.audio)
             elif AudioStop.is_type(ereignis.type):
                 return {"ok": 1, "bloecke": bloecke, "rate": rate, "width": breite,
                         "channels": kanaele, "sekunden": round(time.monotonic() - t0, 2)}
+        return {"ok": 0, "fehler": "Sprachausgabe: zu viele Ereignisse ohne "
+                                   "Abschluss."}
     except (OSError, asyncio.TimeoutError) as err:
         return {"ok": 0, "fehler": "Sprachausgabe: " + fehlertext(err)}
     finally:
@@ -775,10 +883,15 @@ def miniserver_rufen(url: str, ersatz: dict) -> dict:
     voll = url
     for schluessel, wert in ersatz.items():
         voll = voll.replace("{" + schluessel + "}", str(wert if wert is not None else ""))
-    anfrage = urllib.request.Request(voll, headers={
-        "User-Agent": "LoxBerry-Sprachsteuerung-Plugin/0.10", "Accept": "*/*",
-        "Accept-Language": "de", "Accept-Encoding": "identity"})
     try:
+        # Der Aufbau gehoert IN den try: eine Adresse ohne Schema laesst
+        # Request() mit ValueError abbrechen, und der stand in keinem der
+        # drei except - die Ausnahme verliess _ausfuehren, nachdem ueber
+        # MQTT bereits gesendet war (geschaltet, aber nichts gemeldet).
+        anfrage = urllib.request.Request(voll, headers={
+            "User-Agent": "LoxBerry-Sprachsteuerung-Plugin/" + FASSUNG,
+            "Accept": "*/*",
+            "Accept-Language": "de", "Accept-Encoding": "identity"})
         with urllib.request.urlopen(anfrage, timeout=8) as antwort:
             return {"ok": 1, "code": antwort.status,
                     "text": antwort.read(200).decode("utf-8", "ignore")}
@@ -790,6 +903,9 @@ def miniserver_rufen(url: str, ersatz: dict) -> dict:
         return {"ok": 0, "fehler": f"Der Miniserver antwortete mit HTTP {err.code}."}
     except urllib.error.URLError as err:
         return {"ok": 0, "fehler": "Miniserver: " + str(err.reason)}
+    except ValueError as err:
+        return {"ok": 0, "fehler": "Miniserver: die Adresse ist unbrauchbar ("
+                                   + str(err) + ")."}
     except OSError as err:
         return {"ok": 0, "fehler": "Miniserver: " + str(err)}
 
@@ -1663,6 +1779,21 @@ class EsphomeMikrofon:
                 "gemeldet": self.zustand != "getrennt"}
 
 
+# Laufende Erkennungen der ESPHome-Mikrofone. Siehe ende() weiter unten.
+_ESPHOME_AUFGABEN = set()
+
+
+def _esphome_fertig(aufgabe) -> None:
+    _ESPHOME_AUFGABEN.discard(aufgabe)
+    if aufgabe.cancelled():
+        return
+    fehler = aufgabe.exception()
+    if fehler is not None:
+        melde_gebremst("esph_aufgabe",
+                       "ESPHome: die Verarbeitung eines Satzes ist "
+                       "gescheitert: " + fehlertext(fehler), 3600)
+
+
 async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
     name = str(eintrag.get("name") or eintrag.get("host"))
     mikro = EsphomeMikrofon(eintrag)
@@ -1703,7 +1834,12 @@ async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
             rahmen = puffer["rahmen"]
             puffer["rahmen"] = []
             if rahmen:
-                asyncio.ensure_future(esphome_satz(mikro, rahmen, holen_v))
+                # Der Verweis wird FESTGEHALTEN: eine Aufgabe, auf die
+                # niemand zeigt, darf der Muellsammler mitten im Lauf
+                # einziehen, und eine Ausnahme darin endet unsichtbar.
+                aufgabe = asyncio.ensure_future(esphome_satz(mikro, rahmen, holen_v))
+                _ESPHOME_AUFGABEN.add(aufgabe)
+                aufgabe.add_done_callback(_esphome_fertig)
 
         try:
             await klient.connect(login=True)
@@ -2014,6 +2150,10 @@ def mikrofone_abbild() -> dict:
     return sats
 
 
+# Merkt sich, was zuletzt in loxone.json stand - siehe abbild_schreiben().
+_ABBILD_STAND = {}
+
+
 def abbild_schreiben(cfg: dict) -> dict:
     saetze = json_lesen(DATEI_SAETZE)
     sats = mikrofone_abbild()
@@ -2048,7 +2188,20 @@ def abbild_schreiben(cfg: dict) -> dict:
                   for k, z in (saetze.get("ziele") or {}).items()},
         "verlauf": verlauf[:10],
     }
-    json_schreiben(DATEI_LOXONE, daten)
+    # Nur schreiben, wenn sich etwas geaendert hat - oder wenn der letzte
+    # Schreibvorgang lange her ist. Bei einem Takt von 1 s waeren es sonst
+    # 86 400 Schreibvorgaenge am Tag auf die SD-Karte (data/plugins liegt
+    # dort, nur log/plugins ist eine Ramdisk). Der Zwangsdurchgang haelt
+    # den Zeitstempel frisch, den die Oberflaeche fuer ihre Altersanzeige
+    # liest - ohne ihn saehe ein ruhiges Haus aus wie ein toter Dienst.
+    fingerabdruck = json.dumps({k: v for k, v in daten.items() if k != "ts"},
+                               sort_keys=True, default=str)
+    jetzt = time.monotonic()
+    if (fingerabdruck != _ABBILD_STAND.get("fingerabdruck")
+            or jetzt - _ABBILD_STAND.get("zeit", 0.0) >= 15.0):
+        _ABBILD_STAND["fingerabdruck"] = fingerabdruck
+        _ABBILD_STAND["zeit"] = jetzt
+        json_schreiben(DATEI_LOXONE, daten)
     return daten
 
 
@@ -2183,6 +2336,15 @@ async def dienst() -> int:
 
     for aufgabe in aufgaben:
         aufgabe.cancel()
+    # Abwarten, nicht nur abbrechen: sonst endet asyncio.run, waehrend die
+    # finally-Bloecke der Satelliten noch laufen - und die schliessen die
+    # Verbindungen.
+    if aufgaben:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*aufgaben, return_exceptions=True), timeout=10)
+        except asyncio.TimeoutError:
+            _LOG.warning("Nicht alle Aufgaben haben binnen 10 s aufgehoert.")
     if config().get("mqtt_ein"):
         # Ein Abschied, damit ein bewusst angehaltener Dienst nicht wie ein
         # abgestuerzter aussieht.
