@@ -39,11 +39,14 @@ Aufrufe:
 
 from __future__ import annotations
 
+import array
 import asyncio
+import functools
 import json
 import logging
 import os
 import re
+import secrets
 import signal
 import socket
 import subprocess
@@ -740,6 +743,9 @@ class Wortwecker:
         self.wort = str(cfg.get("wakeword") or "").strip()
         self.leser = None
         self.schreiber = None
+        # Der laufende Lesevorgang. Er wird NIE abgebrochen - warum,
+        # steht bei _bereit().
+        self._lesen = None
 
     async def oeffnen(self, rate: int) -> bool:
         from wyoming.audio import AudioStart
@@ -757,6 +763,44 @@ class Wortwecker:
             self.leser = self.schreiber = None
             return False
 
+    def offen(self) -> bool:
+        return self.schreiber is not None
+
+    async def _bereit(self):
+        """(fertig, Ereignis) - OHNE den laufenden Lesevorgang abzubrechen.
+
+        `async_read_event` liest ein Ereignis in bis zu DREI Zuegen:
+        die Kopfzeile mit `readline()`, dann `readexactly(data_length)`,
+        dann `readexactly(payload_length)`. Bis 0.10.2 stand hier
+
+            ereignis = await wy_lesen(self.leser, 0.001)
+
+        und `wait_for` bricht den Lesevorgang nach einer Millisekunde ab -
+        auch mitten zwischen zwei Zuegen. Die Kopfzeile ist dann aus dem
+        Puffer verbraucht, der Rumpf steht noch darin, und der naechste
+        Lesevorgang beginnt mittendrin. `async_read_event` schluckt den
+        ValueError und liefert None; `fuettern` machte daraus ein stilles
+        `return False`. Das Weckwort war ab diesem Augenblick tot, das
+        Mikrofon speiste weiter Audio hinein, und gemeldet wurde nichts.
+
+        Gemessen am 03.09.2026 gegen wyoming 1.10.2, in beide Richtungen
+        geeicht: Pruefung-Sprachsteuerung-0.10.3/wyoming_rahmen_messen.py.
+
+        Deshalb laeuft der Lesevorgang durch und wird nur ANGESEHEN.
+        asyncio.wait fasst den Auftrag nicht an - anders als wait_for.
+        """
+        from wyoming.event import async_read_event
+        if self.leser is None:
+            return False, None
+        if self._lesen is None:
+            self._lesen = asyncio.ensure_future(async_read_event(self.leser))
+        if not self._lesen.done():
+            await asyncio.wait({self._lesen}, timeout=0.001)
+        if not self._lesen.done():
+            return False, None
+        aufgabe, self._lesen = self._lesen, None
+        return True, aufgabe.result()
+
     async def fuettern(self, block: bytes, rate: int) -> bool:
         """Einen Audioblock hineingeben. True, sobald das Weckwort fiel."""
         from wyoming.audio import AudioChunk
@@ -768,11 +812,19 @@ class Wortwecker:
                                                        audio=block).event())
             # Nur nachsehen, ob schon etwas dasteht - hier darf nicht gewartet
             # werden, sonst steht der Audiostrom.
-            try:
-                ereignis = await wy_lesen(self.leser, 0.001)
-            except asyncio.TimeoutError:
+            fertig, ereignis = await self._bereit()
+            if not fertig:
                 return False
             if ereignis is None:
+                # Die Gegenstelle hat zugemacht. Bis 0.10.2 war das ein
+                # stilles 'return False': das Mikrofon speiste weiter Audio
+                # in eine Verbindung, auf der nie wieder ein Treffer kommen
+                # konnte. Jetzt wird zugemacht und gesagt - die Schleife in
+                # Satellit.lauf() baut sie beim naechsten Block neu auf.
+                melde_gebremst("wake_zu",
+                               "Der Wortwecker hat die Verbindung geschlossen. "
+                               "Sie wird neu aufgebaut.", 900)
+                await self.schliessen()
                 return False
             if Detection.is_type(ereignis.type):
                 return True
@@ -782,6 +834,10 @@ class Wortwecker:
         return False
 
     async def schliessen(self) -> None:
+        # HIER darf abgebrochen werden: die Verbindung geht ohnehin weg.
+        if self._lesen is not None:
+            self._lesen.cancel()
+            self._lesen = None
         if self.schreiber is not None:
             try:
                 self.schreiber.close()
@@ -1170,6 +1226,45 @@ def antwort_ausgeben(cfg: dict, erg: dict) -> None:
         return
     if str(cfg.get("antwortweg") or "beide") in ("loxone", "beide"):
         loxone_ansagen(cfg, text, str(erg.get("zone") or ""))
+
+
+# Genau EIN Satz zur Zeit - siehe satz_im_faden().
+_SATZ_SPERRE = None
+
+
+async def satz_im_faden(*args, **kwargs) -> dict:
+    """satz_verarbeiten in einem Arbeitsfaden. Die Schleife bleibt frei.
+
+    WARUM: die Kette unter satz_verarbeiten ist restlos synchron - mit
+    `ast` nachgemessen ueber 28 erreichte Funktionen, kein einziges
+    `await`. Darin stecken vier Netzabrufe mit zusammen bis zu rund
+    153 Sekunden Zeitschranke: llm_fragen (120), miniserver_rufen (8),
+    loxone_ansagen (10) und melden (15, ueber ein PHP-Zwischenstueck).
+    Bis 0.10.2 wurde das aus `async def` heraus gerufen: solange ein
+    Satz lief, wurde KEIN anderes Mikrofon bedient, keine Warteschlange
+    gelesen und kein Herzschlag geschickt. Die Lesefrist der uebrigen
+    Satelliten steht auf 30 s - deren Verbindungen waeren danach
+    abgerissen worden, und der Dienst haette es als Netzstoerung gedeutet.
+
+    WARUM MIT SPERRE: sie haelt die Reihenfolge von vorher. Bisher lief
+    genau ein Satz zur Zeit, weil die Schleife nicht weiterkam; ohne
+    Sperre wuerden jetzt mehrere Faeden gleichzeitig auf _KONTEXT,
+    _SATZSTAND und die Zaehler zugreifen. Nebenlaeufigkeit, die es nie
+    gab, waere ein zweiter Umbau und ein zweites Risiko - und dieser
+    Befund verlangt sie nicht.
+
+    asyncio.to_thread gibt es ab Python 3.9 (Debian 11, also LB_MINIMUM
+    3.0.0). Der Rueckfall darunter kostet nichts.
+    """
+    global _SATZ_SPERRE
+    if _SATZ_SPERRE is None:
+        _SATZ_SPERRE = asyncio.Lock()
+    async with _SATZ_SPERRE:
+        if hasattr(asyncio, "to_thread"):
+            return await asyncio.to_thread(satz_verarbeiten, *args, **kwargs)
+        schleife = asyncio.get_event_loop()
+        return await schleife.run_in_executor(
+            None, functools.partial(satz_verarbeiten, *args, **kwargs))
 
 
 def satz_verarbeiten(satz: str, cfg: dict, v, mikrofon: str = "",
@@ -1592,7 +1687,10 @@ class Satellit:
                 elif AudioChunk.is_type(typ):
                     block = AudioChunk.from_event(ereignis)
                     rate = block.rate
-                    if wartet_auf_weckwort and wecker is None:
+                    # 'oder nicht mehr offen': hat der Wortwecker die
+                    # Verbindung geschlossen, wird sie hier neu aufgebaut,
+                    # statt bis zum Ende der Aufnahme wirkungslos zu bleiben.
+                    if wartet_auf_weckwort and (wecker is None or not wecker.offen()):
                         wecker = Wortwecker(self.cfg)
                         if not await wecker.oeffnen(rate):
                             # Ohne Wortwecker lieber alles aufnehmen als gar
@@ -1669,7 +1767,7 @@ class Satellit:
             self.letzte_meldung = "Es wurde nichts verstanden (leerer Text)."
             return
 
-        erg = satz_verarbeiten(satz, cfg, self.v, self.name, self.raum, self.zone)
+        erg = await satz_im_faden(satz, cfg, self.v, self.name, self.raum, self.zone)
         self.letzte_meldung = erg.get("antwort", "")
 
         # Ab 0.9.1 entscheidet zusaetzlich der Antwortweg. Bei 'loxone' bleibt
@@ -1769,6 +1867,16 @@ class EsphomeMikrofon:
         self.zustand = "getrennt"
         self.letzter_satz = ""
         self.letzte_meldung = ""
+        # Die offene Verbindung - ohne sie kann eine Ansage aus der
+        # Warteschlange den Lautsprecher dieses Geraets nicht erreichen.
+        # Genau das fehlte bis 0.10.3: ansage_ausgeben() kannte nur die
+        # Wyoming-Satelliten, ESPHOME stand dort nirgends.
+        self.klient = None
+        # Was das Geraet selbst ueber sich meldet (SPEAKER, API_AUDIO,
+        # ANNOUNCE). Gelesen, nicht angenommen.
+        self.merkmale = 0
+        self.gespraech = ""
+        self.lauf_offen = False
 
     def abbild(self) -> dict:
         return {"name": self.name, "art": "esphome", "host": self.host,
@@ -1776,6 +1884,7 @@ class EsphomeMikrofon:
                 "raum": self.raum, "zone": self.zone,
                 "letzter_satz": self.letzter_satz,
                 "letzte_meldung": self.letzte_meldung,
+                "lautsprecher": bool(self.merkmale & 2),
                 "gemeldet": self.zustand != "getrennt"}
 
 
@@ -1792,6 +1901,274 @@ def _esphome_fertig(aufgabe) -> None:
         melde_gebremst("esph_aufgabe",
                        "ESPHome: die Verarbeitung eines Satzes ist "
                        "gescheitert: " + fehlertext(fehler), 3600)
+
+
+# Die Abtastrate, die die ESPHome-Firmware auf dem Rueckweg erwartet.
+# VEREINBARUNG, kein gemessener Wert: das API fuehrt dafuer kein Feld. Eine
+# falsche Rate ist hoerbar - zu schnell oder zu langsam -, also keine stille
+# Falschaussage.
+ESPHOME_RATE = 16000
+
+
+def pcm_umrechnen(daten: bytes, von: int, nach: int) -> bytes:
+    """16-Bit-Mono-PCM von einer Abtastrate auf eine andere.
+
+    Piper liefert je nach Stimme 16000 oder 22050 Hz. Lineare Zwischenwerte,
+    ohne Filter: fuer Sprache reicht das, und ein ordentlicher Tiefpass waere
+    hier neuer Code ohne messbaren Gewinn.
+    """
+    if von == nach or not daten or von <= 0 or nach <= 0:
+        return daten
+    quelle = array.array("h")
+    quelle.frombytes(daten[:len(daten) - (len(daten) % 2)])
+    if sys.byteorder == "big":
+        quelle.byteswap()
+    n = len(quelle)
+    if n < 2:
+        return daten
+    zahl = max(1, int(n * nach / von))
+    ziel = array.array("h", bytes(2 * zahl))
+    schritt = (n - 1) / max(1, zahl - 1) if zahl > 1 else 0.0
+    for i in range(zahl):
+        x = i * schritt
+        links = int(x)
+        rechts = min(links + 1, n - 1)
+        anteil = x - links
+        ziel[i] = int(quelle[links] + (quelle[rechts] - quelle[links]) * anteil)
+    if sys.byteorder == "big":
+        ziel.byteswap()
+    return ziel.tobytes()
+
+
+# Die Firmware liest 16384 Byte Lautsprecherpuffer (16 * RECEIVE_SIZE) - bei
+# 16 kHz Mono 16 Bit sind das 0,512 Sekunden. Der Vorlauf begrenzt, wieviel
+# davon jemals belegt ist: 0,25 s sind rund 8000 Byte, also die Haelfte.
+ESPHOME_VORLAUF_S = 0.25
+# So gross sind die Haeppchen, in denen gesendet wird. RECEIVE_SIZE der
+# Firmware ist 1024; groessere Haeppchen sind erlaubt, solange die Taktung
+# stimmt, aber kleine machen den Vorlauf gleichmaessiger.
+ESPHOME_HAPPEN = 1024
+
+
+def wav_bauen(pcm: bytes, rate: int = ESPHOME_RATE) -> bytes:
+    """Ein RIFF/WAVE-Kopf um rohes 16-Bit-Mono-PCM.
+
+    Fuer den Ansageweg: ein Geraet mit Media Player holt sich die Antwort
+    ueber eine Adresse, und dort muss eine Datei liegen, die ein Abspieler
+    lesen kann - rohes PCM ist keine.
+    """
+    kanaele, breite = 1, 2
+    byterate = rate * kanaele * breite
+    return (b"RIFF" + (36 + len(pcm)).to_bytes(4, "little") + b"WAVEfmt "
+            + (16).to_bytes(4, "little") + (1).to_bytes(2, "little")
+            + kanaele.to_bytes(2, "little") + rate.to_bytes(4, "little")
+            + byterate.to_bytes(4, "little")
+            + (kanaele * breite).to_bytes(2, "little")
+            + (breite * 8).to_bytes(2, "little")
+            + b"data" + len(pcm).to_bytes(4, "little") + pcm)
+
+
+def ansage_ablegen(pcm: bytes) -> tuple:
+    """Die Antwort als WAV unter einer abrufbaren Adresse ablegen.
+
+    Rueckgabe (url, pfad) - oder ('', None), wenn der Ort nicht beschreibbar
+    ist. Abgelegt wird im UNANGEMELDETEN Baum, weil das Geraet sich nicht
+    anmelden kann; geschuetzt ist die Datei durch einen Namen, den niemand
+    raten kann, und durch ihre kurze Lebensdauer. Geschrieben wird sie vom
+    DIENST - der unangemeldete Endpunkt schreibt weiterhin nichts.
+
+    Alte Dateien werden bei jedem Ablegen mit abgeraeumt; ohne das fuellt
+    sich ein Verzeichnis, das niemand ansieht.
+    """
+    ordner = LBHOME / "webfrontend" / "html" / "plugins" / PNAME / "ansagen"
+    try:
+        ordner.mkdir(parents=True, exist_ok=True)
+        jetzt = time.time()
+        for alt in ordner.glob("*.wav"):
+            try:
+                if jetzt - alt.stat().st_mtime > 300:
+                    alt.unlink()
+            except OSError:
+                pass
+        name = secrets.token_hex(16) + ".wav"
+        ziel = ordner / name
+        ziel.write_bytes(wav_bauen(pcm))
+        return "http://%s/plugins/%s/ansagen/%s" % (eigene_adresse(), PNAME, name), ziel
+    except OSError as err:
+        melde_gebremst("ansage_ablegen",
+                       "Die Antwort liess sich nicht unter einer Adresse ablegen "
+                       "(%s). Ein ESPHome-Geraet mit Media Player kann sie damit "
+                       "nicht holen." % fehlertext(err), 3600)
+        return "", None
+
+
+def eigene_adresse() -> str:
+    """Die Adresse, unter der DAS GERAET diesen LoxBerry erreicht.
+
+    NICHT 127.0.0.1: eine Adresse, die ein Programm auf demselben Rechner
+    benutzt, und eine, die ein anderes Geraet anspricht, sind zwei
+    verschiedene Dinge (REGELN_1, EVCC-Sitzung). Genommen wird die Adresse
+    der Schnittstelle, ueber die der Rechner nach aussen geht.
+    """
+    global _EIGENE_ADRESSE
+    if _EIGENE_ADRESSE:
+        return _EIGENE_ADRESSE
+    s = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Es wird nichts gesendet - das Verbinden waehlt nur die Schnittstelle.
+        s.connect(("192.0.2.1", 9))
+        _EIGENE_ADRESSE = s.getsockname()[0]
+    except OSError:
+        _EIGENE_ADRESSE = socket.gethostname()
+    finally:
+        if s is not None:
+            s.close()
+    return _EIGENE_ADRESSE
+
+
+_EIGENE_ADRESSE = ""
+
+
+async def esphome_ereignis(mikro: "EsphomeMikrofon", art, daten=None) -> None:
+    """Ein Ereignis an das Geraet melden - MIT Datenteil.
+
+    Die Schluesselnamen stehen nicht im Paket aioesphomeapi, sondern in der
+    FIRMWARE: esphome/components/voice_assistant/voice_assistant.cpp.
+    Gemessen an 2026.8.2:
+
+        RUN_START   url
+        STT_END     text          - ohne: return
+        TTS_START   text          - ohne: return VOR speaker_->start()
+        TTS_END     url           - ohne: return VOR STREAMING_RESPONSE
+        INTENT_END  conversation_id, continue_conversation
+        ERROR       code, message
+
+    In 0.11.0 gingen die Ereignisse ohne Daten hinaus, mit der Begruendung,
+    die Namen seien nicht nachlesbar. Sie sind es - nur im anderen Haus.
+    Die Folge war, dass das Audio im Lautsprecherpuffer des Geraets liegen
+    blieb und nie abgespielt wurde.
+
+    Ein Fehler hier darf den Satz nicht kosten - er darf aber auch nicht
+    stumm bleiben.
+    """
+    klient = getattr(mikro, "klient", None)
+    if klient is None:
+        return
+    try:
+        klient.send_voice_assistant_event(art, daten)
+    except Exception as err:  # noqa: BLE001
+        melde_gebremst("esph_ereignis_" + mikro.name,
+                       "ESPHome %s: Ereignis %s liess sich nicht senden: %s"
+                       % (mikro.name, getattr(art, "name", art), fehlertext(err)),
+                       3600)
+
+
+async def esphome_lauf_beenden(mikro: "EsphomeMikrofon") -> None:
+    """RUN_END - und zwar genau einmal je Lauf.
+
+    Ohne dieses Ereignis haelt sich das Geraet fuer dauerhaft mitten in einer
+    Pipeline: der Leuchtring dreht weiter, und es kommt nicht in den
+    Ruhezustand zurueck. Bis 0.10.3 ging ueberhaupt kein Ereignis zurueck.
+    """
+    from aioesphomeapi import VoiceAssistantEventType as VE
+    if not getattr(mikro, "lauf_offen", False):
+        return
+    mikro.lauf_offen = False
+    await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_RUN_END)
+
+
+def esphome_kann(mikro: "EsphomeMikrofon", merkmal) -> bool:
+    """Kann das Geraet das? Gelesen aus den Merkmalen, die es selbst meldet."""
+    return bool(int(getattr(mikro, "merkmale", 0)) & int(merkmal))
+
+
+async def esphome_sprechen(mikro: "EsphomeMikrofon", cfg: dict, text: str) -> tuple:
+    """Den Antworttext auf dem Lautsprecher des Geraets ausgeben.
+
+    Rueckgabe (ok, Meldung). Der Weg ist der, den das API dafuer vorsieht:
+    TTS_STREAM_START, dann die Bloecke ueber send_voice_assistant_audio(),
+    dann TTS_STREAM_END.
+    """
+    from aioesphomeapi import VoiceAssistantEventType as VE
+    from aioesphomeapi import VoiceAssistantFeature as VF
+    klient = getattr(mikro, "klient", None)
+    if klient is None:
+        return False, "keine offene Verbindung"
+    # Ein Geraet ohne Lautsprecher bekommt kein Audio - und es wird gesagt,
+    # statt ins Leere zu senden.
+    if not esphome_kann(mikro, VF.SPEAKER):
+        return False, "das Geraet meldet keinen Lautsprecher"
+    gesprochen = await sprachausgabe(cfg, text, (cfg.get("tts") or {}).get("stimme", ""))
+    if not gesprochen.get("ok"):
+        return False, str(gesprochen.get("fehler") or "Sprachausgabe")
+    if int(gesprochen.get("channels") or 1) != 1 or int(gesprochen.get("width") or 2) != 2:
+        return False, ("die Sprachausgabe liefert %d Kanaele mit %d Byte - erwartet "
+                       "wird Mono mit 16 Bit"
+                       % (gesprochen.get("channels"), gesprochen.get("width")))
+    rate = int(gesprochen.get("rate") or ESPHOME_RATE)
+    pcm = b"".join(pcm_umrechnen(b, rate, ESPHOME_RATE)
+                   for b in gesprochen["bloecke"])
+
+    # Die Adresse muss NICHTLEER sein, sonst steigt die Firmware im
+    # TTS_END-Zweig aus - vor dem Zustandswechsel, in dem der
+    # Lautsprecherpuffer geleert wird. Ein Geraet MIT Media Player holt
+    # sie wirklich ab; eines mit blossem Lautsprecher reicht sie nur an
+    # seinen Ausloeser durch.
+    url, datei = ansage_ablegen(pcm)
+    hat_spieler = esphome_kann(mikro, VF.ANNOUNCE)
+    if not url:
+        if hat_spieler:
+            return False, ("das Geraet holt die Antwort ueber eine Adresse, und "
+                           "die liess sich nicht ablegen")
+        # Ohne Media Player wird die Adresse nie abgerufen - sie muss nur
+        # dasein. Das wird gesagt, nicht verschwiegen.
+        url = "http://%s/plugins/%s/ansagen/keine.wav" % (eigene_adresse(), PNAME)
+
+    # DIE REIHENFOLGE: erst der Text (startet den Lautsprecher), dann die
+    # Adresse (wechselt in STREAMING_RESPONSE), DANN erst das Audio. In
+    # 0.11.0 stand TTS_END am Ende - der Zustand wechselte nie, und die
+    # Bloecke lagen im Puffer.
+    await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_TTS_START, {"text": text[:497]})
+    await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_TTS_END, {"url": url})
+    if hat_spieler:
+        # Der Media Player spielt die Adresse selbst ab. Zusaetzlich zu
+        # streamen hiesse, die Antwort zweimal zu hoeren.
+        return True, ""
+
+    await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_TTS_STREAM_START)
+    try:
+        await esphome_audio_takten(klient, pcm)
+    except Exception as err:  # noqa: BLE001
+        await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_TTS_STREAM_END)
+        return False, fehlertext(err)
+    await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_TTS_STREAM_END)
+    return True, ""
+
+
+async def esphome_audio_takten(klient, pcm: bytes) -> None:
+    """Die Bloecke gegen eine Uhr schicken, nicht so schnell es geht.
+
+    Der Lautsprecherpuffer der Firmware ist 16 * RECEIVE_SIZE = 16384 Byte,
+    bei 16 kHz Mono 16 Bit also 0,512 Sekunden. Wer eine ganze Antwort ohne
+    Pause hinterherschickt, bekommt 'Cannot receive audio, buffer is full'
+    und hoert den Anfang eines Satzes.
+
+    Getaktet wird gegen eine Uhr statt mit einer festen Pause je Happen:
+    damit ist die Puffermenge nach oben begrenzt (Vorlauf mal Byterate,
+    also rund 8000 Byte) - unabhaengig davon, wie lang die Antwort ist.
+    """
+    byterate = float(ESPHOME_RATE * 2)
+    beginn = time.monotonic()
+    gesendet = 0
+    for i in range(0, len(pcm), ESPHOME_HAPPEN):
+        happen = pcm[i:i + ESPHOME_HAPPEN]
+        klient.send_voice_assistant_audio(happen)
+        gesendet += len(happen)
+        soll = beginn + gesendet / byterate - ESPHOME_VORLAUF_S
+        rest = soll - time.monotonic()
+        if rest > 0:
+            await asyncio.sleep(rest)
 
 
 async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
@@ -1815,53 +2192,111 @@ async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
                           noise_psk=str(eintrag.get("schluessel") or "") or None)
         puffer: dict = {"rahmen": [], "laeuft": False}
 
-        def beginn(*args, **kwargs):
-            """Das Geraet meldet den Beginn einer Sprachanfrage."""
+        # ALLE DREI SIND KOROUTINEN. Die Bibliothek reicht ihr Ergebnis an
+        # create_eager_task() bzw. _create_background_task() weiter;
+        # gemessen gegen aioesphomeapi 46.3.0: create_eager_task(0) endet
+        # mit 'TypeError: a coroutine was expected, got 0'. Bis 0.10.3
+        # waren es gewoehnliche Funktionen - der Fehler fiel INNERHALB des
+        # Nachrichtenrueckrufs an, und das Geraet bekam nicht einmal die
+        # Fehlerantwort. Der ESPHome-Weg konnte nie etwas tun.
+        async def beginn(gespraech="", flags=0, audio_einstellungen=None,
+                         weckwort=None):
+            """Das Geraet meldet den Beginn einer Sprachanfrage.
+
+            Die vier Argumente kommen so aus der Bibliothek:
+            conversation_id, flags, audio_settings, wake_word_phrase.
+            """
+            from aioesphomeapi import VoiceAssistantEventType as VE
             puffer["rahmen"] = []
             puffer["laeuft"] = True
             mikro.zustand = "hoert"
+            mikro.gespraech = str(gespraech or "")
+            mikro.lauf_offen = True
+            await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_RUN_START)
+            if weckwort:
+                # Das Weckwort ist auf dem Geraet gefallen (microWakeWord),
+                # nicht bei uns - der Lauf beginnt also NACH dem Weckwort.
+                mikro.letzte_meldung = "Weckwort: %s" % weckwort
+                await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_WAKE_WORD_END)
+            await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_STT_START)
             # 0 heisst: das Audio kommt ueber die API, nicht ueber einen
-            # eigenen UDP-Port.
+            # eigenen UDP-Port. None waere ein Fehler - die Bibliothek
+            # schickt dem Geraet dann VoiceAssistantResponse(error=True).
             return 0
 
-        def hoeren(daten: bytes):
+        async def hoeren(daten: bytes, daten2: bytes = None):
+            """Ein Audioblock vom Geraet.
+
+            ZWEI Argumente: die Bibliothek ruft handle_audio(audio.data,
+            audio.data2). Der zweite Kanal ist fuer Geraete mit
+            MULTI_CHANNEL_AUDIO; Whisper bekommt einen Kanal, also bleibt
+            er liegen. Bis 0.10.3 nahm diese Funktion EIN Argument.
+            """
             if puffer["laeuft"]:
                 puffer["rahmen"].append(bytes(daten))
 
-        def ende(*args, **kwargs):
+        async def ende(abbruch: bool = False):
+            """Das Geraet hoert auf zu senden.
+
+            Das Argument kommt aus zwei Quellen, im Quelltext der
+            Bibliothek nachgelesen: handle_stop(True) bei einer
+            Stopp-Anforderung des Geraets - also Abbruch -, und
+            handle_stop(False), wenn der Audiostrom regulaer endet. Am
+            Geraet ist das nicht gegengeprueft.
+            """
+            from aioesphomeapi import VoiceAssistantEventType as VE
             puffer["laeuft"] = False
             mikro.zustand = "verbunden"
             rahmen = puffer["rahmen"]
             puffer["rahmen"] = []
-            if rahmen:
-                # Der Verweis wird FESTGEHALTEN: eine Aufgabe, auf die
-                # niemand zeigt, darf der Muellsammler mitten im Lauf
-                # einziehen, und eine Ausnahme darin endet unsichtbar.
-                aufgabe = asyncio.ensure_future(esphome_satz(mikro, rahmen, holen_v))
-                _ESPHOME_AUFGABEN.add(aufgabe)
-                aufgabe.add_done_callback(_esphome_fertig)
+            # Der Text steht hier noch nicht fest - er kommt aus Whisper.
+            # Die Firmware steigt bei leerem STT_END-Text aus; das kostet
+            # nur einen Ausloeser, nicht den Lauf. Das gefuellte STT_END
+            # schickt esphome_satz(), sobald der Text da ist.
+            if abbruch or not rahmen:
+                await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_STT_END,
+                                       {"text": ""})
+                # Auch ein abgebrochener Lauf wird BEENDET - sonst dreht
+                # der Leuchtring weiter.
+                await esphome_lauf_beenden(mikro)
+                return
+            # Der Verweis wird FESTGEHALTEN: eine Aufgabe, auf die
+            # niemand zeigt, darf der Muellsammler mitten im Lauf
+            # einziehen, und eine Ausnahme darin endet unsichtbar.
+            aufgabe = asyncio.ensure_future(esphome_satz(mikro, rahmen, holen_v))
+            _ESPHOME_AUFGABEN.add(aufgabe)
+            aufgabe.add_done_callback(_esphome_fertig)
 
         try:
             await klient.connect(login=True)
             geraet = await klient.device_info()
             mikro.zustand = "verbunden"
-            _LOG.info("ESPHome-Mikrofon %s verbunden: %s", name,
-                      getattr(geraet, "name", "?"))
+            mikro.klient = klient
+            # Was das Geraet ueber sich meldet - gelesen, nicht angenommen.
+            try:
+                mikro.merkmale = int(geraet.voice_assistant_feature_flags_compat(
+                    klient.api_version))
+            except Exception:  # noqa: BLE001
+                mikro.merkmale = int(getattr(geraet, "voice_assistant_feature_flags", 0))
+            _LOG.info("ESPHome-Mikrofon %s verbunden: %s (Merkmale %d)", name,
+                      getattr(geraet, "name", "?"), mikro.merkmale)
             fehler_folge = 0
             if not hasattr(klient, "subscribe_voice_assistant"):
                 mikro.letzte_meldung = ("Diese Fassung von aioesphomeapi kennt keine "
                                         "Sprachschnittstelle.")
                 melde_gebremst("esph_alt_" + name, mikro.letzte_meldung, 86400)
             else:
-                try:
-                    klient.subscribe_voice_assistant(handle_start=beginn,
-                                                     handle_stop=ende,
-                                                     handle_audio=hoeren)
-                except TypeError:
-                    # Aeltere Fassungen kennen handle_audio nicht.
-                    klient.subscribe_voice_assistant(beginn, ende)
-                    mikro.letzte_meldung = ("Aeltere Fassung von aioesphomeapi: Audio "
-                                            "ueber die API wird nicht angeboten.")
+                # KEIN Rueckfall auf einen Aufruf ohne handle_audio: die
+                # Parameter sind schluesselwort-only (das '*' in der
+                # Signatur), ein Aufruf mit Stellungsargumenten kann nie
+                # greifen. Und ohne handle_audio setzt die Bibliothek das
+                # Merkmal API_AUDIO gar nicht - es kaeme nie ein Ton an.
+                klient.subscribe_voice_assistant(handle_start=beginn,
+                                                 handle_stop=ende,
+                                                 handle_audio=hoeren)
+                if not esphome_kann(mikro, 2):
+                    mikro.letzte_meldung = ("Das Geraet meldet keinen Lautsprecher - "
+                                            "die Antwort kommt nur ueber Loxone.")
             while _LAUF and klient.connected:
                 await asyncio.sleep(1)
         except Exception as err:  # noqa: BLE001
@@ -1871,6 +2306,8 @@ async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
             melde_gebremst("esph_" + name, f"ESPHome-Mikrofon {name}: {fehlertext(err)}", 900)
         finally:
             mikro.zustand = "getrennt"
+            mikro.klient = None
+            mikro.lauf_offen = False
             try:
                 await klient.disconnect()
             except Exception:  # noqa: BLE001
@@ -1885,19 +2322,60 @@ async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
 
 
 async def esphome_satz(mikro: "EsphomeMikrofon", rahmen: list, holen_v) -> None:
+    """Audio -> Text -> Absicht -> Antwort, und dabei das Geraet mitnehmen.
+
+    Das RUN_END steht im finally. Ohne es haelt sich das Geraet fuer
+    dauerhaft mitten in einer Pipeline: der Leuchtring dreht weiter, und
+    es kommt nicht in den Ruhezustand zurueck - auch dann nicht, wenn hier
+    etwas schiefgeht. Bis 0.10.3 ging ueberhaupt kein Ereignis zurueck.
+    """
+    from aioesphomeapi import VoiceAssistantEventType as VE
     cfg = config()
-    erkannt = await spracherkennung(cfg, rahmen, 16000)
-    if not erkannt.get("ok"):
-        mikro.letzte_meldung = erkannt.get("fehler", "")
-        _LOG.error("ESPHome %s: %s", mikro.name, mikro.letzte_meldung)
-        return
-    satz = erkannt["text"]
-    mikro.letzter_satz = satz
-    if not satz:
-        mikro.letzte_meldung = "Es wurde nichts verstanden (leerer Text)."
-        return
-    erg = satz_verarbeiten(satz, cfg, holen_v(), mikro.name, mikro.raum, mikro.zone)
-    mikro.letzte_meldung = erg.get("antwort", "")
+    try:
+        erkannt = await spracherkennung(cfg, rahmen, 16000)
+        if not erkannt.get("ok"):
+            mikro.letzte_meldung = erkannt.get("fehler", "")
+            _LOG.error("ESPHome %s: %s", mikro.name, mikro.letzte_meldung)
+            await esphome_ereignis(
+                mikro, VE.VOICE_ASSISTANT_ERROR,
+                {"code": "stt-failed",
+                 "message": str(mikro.letzte_meldung or "Spracherkennung")[:200]})
+            return
+        satz = erkannt["text"]
+        mikro.letzter_satz = satz
+        # Jetzt erst steht der Text fest - die Firmware braucht ihn.
+        await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_STT_END, {"text": satz})
+        if not satz:
+            mikro.letzte_meldung = "Es wurde nichts verstanden (leerer Text)."
+            return
+        await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_INTENT_START)
+        erg = await satz_im_faden(satz, cfg, holen_v(), mikro.name,
+                                  mikro.raum, mikro.zone)
+        await esphome_ereignis(
+            mikro, VE.VOICE_ASSISTANT_INTENT_END,
+            {"conversation_id": str(getattr(mikro, "gespraech", "") or ""),
+             "continue_conversation": "0"})
+        mikro.letzte_meldung = erg.get("antwort", "")
+
+        # Die Antwort kommt aus dem Geraet, in das hineingesprochen wurde.
+        # Bis 0.10.3 kannte ansage_ausgeben() nur die Wyoming-Satelliten;
+        # ein ESPHome-Geraet mit Lautsprecher bekam nie einen Ton.
+        text = str(erg.get("antwort") or "").strip()
+        if (text and cfg.get("antwort_sprechen")
+                and str(cfg.get("antwortweg") or "beide") != "loxone"):
+            still, grund = ruhe_aktiv(cfg)
+            if still:
+                melde_gebremst("esph_ruhe",
+                               "Antwort am ESPHome-Mikrofon unterdrueckt: " + grund,
+                               3600)
+            else:
+                ok, meldung = await esphome_sprechen(mikro, cfg, text)
+                if not ok and meldung:
+                    melde_gebremst("esph_tts_" + mikro.name,
+                                   "ESPHome %s: die Antwort blieb stumm (%s)."
+                                   % (mikro.name, meldung), 3600)
+    finally:
+        await esphome_lauf_beenden(mikro)
 
 
 # ---------------------------------------------------------------------------
@@ -1951,7 +2429,12 @@ async def ansage_ausgeben(cfg: dict, text: str, zonen: str = "",
             fehler.append(grund)
         else:
             ziel = SATELLITEN.get(mikrofon) if mikrofon else None
-            if mikrofon and ziel is None:
+            # Ein benanntes Mikrofon kann auch ein ESPHome-Geraet sein.
+            # Bis 0.10.3 wurde nur SATELLITEN durchsucht - eine Voice PE
+            # war damit unerreichbar, und ein Name, den es sehr wohl gab,
+            # wurde als 'nicht eingetragen' gemeldet.
+            esph_ziel = ESPHOME.get(mikrofon) if mikrofon else None
+            if mikrofon and ziel is None and esph_ziel is None:
                 # Ein benanntes Mikrofon, das es nicht gibt, wird BENANNT und
                 # nicht durch 'dann eben alle' ersetzt - sonst spricht das
                 # ganze Haus, weil sich jemand vertippt hat.
@@ -1963,8 +2446,17 @@ async def ansage_ausgeben(cfg: dict, text: str, zonen: str = "",
                 # Garagentor steht offen' will man ueberall hoeren.
                 kandidaten = [s for s in SATELLITEN.values() if s.zustand != "getrennt"]
             else:
-                kandidaten = [ziel]
-            if not kandidaten:
+                kandidaten = [ziel] if ziel is not None else []
+            # Dieselbe Regel fuer die ESPHome-Familie: ein benanntes Geraet,
+            # sonst alle verbundenen mit Lautsprecher.
+            if esph_ziel is not None:
+                esph_kandidaten = [esph_ziel]
+            elif mikrofon:
+                esph_kandidaten = []
+            else:
+                esph_kandidaten = [e for e in ESPHOME.values()
+                                   if e.zustand != "getrennt"]
+            if not kandidaten and not esph_kandidaten:
                 if not mikrofon:
                     fehler.append("kein verbundenes Mikrofon")
             else:
@@ -1990,6 +2482,18 @@ async def ansage_ausgeben(cfg: dict, text: str, zonen: str = "",
                             wege.append("Mikrofon " + sat.name)
                         except (OSError, asyncio.TimeoutError) as err:
                             fehler.append("%s: %s" % (sat.name, fehlertext(err)))
+                    for esph in esph_kandidaten:
+                        # NICHT gemessen: ob ein Geraet einen TTS-Strom auch
+                        # ausserhalb eines Laufs abspielt. Fuer die
+                        # unaufgeforderte Ansage sieht das API
+                        # send_voice_assistant_announcement_await_response()
+                        # mit einer abrufbaren Adresse vor; dafuer braeuchte
+                        # es einen eigenen Ausgabeweg. Hier steht kein Geraet.
+                        ok, meldung = await esphome_sprechen(esph, cfg, text)
+                        if ok:
+                            wege.append("Mikrofon " + esph.name)
+                        else:
+                            fehler.append("%s: %s" % (esph.name, meldung))
 
     if wege:
         return {"ok": 1, "wege": wege, "fehler": fehler}
@@ -2015,11 +2519,11 @@ async def warteschlange(cfg: dict, holen_v) -> None:
                 if not satz:
                     antwort_schreiben(kennung, 0, "Es wurde kein Satz uebergeben.")
                     continue
-                erg = satz_verarbeiten(satz, cfg, holen_v(),
-                                       str(b.get("mikrofon") or ""),
-                                       str(b.get("raum") or ""),
-                                       str(b.get("zone") or ""),
-                                       trocken=(aktion == "trocken"))
+                erg = await satz_im_faden(satz, cfg, holen_v(),
+                                          str(b.get("mikrofon") or ""),
+                                          str(b.get("raum") or ""),
+                                          str(b.get("zone") or ""),
+                                          trocken=(aktion == "trocken"))
                 antwort_schreiben(kennung, 1 if erg.get("ok") else 0,
                                   erg.get("antwort") or "", {"ergebnis": erg})
             elif aktion == "sprechen":

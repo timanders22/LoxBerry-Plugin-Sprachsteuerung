@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.10.2
+Version 0.11.1
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,134 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.11.1
+
+0.11.0 hat den ESPHome-Weg gegen das **Klientenpaket** gemessen. Das war
+die halbe Quelle. Die andere Hälfte liegt in der **Firmware**
+(`esphome/components/voice_assistant/voice_assistant.cpp`, gemessen an
+2026.8.2) — und dort steht, dass jedes Ereignis bestimmte Werte trägt und
+die Firmware bei einem leeren Wert **aussteigt**:
+
+```
+STT_END   ohne "text"  -> return
+TTS_START ohne "text"  -> return  VOR  speaker_->start()
+TTS_END   ohne "url"   -> return  VOR  set_state_(STREAMING_RESPONSE)
+```
+
+`STREAMING_RESPONSE` ist der einzige Zustand, in dem der Lautsprecherpuffer
+geleert wird. In 0.11.0 gingen die Ereignisse **ohne** Daten hinaus — mit
+der Begründung, die Schlüsselnamen seien nicht nachlesbar. Sie sind es, nur
+im anderen Haus. Die Folge: das Audio kam an, landete im Puffer, und nichts
+davon erreichte je den Lautsprecher.
+
+Drei Dinge sind daran berichtigt:
+
+* **Die Ereignisse tragen ihre Werte** — `text` in `STT_END` und
+  `TTS_START`, `url` in `TTS_END`, `conversation_id` in `INTENT_END`,
+  `code`/`message` in `ERROR`.
+* **Die Reihenfolge ist umgedreht:** `TTS_START` → `TTS_END` → Audio.
+  Der Zustandswechsel muss **vor** die Blöcke, sonst füllt sich ein Puffer,
+  den niemand leert.
+* **Das Audio wird getaktet.** Der Lautsprecherpuffer der Firmware ist
+  `16 * RECEIVE_SIZE` = 16384 Byte, bei 16 kHz Mono 16 Bit also 0,512
+  Sekunden. Eine ganze Antwort ohne Pause hinterherzuschicken ergibt
+  „Cannot receive audio, buffer is full" — man hörte den Anfang eines
+  Satzes. Getaktet wird gegen eine Uhr mit festem Vorlauf; damit ist die
+  Puffermenge unabhängig von der Länge der Antwort begrenzt. Gemessen:
+  höchstens **9017** statt **158842** Byte.
+
+Dazu die Unterscheidung, die das Gerät selbst meldet: `ANNOUNCE` wird genau
+dann gesetzt, wenn ein **Media Player** am `voice_assistant` hängt. Dann
+holt sich das Gerät die Antwort über die Adresse aus `TTS_END`, und das
+Plugin streamt **nicht** zusätzlich — sonst hörte man sie zweimal. Für
+diesen Fall legt der Dienst die Antwort als WAV unter
+`webfrontend/html/plugins/<ordner>/ansagen/<zufall>.wav` ab; der Name ist
+nicht zu erraten, und die Datei wird nach fünf Minuten abgeräumt.
+Geschrieben wird sie vom **Dienst** — der unangemeldete Endpunkt schreibt
+weiterhin nichts.
+
+**Zum Wyoming-Weg:** die Satelliten*implementierung* `wyoming-satellite`
+ist seit dem 27.01.2026 archiviert, das **Protokoll** und die Dienste
+(Whisper, Piper, openWakeWord) sind es nicht. Der Wyoming-Weg bleibt
+deshalb unangetastet; er wird nur keine neuen Satelliten mehr bekommen.
+
+## Neu in 0.11.0
+
+**Der ESPHome-Weg ist fertig gebaut** — und der Anlass dafür war ein
+Befund, der schwerer wiegt als die Lücke, die gesucht wurde. Gemessen am
+03.09.2026 gegen das Originalpaket `aioesphomeapi` 46.3.0:
+
+* **Von 0.10.0 bis 0.10.2 konnte dieser Weg überhaupt nichts tun.**
+  `subscribe_voice_assistant` reicht das Ergebnis der drei Rückrufe an
+  `create_eager_task()` weiter — die verlangt eine Koroutine. Gemessen:
+  `create_eager_task(0)` endet mit `TypeError: a coroutine was expected,
+  got 0`. Die Rückrufe waren gewöhnliche Funktionen. Dazu nahm `hoeren()`
+  ein Argument, während die Bibliothek zwei übergibt. Der Fehler fiel
+  *innerhalb* des Nachrichtenrückrufs an, das Gerät bekam nicht einmal die
+  Fehlerantwort. Ein eingetragenes Gerät bekam einen grünen Haken, weil sein
+  Port offen war.
+* **Es ging kein einziges Ereignis zurück.** Ein ESPHome-Gerät erwartet
+  nach dem Weckwort `run_start`, `stt_start`, `stt_end`, `intent_start`,
+  `intent_end`, `tts_start`, `tts_end`, `run_end`. Ohne sie hält es sich für
+  dauerhaft mitten in einer Anfrage: der Leuchtring dreht weiter, und es
+  kommt nicht in den Ruhezustand zurück. Das `run_end` steht jetzt im
+  `finally` — auch ein Abbruch und ein Fehler beenden den Lauf sauber.
+* **Die Antwort kam nicht aus dem Gerät.** `ansage_ausgeben()` kannte nur
+  die Wyoming-Satelliten; ein Gerät mit Lautsprecher bekam nie einen Ton.
+  Jetzt geht die Antwort über `tts_stream_start` → Audio →
+  `tts_stream_end` auf den Lautsprecher des Geräts, in das hineingesprochen
+  wurde — und eine Ansage von außen erreicht es ebenso.
+* **Ob das Gerät einen Lautsprecher hat, wird gelesen, nicht angenommen:**
+  aus `voice_assistant_feature_flags_compat()`. Meldet es keinen, sagt das
+  Plugin das, statt ins Leere zu senden.
+
+Dazu die zwei Befunde, die für 0.10.3 vorbereitet waren und hier mit
+einfließen: der **lautlose Ausfall des Weckworts** (ein abgebrochener
+Lesevorgang ließ den Wyoming-Strom entgleisen) und die **Blockade der
+Ereignisschleife** während der Satzverarbeitung. Beides steht unten.
+
+**Was weiterhin niemand gemessen hat:** ob eine echte Voice PE die
+Ereignisfolge so annimmt, ob sie den zurückgeschickten Ton abspielt, und ob
+16 kHz die Rate ist, die ihre Firmware erwartet. Für die Datenfelder der
+Ereignisse gibt es im Paket keine einzige festgelegte Bezeichnung — sie
+gehen deshalb **ohne** Daten hinaus; aus dem Wartezustand holt das Gerät die
+Reihenfolge, nicht der Inhalt.
+
+## Neu in 0.10.3 (in 0.11.0 enthalten, nie einzeln veröffentlicht)
+
+Zwei Befunde, die 0.10.2 bewusst offen gelassen hatte, weil sie hier nicht
+messbar waren. Seit dem 03.09.2026 sind sie es — das Originalpaket
+`wyoming` liegt jetzt in einer eigenen Prüf-venv, und damit lassen sich
+beide Fälle nachstellen, ohne dass ein Mikrofon im Raum steht.
+
+* **Das Weckwort konnte lautlos ausfallen.** `Wortwecker.fuettern()` sah
+  nach jedem Audioblock mit einer Frist von einer Millisekunde nach, ob
+  schon ein Treffer dasteht. `async_read_event` liest ein Ereignis aber in
+  bis zu **drei** Zügen (Kopfzeile, `data`, `payload`) — gemessen am
+  Quelltext von wyoming 1.10.2. Fiel der Abbruch dazwischen, war die
+  Kopfzeile aus dem Puffer verbraucht und der Rumpf stand noch darin: der
+  nächste Lesevorgang begann mittendrin, `async_read_event` schluckte den
+  Fehler und lieferte `None`, und daraus wurde ein stilles `return False`.
+  Das Weckwort war ab diesem Augenblick tot, das Mikrofon speiste weiter
+  Audio hinein, und gemeldet wurde nichts. Gegen einen Wortwecker aus
+  Attrappe, der das Ereignis geteilt schickt, wird es in 0.10.2 **nie**
+  erkannt und in 0.10.3 immer. Der Lesevorgang läuft jetzt durch und wird
+  nur angesehen; bricht die Gegenstelle ab, wird die Verbindung neu
+  aufgebaut statt wirkungslos offen gehalten.
+* **Die Ereignisschleife blockierte während der Satzverarbeitung.** Die
+  Kette unter `satz_verarbeiten` ist restlos synchron — mit `ast` über 28
+  erreichte Funktionen nachgemessen — und enthält vier Netzabrufe mit
+  zusammen bis zu rund 153 Sekunden Zeitschranke. Solange ein Satz lief,
+  wurde kein anderes Mikrofon bedient, keine Warteschlange gelesen und kein
+  Herzschlag geschickt; die Lesefrist der übrigen Satelliten steht auf 30 s.
+  Die Verarbeitung läuft jetzt in einem Arbeitsfaden, unter einer Sperre,
+  die die bisherige Reihenfolge erhält: weiterhin genau ein Satz zur Zeit.
+  Gemessen mit einem mitzählenden Herzschlag — vorher 0 Schläge während
+  der Verarbeitung, nachher 35 von 40.
+
+Beide Prüfstücke liegen unter `Pruefung-Sprachsteuerung-0.10.3/` und sind
+gegen 0.10.2 geeicht.
 
 ## Neu in 0.10.2
 
@@ -488,15 +616,14 @@ steht weiterhin kein Mikrofon und kein Container.
   hier nicht gemessen worden. Im Haus läuft Gateway **Version 1**.
 * **Das Mithören fremder Themen am Broker.** Das Plugin abonniert nichts;
   gemessen ist das nicht.
-* **Die Blockade der Ereignisschleife.** Fünf Netzabrufe des Dienstes sind
-  synchron und werden aus asynchronem Code gerufen; ein einzelner Satz kann
-  die Schleife rechnerisch bis zu rund 161 Sekunden anhalten, in denen kein
-  anderes Mikrofon und keine Warteschlange bedient wird. Der Befund ist am
-  Quelltext belegt, die **Auflösung ist es nicht** — sie wäre neuer Code an
-  der empfindlichsten Stelle des Dienstes, und ohne Mikrofon lässt sie sich
-  hier nicht messen. Am Gerät nachzumessen an der Lücke zwischen zwei
-  Herzschlag-Zeitstempeln in `<präfix>/ts` während eines Satzes mit
-  eingeschaltetem Sprachmodell.
+* **Die Blockade der Ereignisschleife ist in 0.10.3 behoben** und gemessen
+  (siehe oben). Was bleibt: `dienste_erreichbar()` baut alle 30 Sekunden
+  bis zu drei TCP-Verbindungen mit je 2 s Zeitschranke auf und tut das
+  weiterhin in der Schleife. Das sind höchstens rund 6 Sekunden alle 30,
+  und nur dann, wenn ein Sprachdienst nicht antwortet — in diesem Zustand
+  kann das Plugin ohnehin nicht arbeiten. Bewusst nicht mit umgebaut: ein
+  zweiter Faden für eine gedeckelte Wartezeit wäre ein zweites Risiko ohne
+  zweiten Nutzen.
 
 ## Grundlage
 
