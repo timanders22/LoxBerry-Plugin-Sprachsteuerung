@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.11.1
+Version 0.11.2
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,44 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.11.2
+
+Vier Punkte an der ESPHome-Anbindung, alle an den Quellen nachgemessen.
+Drei davon haben dieselbe Form: **das Gerät sagt es selbst, und das Plugin
+hat angenommen.**
+
+* **Das Tor sperrte ein Gerät aus, für das der Weg gebaut ist.**
+  `get_feature_flags()` setzt `SPEAKER` bei einem Lautsprecher und
+  `ANNOUNCE` bei einem Media Player — zwei **unabhängige** Bedingungen. Ein
+  Gerät mit bloßem Media Player meldet `ANNOUNCE` ohne `SPEAKER` und wurde
+  abgewiesen, obwohl der Media-Player-Zweig neunzehn Zeilen tiefer für es
+  gearbeitet hätte. An der zweiten Stelle stand außerdem die nackte `2`
+  statt `VF.SPEAKER`.
+* **Die WAV war auf 16 kHz festgenagelt.** Das ist `SAMPLE_RATE_HZ` der
+  Firmware und gilt für den **API-Strom**, nicht für den Media Player. Der
+  meldet selbst, was er annimmt: `MediaPlayerInfo.supported_formats` mit
+  `format`, `sample_rate`, `num_channels`, `sample_bytes` und `purpose`
+  (`ANNOUNCEMENT` oder `DEFAULT`) — die einzige Nachricht im ganzen API mit
+  einem Ratenfeld. Das Plugin liest sie jetzt und schreibt die Datei damit;
+  meldet das Gerät nur Formate, die sich hier nicht erzeugen lassen, sagt
+  es das, statt eine Datei hinzulegen, die niemand lesen kann.
+* **Der Media-Player-Weg meldete Erfolg, ohne einen zu haben.** „Die Adresse
+  ist rausgegangen" ist keine Auskunft darüber, ob sie gespielt wurde — das
+  ist der grüne Haken von 0.9.11, eine Ebene tiefer. Die Firmware sagt es:
+  `VoiceAssistantAnnounceFinished`, gesendet aus dem
+  `STREAMING_RESPONSE`-Zweig und aus `start_playback_timeout_()`. Der
+  zugehörige Rückruf fehlte im `subscribe`-Aufruf; er ist jetzt da, und der
+  Weg wartet die Dauer der Antwort plus Zuschlag darauf.
+  *Ebenfalls gemessen:* `success` steht an **beiden** Sendestellen fest auf
+  `true` — der Wert trägt also keine Auskunft. Das **Ankommen** trägt sie.
+* **Die unaufgeforderte Ansage ist besser begründet, als der Kommentar
+  sagte.** Der `TTS_END`-Zweig prüft den Zustand **nicht**: er setzt bei
+  `local_output_` bedingungslos `STREAMING_RESPONSE`, gleich aus welchem
+  Zustand heraus — und `local_output_` wird sowohl von `set_speaker()` als
+  auch von `set_media_player()` gesetzt. Ein ruhendes Gerät sollte den Strom
+  also annehmen. Gemessen ist das nicht, aber es ist kein blinder Versuch
+  mehr.
 
 ## Neu in 0.11.1
 

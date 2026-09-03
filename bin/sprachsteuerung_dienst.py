@@ -1875,6 +1875,11 @@ class EsphomeMikrofon:
         # Was das Geraet selbst ueber sich meldet (SPEAKER, API_AUDIO,
         # ANNOUNCE). Gelesen, nicht angenommen.
         self.merkmale = 0
+        # Was der Media Player fuer eine Ansage annimmt - vom Geraet
+        # gelesen, nicht angenommen. Leer heisst: es meldet nichts.
+        self.ansageformat = {}
+        # Wird gesetzt, sobald das Geraet eine Ansage zu Ende gespielt hat.
+        self.ansage_fertig = None
         self.gespraech = ""
         self.lauf_offen = False
 
@@ -1948,6 +1953,10 @@ ESPHOME_VORLAUF_S = 0.25
 # Firmware ist 1024; groessere Haeppchen sind erlaubt, solange die Taktung
 # stimmt, aber kleine machen den Vorlauf gleichmaessiger.
 ESPHOME_HAPPEN = 1024
+# Wie lange ueber die Dauer der Antwort hinaus auf die Rueckmeldung des
+# Geraets gewartet wird. Die Firmware meldet spaetestens zwei Sekunden nach
+# dem Ende (start_playback_timeout_); der Rest ist Netz und Nachlauf.
+ESPHOME_ANSAGE_ZUSCHLAG = 15.0
 
 
 def wav_bauen(pcm: bytes, rate: int = ESPHOME_RATE) -> bytes:
@@ -1968,7 +1977,42 @@ def wav_bauen(pcm: bytes, rate: int = ESPHOME_RATE) -> bytes:
             + b"data" + len(pcm).to_bytes(4, "little") + pcm)
 
 
-def ansage_ablegen(pcm: bytes) -> tuple:
+def esphome_ansageformat(entitaeten) -> dict:
+    """Was nimmt der Media Player dieses Geraets fuer eine Ansage an?
+
+    GELESEN, nicht angenommen: `MediaPlayerInfo.supported_formats` ist die
+    einzige Stelle im ganzen API mit einem Ratenfeld, und `purpose` trennt
+    dort ANNOUNCEMENT von der normalen Wiedergabe. Bis 0.11.1 schrieb das
+    Plugin die WAV immer mit 16000 Hz - das ist `SAMPLE_RATE_HZ` der
+    Firmware und gilt fuer den API-STROM, nicht fuer den Media Player.
+
+    Rueckgabe: {'rate', 'kanaele', 'bytes'} - oder {} , wenn das Geraet
+    nichts meldet (dann bleibt es bei der Vorgabe) beziehungsweise nur
+    Formate meldet, die dieses Plugin nicht erzeugen kann.
+    """
+    beste = None
+    for e in (entitaeten or []):
+        for f in (getattr(e, "supported_formats", None) or []):
+            art = str(getattr(f, "format", "") or "").lower()
+            if art and art not in ("wav", "wave", "pcm"):
+                # Das Plugin schreibt WAV. Ein Geraet, das nur flac oder mp3
+                # nimmt, bekommt lieber eine Meldung als eine Datei, die es
+                # nicht lesen kann.
+                continue
+            zweck = int(getattr(f, "purpose", 0) or 0)
+            # 1 = ANNOUNCEMENT. Der gilt vor der normalen Wiedergabe.
+            rang = 0 if zweck == 1 else 1
+            if beste is None or rang < beste[0]:
+                beste = (rang, f)
+    if beste is None:
+        return {}
+    f = beste[1]
+    return {"rate": int(getattr(f, "sample_rate", 0) or 0) or ESPHOME_RATE,
+            "kanaele": int(getattr(f, "num_channels", 0) or 0) or 1,
+            "bytes": int(getattr(f, "sample_bytes", 0) or 0) or 2}
+
+
+def ansage_ablegen(pcm: bytes, format_: dict = None) -> tuple:
     """Die Antwort als WAV unter einer abrufbaren Adresse ablegen.
 
     Rueckgabe (url, pfad) - oder ('', None), wenn der Ort nicht beschreibbar
@@ -1992,7 +2036,11 @@ def ansage_ablegen(pcm: bytes) -> tuple:
                 pass
         name = secrets.token_hex(16) + ".wav"
         ziel = ordner / name
-        ziel.write_bytes(wav_bauen(pcm))
+        # Die Rate kommt vom GERAET, wenn es eine nennt - siehe
+        # esphome_ansageformat(). ESPHOME_RATE ist die Vorgabe fuer den
+        # API-Strom und nur der Rueckfall fuer diesen Weg.
+        ziel.write_bytes(wav_bauen(pcm, int((format_ or {}).get("rate")
+                                            or ESPHOME_RATE)))
         return "http://%s/plugins/%s/ansagen/%s" % (eigene_adresse(), PNAME, name), ziel
     except OSError as err:
         melde_gebremst("ansage_ablegen",
@@ -2095,10 +2143,13 @@ async def esphome_sprechen(mikro: "EsphomeMikrofon", cfg: dict, text: str) -> tu
     klient = getattr(mikro, "klient", None)
     if klient is None:
         return False, "keine offene Verbindung"
-    # Ein Geraet ohne Lautsprecher bekommt kein Audio - und es wird gesagt,
-    # statt ins Leere zu senden.
-    if not esphome_kann(mikro, VF.SPEAKER):
-        return False, "das Geraet meldet keinen Lautsprecher"
+    # SPEAKER **oder** ANNOUNCE: get_feature_flags() setzt das eine bei
+    # speaker_ != nullptr, das andere bei media_player_ != nullptr - zwei
+    # unabhaengige Bedingungen. Bis 0.11.1 stand hier nur SPEAKER, und ein
+    # Geraet mit blossem Media Player wurde abgewiesen, obwohl der
+    # Media-Player-Zweig weiter unten genau fuer es gebaut ist.
+    if not (esphome_kann(mikro, VF.SPEAKER) or esphome_kann(mikro, VF.ANNOUNCE)):
+        return False, ("das Geraet meldet weder Lautsprecher noch Media Player")
     gesprochen = await sprachausgabe(cfg, text, (cfg.get("tts") or {}).get("stimme", ""))
     if not gesprochen.get("ok"):
         return False, str(gesprochen.get("fehler") or "Sprachausgabe")
@@ -2115,8 +2166,8 @@ async def esphome_sprechen(mikro: "EsphomeMikrofon", cfg: dict, text: str) -> tu
     # Lautsprecherpuffer geleert wird. Ein Geraet MIT Media Player holt
     # sie wirklich ab; eines mit blossem Lautsprecher reicht sie nur an
     # seinen Ausloeser durch.
-    url, datei = ansage_ablegen(pcm)
     hat_spieler = esphome_kann(mikro, VF.ANNOUNCE)
+    url, datei = ansage_ablegen(pcm, getattr(mikro, "ansageformat", None))
     if not url:
         if hat_spieler:
             return False, ("das Geraet holt die Antwort ueber eine Adresse, und "
@@ -2129,12 +2180,31 @@ async def esphome_sprechen(mikro: "EsphomeMikrofon", cfg: dict, text: str) -> tu
     # Adresse (wechselt in STREAMING_RESPONSE), DANN erst das Audio. In
     # 0.11.0 stand TTS_END am Ende - der Zustand wechselte nie, und die
     # Bloecke lagen im Puffer.
+    if hat_spieler:
+        # Vor dem Absenden scharf machen, nicht danach: sonst kann die
+        # Rueckmeldung schneller sein als das Warten darauf.
+        mikro.ansage_fertig = asyncio.Event()
     await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_TTS_START, {"text": text[:497]})
     await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_TTS_END, {"url": url})
     if hat_spieler:
         # Der Media Player spielt die Adresse selbst ab. Zusaetzlich zu
         # streamen hiesse, die Antwort zweimal zu hoeren.
-        return True, ""
+        #
+        # Aber 'die Adresse ist rausgegangen' ist keine Auskunft darueber,
+        # ob sie gespielt wurde - das ist der gruene Haken von 0.9.11, eine
+        # Ebene tiefer. Das Geraet sagt es selbst; gewartet wird die Dauer
+        # der Antwort plus Zuschlag.
+        dauer = len(pcm) / float(ESPHOME_RATE * 2)
+        frist = min(120.0, dauer + ESPHOME_ANSAGE_ZUSCHLAG)
+        try:
+            await asyncio.wait_for(mikro.ansage_fertig.wait(), timeout=frist)
+            return True, ""
+        except asyncio.TimeoutError:
+            return False, ("das Geraet hat die Adresse bekommen, aber innerhalb "
+                           "von %d s nicht gemeldet, dass es sie gespielt hat"
+                           % int(frist))
+        finally:
+            mikro.ansage_fertig = None
 
     await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_TTS_STREAM_START)
     try:
@@ -2224,6 +2294,18 @@ async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
             # schickt dem Geraet dann VoiceAssistantResponse(error=True).
             return 0
 
+        async def ansage_fertig(meldung=None):
+            """Das Geraet hat eine Ansage zu Ende gespielt.
+
+            Die Firmware schickt VoiceAssistantAnnounceFinished aus zwei
+            Stellen: aus dem STREAMING_RESPONSE-Zweig der loop, sobald der
+            Media Player FINISHED meldet, und aus start_playback_timeout_().
+            An BEIDEN steht `msg.success` fest auf true - der Wert traegt
+            also keine Auskunft. Dass die Meldung kommt, traegt sie.
+            """
+            if mikro.ansage_fertig is not None:
+                mikro.ansage_fertig.set()
+
         async def hoeren(daten: bytes, daten2: bytes = None):
             """Ein Audioblock vom Geraet.
 
@@ -2267,9 +2349,16 @@ async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
             _ESPHOME_AUFGABEN.add(aufgabe)
             aufgabe.add_done_callback(_esphome_fertig)
 
+        from aioesphomeapi import VoiceAssistantFeature as VF
         try:
             await klient.connect(login=True)
-            geraet = await klient.device_info()
+            # In EINEM Zug: Geraeteangaben UND Entitaeten. Aus letzteren
+            # kommt das Ansageformat des Media Players (Punkt 2).
+            entitaeten = []
+            if hasattr(klient, "device_info_and_list_entities"):
+                geraet, entitaeten, _dienste = await klient.device_info_and_list_entities()
+            else:
+                geraet = await klient.device_info()
             mikro.zustand = "verbunden"
             mikro.klient = klient
             # Was das Geraet ueber sich meldet - gelesen, nicht angenommen.
@@ -2278,8 +2367,16 @@ async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
                     klient.api_version))
             except Exception:  # noqa: BLE001
                 mikro.merkmale = int(getattr(geraet, "voice_assistant_feature_flags", 0))
-            _LOG.info("ESPHome-Mikrofon %s verbunden: %s (Merkmale %d)", name,
-                      getattr(geraet, "name", "?"), mikro.merkmale)
+            mikro.ansageformat = esphome_ansageformat(entitaeten)
+            if esphome_kann(mikro, VF.ANNOUNCE) and not mikro.ansageformat:
+                melde_gebremst(
+                    "esph_format_" + name,
+                    "ESPHome %s meldet einen Media Player, aber kein Format, das "
+                    "dieses Plugin erzeugen kann (es schreibt WAV). Die Ansage "
+                    "wird mit %d Hz Mono abgelegt." % (name, ESPHOME_RATE), 86400)
+            _LOG.info("ESPHome-Mikrofon %s verbunden: %s (Merkmale %d, Ansageformat %s)",
+                      name, getattr(geraet, "name", "?"), mikro.merkmale,
+                      mikro.ansageformat or "nicht gemeldet")
             fehler_folge = 0
             if not hasattr(klient, "subscribe_voice_assistant"):
                 mikro.letzte_meldung = ("Diese Fassung von aioesphomeapi kennt keine "
@@ -2291,12 +2388,18 @@ async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
                 # Signatur), ein Aufruf mit Stellungsargumenten kann nie
                 # greifen. Und ohne handle_audio setzt die Bibliothek das
                 # Merkmal API_AUDIO gar nicht - es kaeme nie ein Ton an.
-                klient.subscribe_voice_assistant(handle_start=beginn,
-                                                 handle_stop=ende,
-                                                 handle_audio=hoeren)
-                if not esphome_kann(mikro, 2):
-                    mikro.letzte_meldung = ("Das Geraet meldet keinen Lautsprecher - "
-                                            "die Antwort kommt nur ueber Loxone.")
+                klient.subscribe_voice_assistant(
+                    handle_start=beginn,
+                    handle_stop=ende,
+                    handle_audio=hoeren,
+                    handle_announcement_finished=ansage_fertig)
+                # VF.SPEAKER, nicht die nackte 2: eine Zahl, die jemand beim
+                # naechsten Mal nachschlagen muss, ist eine geratene Zahl.
+                if not (esphome_kann(mikro, VF.SPEAKER)
+                        or esphome_kann(mikro, VF.ANNOUNCE)):
+                    mikro.letzte_meldung = ("Das Geraet meldet weder Lautsprecher noch "
+                                            "Media Player - die Antwort kommt nur "
+                                            "ueber Loxone.")
             while _LAUF and klient.connected:
                 await asyncio.sleep(1)
         except Exception as err:  # noqa: BLE001
@@ -2483,12 +2586,16 @@ async def ansage_ausgeben(cfg: dict, text: str, zonen: str = "",
                         except (OSError, asyncio.TimeoutError) as err:
                             fehler.append("%s: %s" % (sat.name, fehlertext(err)))
                     for esph in esph_kandidaten:
-                        # NICHT gemessen: ob ein Geraet einen TTS-Strom auch
-                        # ausserhalb eines Laufs abspielt. Fuer die
-                        # unaufgeforderte Ansage sieht das API
-                        # send_voice_assistant_announcement_await_response()
-                        # mit einer abrufbaren Adresse vor; dafuer braeuchte
-                        # es einen eigenen Ausgabeweg. Hier steht kein Geraet.
+                        # Auch AUSSERHALB eines Laufs sollte das tragen, und
+                        # das ist keine Hoffnung, sondern im Quelltext der
+                        # Firmware begruendet: der TTS_END-Zweig prueft den
+                        # Zustand NICHT. Er setzt bei local_output_
+                        # bedingungslos STREAMING_RESPONSE, gleich aus welchem
+                        # Zustand heraus - und local_output_ wird sowohl von
+                        # set_speaker() als auch von set_media_player()
+                        # gesetzt. RESPONSE_FINISHED bringt das Geraet danach
+                        # von selbst zurueck.
+                        # AM GERAET gemessen ist es nicht; hier steht keines.
                         ok, meldung = await esphome_sprechen(esph, cfg, text)
                         if ok:
                             wege.append("Mikrofon " + esph.name)
