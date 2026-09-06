@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.11.2
+Version 0.11.3
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,51 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.11.3
+
+- **Der Reiter Test sagt jetzt, ob die MQTT-Veröffentlichung dieses Plugins
+  eingeschaltet ist.** Bis 0.11.2 stand dort nur der Zustand des MQTT-Gateways
+  von LoxBerry — das ist eine Aussage über den LoxBerry, nicht über dieses
+  Plugin. Wer die Veröffentlichung ausgeschaltet hatte, sah trotzdem einen
+  grünen Haken und konnte am Reiter nicht erkennen, dass nichts an den Broker
+  geht. Die neue Zeile steht vor der Gateway-Zeile und ist **grau**, wenn
+  ausgeschaltet — das ist eine Entscheidung, kein Fehler. Anlass: derselbe
+  Befund an BatterieBMS 0.9.17, dort am Gerät gemessen (`Regeln/04`).
+
+Zwei Wörter in den erzeugten Loxone-Vorlagen: „fuer" und „ueber" heißen jetzt
+„für" und „über". Der Paketname `aioesphomeapi` in der Hilfe bleibt, wie er
+ist — das ist kein deutsches Wort, sondern der Name eines Python-Pakets.
+
+### Der Dienst konnte sein Protokoll verlieren, ohne dass es auffiel
+
+`log/plugins` liegt auf einer Ramdisk (`/dev/zram0`). Wird sie geleert — beim
+Neustart, durch LoxBerrys `log_maint`, oder von Hand —, ist die Datei fort. Ein
+`RotatingFileHandler`, der sie beim Start **einmal** geöffnet hat, schreibt
+danach bis zum nächsten Neustart in einen gelöschten Inode: keine
+Fehlermeldung, keine Datei, kein Hinweis. Auch die Rotation greift dann nicht
+mehr.
+
+Diese Fassung benutzt deshalb `WachsameRotation` in `bin/sprachsteuerung_dienst.py` — einen
+umlaufenden Handler, der vor jeder Zeile Gerätenummer und Inode vergleicht und
+nötigenfalls neu öffnet. Die Standardbibliothek hat für den einen Fall den
+`WatchedFileHandler` und für den anderen den `RotatingFileHandler`, aber
+nichts, was beides kann; deshalb die eigene Klasse.
+
+Auf dem LoxBerry geeicht, vier Prüfungen und in beide Richtungen: schreiben,
+nach dem Löschen weiterschreiben, Umlauf bei Überlänge, nach dem Umlauf erneut
+löschen. Mit dem alten Handler ist die Zeile nach dem Löschen verloren und
+bleibt es, mit dem neuen steht sie in der wieder angelegten Datei. Auf einem
+Windows-Arbeitsplatz lässt sich das nicht messen — dort kann eine offene Datei
+gar nicht gelöscht werden.
+
+Aufgefallen ist die Bauart am Heimkino-Plugin, dessen Dienst sieben Stunden
+ohne Protokolldatei lief, und am laufenden Gerät belegt: der
+Midea2Lox-Dienst hielt `midea2lox.log (deleted)` offen, während unter
+demselben Namen längst eine neue Datei fortgeschrieben wurde — von außen sah
+das Plugin gesund aus. Elf Linien tragen dieselbe Bauart; alle elf sind am
+06.09.2026 nachgezogen worden.
+
 
 ## Neu in 0.11.2
 

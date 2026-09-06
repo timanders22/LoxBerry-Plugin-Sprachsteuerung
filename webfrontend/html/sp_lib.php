@@ -989,7 +989,7 @@ function sp_vorlage_ziele()
         // Der Titel ist fuer Menschen, der Suchtext fuer die Maschine.
         $cmds[] = array(
             'title'   => 'SPR_' . strtoupper(preg_replace('/[^A-Za-z0-9]+/', '_', $k)),
-            'comment' => 'Aktion fuer ' . $name . ' - MQTT-Thema '
+            'comment' => 'Aktion für ' . $name . ' - MQTT-Thema '
                        . $praefix . '/' . $thema . '/aktion (ALS TEXT verwenden)',
             'check'   => '\i' . $praefix . '/' . $thema . '/aktion=\i\v',
             'unit'    => '<v.1>',
@@ -1000,7 +1000,7 @@ function sp_vorlage_ziele()
         'title'   => 'Sprachsteuerung lokal - Ziele',
         'address' => '',
         'polling' => '60',
-        'comment' => 'Je Ziel ein Texteingang. Diese Bausteine werden ueber MQTT '
+        'comment' => 'Je Ziel ein Texteingang. Diese Bausteine werden über MQTT '
                    . 'versorgt, nicht ueber die Adresse im Kopf.',
     ), $cmds));
 }
