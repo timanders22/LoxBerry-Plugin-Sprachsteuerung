@@ -137,11 +137,39 @@ PCONFIG = LBHOME / "config" / "plugins" / PNAME
 PTEMPLATES = LBHOME / "templates" / "plugins" / PNAME
 
 def _fassung() -> str:
-    """Die Fassungsnummer aus der plugin.cfg - EINE Quelle.
+    """Die Fassungsnummer - zuerst aus der Auskunft von LoxBerry selbst.
 
     Bis 0.10.1 stand sie als Zahl im User-Agent und veraltete still:
-    hardware.py fuehrte 0.9, waehrend die plugin.cfg 0.10.1 sagte.
+    hardware.py fuehrte 0.9, waehrend die plugin.cfg 0.10.1 sagte. Der
+    Rueckfall auf die plugin.cfg hat das aber nicht behoben - er hat es nur
+    verdeckt: BERICHTIGT 07.09.2026, am Geraet gemessen.
+
+    plugininstall.pl liest die plugin.cfg aus dem Auspackordner und loescht
+    sie danach; installiert wird sie NIRGENDWOHIN. Auf der Anlage meldeten
+    beide Dateien deshalb FASSUNG=0, waehrend die Datenbank 0.11.3 fuehrte -
+    und die 0 ging in den User-Agent. Eine erfundene Nummer ist schlimmer als
+    keine: sie sieht richtig aus.
+
+    In PHP beantwortet das LBSystem::pluginversion(); Python hat das nicht,
+    also wird dieselbe Datei gelesen - ueber den ORDNERNAMEN, nie ueber den
+    MD5-Schluessel (der entsteht aus Autorenname, E-Mail und Plugin-Name und
+    aendert sich bei jedem Fork). Die plugin.cfg bleibt als zweiter Weg
+    stehen: sie traegt den Auspackordner, also den Pruefstand.
     """
+    try:
+        import json as _json
+        _d = _json.loads((LBHOME / "data" / "system" / "plugindatabase.json")
+                         .read_text(encoding="utf-8", errors="replace"))
+        _liste = _d.get("plugins", _d)
+        if isinstance(_liste, dict):
+            _liste = list(_liste.values())
+        for _e in _liste or ():
+            if isinstance(_e, dict) and str(_e.get("folder", "")) == PNAME:
+                _v = str(_e.get("version", "")).strip()
+                if _v:
+                    return _v
+    except (OSError, ValueError, TypeError):
+        pass
     for k in (LBHOME / "config" / "plugins" / PNAME / "plugin.cfg",
               SELF.parent / "plugin.cfg"):
         try:
