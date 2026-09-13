@@ -203,6 +203,36 @@ function sp_wakewords()
 }
 
 /**
+ * Wird dieses MQTT-Thema vom Broker zurueckbehalten?
+ *
+ * Die Tabelle steht in templates/vorgaben.json, damit Dienst und Oberflaeche
+ * dieselbe Auskunft geben - dasselbe Motiv wie bei den Vorgaben selbst. Hier
+ * wird nur ANGEZEIGT; gesendet wird im Dienst (mqtt_retain_fuer()).
+ *
+ * Ohne Eintrag: nein. Fehlt die Datei, lautet die Antwort ueberall nein, und
+ * das ist die harmlose Richtung.
+ */
+function sp_retain_fuer($schluessel)
+{
+    $d = sp_vorgabendatei();
+    $r = isset($d['retain']) && is_array($d['retain']) ? $d['retain'] : array();
+    $themen = isset($r['themen']) && is_array($r['themen']) ? $r['themen'] : array();
+    $k = (string) $schluessel;
+    if (array_key_exists($k, $themen)) {
+        return (bool) $themen[$k];
+    }
+    $endungen = isset($r['endungen']) && is_array($r['endungen']) ? $r['endungen'] : array();
+    foreach ($endungen as $endung => $wie) {
+        $e = (string) $endung;
+        if ($e !== '' && strlen($k) >= strlen($e)
+            && substr($k, -strlen($e)) === $e) {
+            return (bool) $wie;
+        }
+    }
+    return false;
+}
+
+/**
  * Die Konfiguration lesen.
  *
  * $erzeugen = false schaltet JEDEN Schreibvorgang ab. Der unangemeldete

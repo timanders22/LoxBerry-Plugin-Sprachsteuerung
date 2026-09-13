@@ -546,6 +546,51 @@ def mqtt_zustand() -> dict:
             "brokerport": str(m.get("Brokerport", m.get("brokerport", "")))}
 
 
+# ---------------------------------------------------------------------------
+# Retain je SCHLUESSEL, nicht je Aufruf.
+#
+# Hausstandard seit 03.09.2026: Zustaende werden zurueckbehalten, damit Loxone
+# nach einem Neustart des Miniservers oder des Gateways sofort den Stand hat;
+# Messwerte mit Zeitbezug nicht, damit nach einem Ausfall kein alter Wert als
+# aktuell erscheint; das Lebenszeichen NIE - zurueckbehalten zeigte es immer
+# "lebt".
+#
+# Die Entscheidung gehoert in eine Tabelle und nicht an den Aufruf: der
+# Herzschlag schickt Lebenszeichen UND Zustaende in EINEM Aufruf. Wer am
+# Aufruf entscheidet, macht entweder das Lebenszeichen zurueckbehalten
+# (falsch) oder die Zustaende fluechtig (auch falsch).
+#
+# Die Tabelle steht in templates/vorgaben.json, nicht hier: die Oberflaeche
+# zeigt dieselbe Auskunft in der Thementabelle des Reiters MQTT an, und zwei
+# Listen in zwei Sprachen laufen auseinander (derselbe Grund wie bei den
+# Vorgaben).
+#
+# Bis 0.11.4 gingen alle Themen als 'publish' hinaus, also fluechtig. Der
+# UDP-Eingang des Gateways kann beides; das Befehlswort entscheidet
+# (mqttgateway.pl: publish, retain, reconnect, save_relayed_states).
+_RT = _VD.get("retain") or {}
+MQTT_RETAIN = {str(k): bool(v) for k, v in (_RT.get("themen") or {}).items()}
+MQTT_RETAIN_ENDUNG = {str(k): bool(v) for k, v in (_RT.get("endungen") or {}).items()}
+
+
+def mqtt_retain_fuer(schluessel) -> bool:
+    """Wird dieses Thema zurueckbehalten?
+
+    Ohne Eintrag lautet die Antwort NEIN - und wenn die Vorgabendatei fehlt,
+    hat kein Thema einen Eintrag, also geht alles fluechtig hinaus wie bis
+    0.11.4. Das ist die Richtung, in der ein Ausfall harmlos bleibt: ein
+    Thema, das niemand bedacht hat, darf nicht auf Dauer im Broker
+    stehenbleiben, denn dort wieder wegzubekommen ist Handarbeit.
+    """
+    k = str(schluessel)
+    if k in MQTT_RETAIN:
+        return MQTT_RETAIN[k]
+    for endung, wie in MQTT_RETAIN_ENDUNG.items():
+        if k.endswith(endung):
+            return wie
+    return False
+
+
 def mqtt_senden(paare: dict, praefix: str, cfg: dict | None = None) -> None:
     z = mqtt_zustand()
     if not z["udpport"]:
@@ -571,8 +616,6 @@ def mqtt_senden(paare: dict, praefix: str, cfg: dict | None = None) -> None:
             # der Strich.
             if v is None:
                 continue
-            if v == "":
-                v = "-"
             # Auch der SCHLUESSEL wird geprueft, nicht nur der Wert: das
             # Gateway trennt Thema und Wert am Leerzeichen. Ein Thema
             # 'wohn zimmer' ergaebe das erfundene Thema '<praefix>/wohn' mit
@@ -583,7 +626,22 @@ def mqtt_senden(paare: dict, praefix: str, cfg: dict | None = None) -> None:
                                "MQTT: das Thema %r enthaelt unerlaubte Zeichen "
                                "und wurde nicht gesendet." % k)
                 continue
-            nachricht = f"publish {praefix}/{k} {mqtt_wert_saeubern(v)}".encode("utf-8")
+            # ES GEHT NIE EINE LEERE NUTZLAST HINAUS - eine leere Nutzlast
+            # loescht das Thema im Gateway (mqttgateway.pl, sub udpin:
+            # "Delete $udptopic from memory because of empty message"), und
+            # seit 0.11.5 stuende bei einem zurueckbehaltenen Thema damit der
+            # Zustand zur Disposition, den der Dienst gerade halten soll.
+            #
+            # Der Strich steht deshalb NACH dem Saeubern, nicht davor.
+            # Gemessen am 13.09.2026 mit einem eigenen UDP-Horcher: bis
+            # 0.11.4 wurde nur der Wert '' ersetzt; ein Wert aus lauter
+            # Leerzeichen (oder ein blanker Zeilenumbruch) ueberlebte die
+            # Ersetzung und wurde erst von mqtt_wert_saeubern() leer -
+            # heraus ging '<praefix>/<thema> ' mit leerer Nutzlast. Das ist
+            # der Loeschfall, und bis 0.11.4 war er unbemerkt erreichbar.
+            sauber = mqtt_wert_saeubern(v) or "-"
+            befehl = "retain" if mqtt_retain_fuer(k) else "publish"
+            nachricht = f"{befehl} {praefix}/{k} {sauber}".encode("utf-8")
             s.sendto(nachricht, ("127.0.0.1", z["udpport"]))
             if cfg is not None:
                 mitschnitt(cfg, "MQTT>", nachricht.decode("utf-8", "ignore"))

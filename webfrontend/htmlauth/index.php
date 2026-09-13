@@ -1221,10 +1221,11 @@ foreach ($sp_ww_liste as $sp_w) { ?>
 
 <h3><?= sp_e(sp_t('MQTT.H_THEMEN')) ?></h3>
 <p class="sm-hilfe"><?= sp_t('MQTT.THEMEN_ERKLAERUNG') ?></p>
-<div class="sm-warnung"><?= sp_t('MQTT.ABO_UNGEMESSEN') ?></div>
+<p class="sm-hilfe"><?= sp_t('MQTT.RETAIN_ERKLAERUNG') ?></p>
+<div class="sm-hinweis"><?= sp_t('MQTT.RETAIN_GEMESSEN') ?></div>
 <div class="sm-roll">
 <table class="sm-tbl">
-<tr><th><?= sp_e(sp_t('MQTT.T_THEMA')) ?></th><th><?= sp_e(sp_t('MQTT.T_BEDEUTUNG')) ?></th></tr>
+<tr><th><?= sp_e(sp_t('MQTT.T_THEMA')) ?></th><th><?= sp_e(sp_t('MQTT.T_BEDEUTUNG')) ?></th><th><?= sp_e(sp_t('MQTT.T_RETAIN')) ?></th></tr>
 <?php
 $sp_themen = array(
     'satz' => 'MQTT.B_SATZ', 'absicht' => 'MQTT.B_ABSICHT', 'aktion' => 'MQTT.B_AKTION',
@@ -1241,8 +1242,12 @@ $sp_themen = array(
     'ziele' => 'MQTT.B_ZIELE', 'ruhe' => 'MQTT.B_RUHE',
     'letzter_satz_alter' => 'MQTT.B_LETZTER',
 );
-foreach ($sp_themen as $sp_th => $sp_sch) { ?>
-<tr><td><span class="sm-mono"><?= sp_e($sp_praefix) ?>/<?= $sp_th ?></span></td><td><?= sp_t($sp_sch) ?></td></tr>
+// Die beiden Zielthemen stehen hier mit maskierten spitzen Klammern
+// ('&lt;Thema&gt;/aktion'), weil sie so angezeigt werden. Fuer die
+// Retain-Auskunft macht das nichts: entschieden wird ueber die Endung.
+foreach ($sp_themen as $sp_th => $sp_sch) {
+    $sp_r = sp_retain_fuer($sp_th); ?>
+<tr><td><span class="sm-mono"><?= sp_e($sp_praefix) ?>/<?= $sp_th ?></span></td><td><?= sp_t($sp_sch) ?></td><td><?= sp_e(sp_t($sp_r ? 'ALLG.JA' : 'ALLG.NEIN')) ?></td></tr>
 <?php } ?>
 </table>
 </div>

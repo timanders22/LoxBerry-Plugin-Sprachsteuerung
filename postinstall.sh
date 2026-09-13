@@ -157,7 +157,30 @@ else
 fi
 echo "<INFO> Verwendetes Python: $($PY -V 2>&1)"
 
-if [ ! -x "$VENV/bin/python3" ] || ! "$VENV/bin/python3" -c 'import sys' 2>/dev/null; then
+# Eine Ladepruefung, die Pythons Meldung nach /dev/null schickt, verschweigt
+# die Ursache: im Installationsprotokoll stuende, DASS es nicht geht, nirgends
+# WARUM. Deshalb wird die Meldung eingefangen und eingerueckt ausgegeben.
+# (Hausregel seit 12.09.2026, Anlass Anker SOLIX 0.9.14.)
+laden_pruefen() {
+    # $1 = Modul, $2 = was ausgegeben wird, wenn es klappt
+    if LADEAUSGABE=$("$VENV/bin/python3" -c "import sys, $1; print(sys.modules['$1'].__file__)" 2>&1); then
+        # Nicht nur DASS geladen wurde, sondern WOHER: ein gewoehnlicher
+        # Paketname kann von einer gleichnamigen Datei neben dem Dienstskript
+        # lautlos verdeckt werden, und dann laedt der Dienst etwas anderes,
+        # als hier geprueft wurde.
+        echo "<OK> $2"
+        echo "<INFO>     geladen aus: $LADEAUSGABE"
+        return 0
+    fi
+    echo "$LADEAUSGABE" | sed 's/^/<FAIL>     /'
+    return 1
+}
+
+if [ ! -x "$VENV/bin/python3" ] || ! VENVFEHLER=$("$VENV/bin/python3" -c 'import sys' 2>&1); then
+    if [ -n "${VENVFEHLER:-}" ]; then
+        echo "<INFO> Die vorhandene virtuelle Umgebung antwortet nicht und wird neu angelegt:"
+        echo "$VENVFEHLER" | sed 's/^/<INFO>     /'
+    fi
     rm -rf "$VENV"
     if ! "$PY" -m venv "$VENV"; then
         echo "<FAIL> Virtuelle Umgebung konnte nicht angelegt werden ($VENV)."
@@ -175,23 +198,39 @@ if ! "$VENV/bin/python3" -m pip install --no-cache-dir "wyoming>=1.5"; then
     echo "<INFO> Ohne dieses Paket kann der Dienst nicht mit den Sprachdiensten reden."
     exit 1
 fi
-if ! "$VENV/bin/python3" -c 'import wyoming' 2>/dev/null; then
+if ! laden_pruefen wyoming "wyoming geladen."; then
     echo "<FAIL> wyoming ist installiert, laesst sich aber nicht laden."
+    echo "<INFO> Die Meldung von Python steht in den Zeilen darueber."
     exit 1
 fi
-echo "<OK> wyoming geladen."
 
 # aioesphomeapi ist NUR fuer ESPHome-Mikrofone noetig. Fehlt es, laufen die
 # Wyoming-Satelliten trotzdem - deshalb hier kein Abbruch.
 echo "<INFO> Installiere aioesphomeapi (nur fuer ESPHome-Mikrofone) ..."
-if "$VENV/bin/python3" -m pip install --no-cache-dir "aioesphomeapi>=24" >/dev/null 2>&1 \
-   && "$VENV/bin/python3" -c 'import aioesphomeapi' 2>/dev/null; then
-    echo "<OK> aioesphomeapi geladen."
+if ! PIPFEHLER=$("$VENV/bin/python3" -m pip install --no-cache-dir "aioesphomeapi>=24" 2>&1); then
+    echo "<INFO> aioesphomeapi liess sich nicht installieren:"
+    echo "$PIPFEHLER" | tail -n 5 | sed 's/^/<INFO>     /'
+    AIO=1
+elif ! laden_pruefen aioesphomeapi "aioesphomeapi geladen."; then
+    # pip meldet Erfolg auch dann, wenn kein einziges abhaengiges Paket
+    # mitgekommen ist (Hausregel 12.09.2026: Wheel ohne Requires-Dist). Erst
+    # der Ladeversuch beantwortet die Frage, und seine Meldung nennt, welches
+    # Paket fehlt.
+    echo "<INFO> aioesphomeapi ist installiert, laesst sich aber nicht laden."
+    AIO=1
 else
-    echo "<INFO> aioesphomeapi liess sich nicht installieren."
+    AIO=0
+fi
+if [ "$AIO" != "0" ]; then
     echo "<INFO> Wyoming-Satelliten laufen trotzdem. ESPHome-Mikrofone (Atom Echo,"
     echo "<INFO> Voice PE, ESP32-S3-BOX) bleiben dann aussen vor."
 fi
+
+# Welche Fassungen wirklich liegen. Ohne diese Zeilen ist im Nachhinein nicht
+# mehr festzustellen, womit eine Anlage gelaufen ist - und die Frage kommt
+# immer dann, wenn etwas nicht geht (Hausregel 12.09.2026).
+echo "<INFO> Installierte Pakete in der virtuellen Umgebung:"
+"$VENV/bin/python3" -m pip list --format=freeze 2>/dev/null | sed 's/^/<INFO>     /'
 
 # ---------- Docker ----------
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then

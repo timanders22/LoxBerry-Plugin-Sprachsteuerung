@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.11.4
+Version 0.11.5
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,48 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.11.5
+
+- **Zustände bleiben jetzt im Broker stehen (`retain`).** Bis 0.11.4 ging
+  jedes Thema flüchtig hinaus. Nach einem Neustart des Miniservers oder des
+  MQTT-Gateways standen die virtuellen Eingänge in Loxone deshalb leer, bis
+  der nächste Herzschlag kam. Das entspricht nicht dem Hausstandard und war
+  auch nicht nötig: **am Gerät gemessen (13.09.2026)** nimmt der UDP-Eingang
+  des Gateways das Befehlswort `retain` an — die so gesendeten Themen lagen
+  danach zurückbehalten im Broker, die mit `publish` gesendeten nicht.
+- **Die Entscheidung fällt je Thema, nicht je Sendevorgang.** Der Herzschlag
+  schickt Lebenszeichen *und* Zustände in einem Aufruf; wer am Aufruf
+  entscheidet, macht entweder das Lebenszeichen zurückbehalten (falsch) oder
+  die Zustände flüchtig (auch falsch). Die Tabelle steht in
+  `templates/vorgaben.json` — **einmal** für den Dienst und die Oberfläche,
+  aus demselben Grund wie die Vorgabenliste selbst.
+  - *zurückbehalten:* der zuletzt verstandene Satz samt Zeitstempel
+    (`satz`, `absicht`, `aktion`, `ziel`, `wert`, `einheit`, `quelle`,
+    `mikrofon`, `zeit`), sein Ergebnis (`antwort`, `ok`, `grund`), die
+    Themen des Ziels (`<Thema>/aktion`, `<Thema>/wert`) und der Zustand der
+    Anlage (`mikrofone`, `bereit`, `dienste_ok`, `dienste_gesamt`, `regeln`,
+    `ziele`, `ruhe`).
+  - *flüchtig:* das Lebenszeichen (`online`, `ts`) — zurückbehalten stünde es
+    für immer auf „lebt"; der Messwert `letzter_satz_alter`; und die `ansage`,
+    weil der Textgenerator in Loxone sie sonst nach jedem Neuverbinden noch
+    einmal vorlesen würde.
+  - Ein Thema **ohne** Eintrag geht flüchtig, und ein **leerer** Wert geht
+    immer flüchtig: eine leere Nutzlast löscht ein zurückbehaltenes Thema im
+    Broker.
+- **Die Thementabelle im Reiter MQTT hat eine dritte Spalte „zurückbehalten".**
+  Damit steht beim Anlegen eines virtuellen Eingangs daneben, ob der Wert nach
+  einem Neustart sofort da ist. Der Vorbehalt „ob das Gateway die Werte behält,
+  ist nicht gemessen" ist damit hinfällig und durch das Messergebnis ersetzt.
+- **Drei verschluckte Fehlermeldungen im Installationsskript.** Scheiterte der
+  Ladeversuch von `wyoming` oder `aioesphomeapi`, stand im Installations-
+  protokoll, *dass* es nicht geht — nirgends *warum*; Pythons Meldung ging nach
+  `/dev/null`. Sie wird jetzt eingefangen und eingerückt ausgegeben. Dasselbe
+  gilt für eine virtuelle Umgebung, die nicht mehr antwortet und deshalb neu
+  angelegt wird. Zusätzlich nennt jede geglückte Prüfung, **woher** geladen
+  wurde, und die Fassungen aller Pakete stehen am Ende im Protokoll.
+
+Kein Verhalten geändert hat sich für jemanden, der MQTT abgeschaltet hat.
 
 ## Neu in 0.11.3
 
@@ -694,9 +736,6 @@ steht weiterhin kein Mikrofon und kein Container.
 
 **Ebenfalls ungemessen, und zwar ausdrücklich:**
 
-* **`retain` am laufenden MQTT-Gateway.** Das Plugin sendet über den
-  UDP-Eingang des Gateways; ob und wie das Gateway die Werte behält, ist
-  hier nicht gemessen worden. Im Haus läuft Gateway **Version 1**.
 * **Das Mithören fremder Themen am Broker.** Das Plugin abonniert nichts;
   gemessen ist das nicht.
 * **Die Blockade der Ereignisschleife ist in 0.10.3 behoben** und gemessen
@@ -707,6 +746,12 @@ steht weiterhin kein Mikrofon und kein Container.
   kann das Plugin ohnehin nicht arbeiten. Bewusst nicht mit umgebaut: ein
   zweiter Faden für eine gedeckelte Wartezeit wäre ein zweites Risiko ohne
   zweiten Nutzen.
+
+**Seit 0.11.5 nicht mehr auf dieser Liste:** `retain` am laufenden
+MQTT-Gateway. Am Gerät gemessen am 13.09.2026 — der UDP-Eingang nimmt das
+Befehlswort `retain` an, die so gesendeten Themen lagen danach zurückbehalten
+im Broker, die mit `publish` gesendeten nicht. Gemessen wurde am Gateway
+**Version 1**; für Version 2 liegt keine eigene Messung vor.
 
 ## Grundlage
 

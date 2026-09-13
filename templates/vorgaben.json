@@ -83,6 +83,46 @@
     "tts_mode":   ["musicserver", "ms4h", "audioserver", "custom"]
   },
 
+  "_hinweis_retain": [
+    "WELCHE THEMEN DER BROKER BEHAELT (seit 0.11.5).",
+    "",
+    "Hausstandard seit 03.09.2026: Zustaende werden zurueckbehalten, damit",
+    "Loxone nach einem Neustart sofort den Stand hat; Messwerte mit",
+    "Zeitbezug nicht, damit kein alter Wert als aktuell erscheint; das",
+    "Lebenszeichen NIE - zurueckbehalten zeigte es immer 'lebt'.",
+    "",
+    "Die Entscheidung steht je SCHLUESSEL, nicht je Aufruf: der Herzschlag",
+    "schickt Lebenszeichen und Zustaende in EINEM Aufruf. Wer am Aufruf",
+    "entscheidet, macht entweder das Lebenszeichen zurueckbehalten (falsch)",
+    "oder die Zustaende fluechtig (auch falsch).",
+    "",
+    "Sie steht hier und nicht im Dienst, weil die Oberflaeche dieselbe",
+    "Auskunft in der Thementabelle des Reiters 'MQTT' anzeigt - zwei Listen",
+    "in zwei Sprachen laufen auseinander (siehe _hinweis oben).",
+    "",
+    "1 = zurueckbehalten, 0 = fluechtig. Ein Thema OHNE Eintrag geht",
+    "fluechtig: was niemand bedacht hat, darf nicht auf Dauer im Broker",
+    "stehenbleiben. 'endungen' gilt fuer die Themen des Ziels, die einen",
+    "frei gewaehlten Stamm davor tragen (<thema>/aktion)."
+  ],
+
+  "retain": {
+    "themen": {
+      "satz": 1, "absicht": 1, "aktion": 1, "ziel": 1, "wert": 1,
+      "einheit": 1, "quelle": 1, "mikrofon": 1, "zeit": 1,
+
+      "antwort": 1, "ok": 1, "grund": 1,
+      "ansage": 0,
+
+      "online": 0, "ts": 0,
+      "mikrofone": 1, "bereit": 1,
+      "dienste_ok": 1, "dienste_gesamt": 1,
+      "regeln": 1, "ziele": 1, "ruhe": 1,
+      "letzter_satz_alter": 0
+    },
+    "endungen": { "/aktion": 1, "/wert": 1 }
+  },
+
   "wakewords": [
     "ok_nabu", "hey_jarvis", "alexa", "hey_mycroft", "hey_rhasspy"
   ]
