@@ -50,6 +50,15 @@ PLOG="$LBHOMEDIR/log/plugins/$PNAME"
 PCONFIG="$LBHOMEDIR/config/plugins/$PNAME"
 PID="$PDATA/dienst.pid"
 SOLL="$PDATA/soll_laufen"
+# Von preupgrade.sh gelegt, von postinstall.sh entfernt. Sie liegt NEBEN dem
+# Datenordner, weil purge_installation den Ordner selbst loescht. Juenger als
+# eine Stunde heisst: eine Installation laeuft gerade, jetzt wird nichts
+# gestartet - der Installer legt die Cron-Datei rund eine Minute vor
+# postinstall.sh an, und ein in dieser Luecke gestarteter Dienst schreibt mit
+# leerem Datenordner los (Regeln/06, am Geraet 08.09.2026 gemessen).
+# Aelter oder unlesbar: sie gilt nicht, sonst legte eine abgebrochene
+# Installation den Dienst fuer immer still.
+SPERRE="$LBHOMEDIR/data/plugins/$PNAME.upgrade_laeuft"
 # ZWEI Dateien, mit Absicht: sprachsteuerung.log gehoert dem Python-Dienst
 # und wird von ihm rotiert. Wuerde die Schale mit ">>" dieselbe Datei
 # fuehren, schriebe ihr Deskriptor nach der ersten Rotation in die
@@ -77,9 +86,27 @@ laeuft() {
     return 0
 }
 
+# Gilt die Marke aus preupgrade.sh? Ein Zeitpunkt in der Zukunft zaehlt
+# nicht als frisch - eine vorgestellte Uhr sperrte den Dienst sonst bis zu
+# dem Zeitpunkt, den sie nennt. Ein paar Minuten Vorlauf sind aber eine
+# nachgestellte Uhr und kein Grund, die Sperre zu verwerfen.
+sperre_gilt() {
+    [ -f "$SPERRE" ] || return 1
+    SEIT=$(cat "$SPERRE" 2>/dev/null)
+    case "$SEIT" in ''|*[!0-9]*) return 1 ;; esac
+    ALTER=$(( $(date +%s) - SEIT ))
+    [ "$ALTER" -ge -300 ] && [ "$ALTER" -lt 3600 ]
+}
+
 starten() {
     if laeuft; then
         echo "laeuft bereits (PID $(cat "$PID"))"
+        return 0
+    fi
+    # VOR dem Sollmerker: was in der Luecke gestartet wuerde, schriebe in
+    # einen Datenordner, den der Installer gleich abraeumt.
+    if sperre_gilt; then
+        echo "Eine Installation laeuft - der Dienst wird danach gestartet."
         return 0
     fi
     if [ ! -x "$PY" ]; then
@@ -158,6 +185,15 @@ case "$1" in
     waechter)
         # Nur neu starten, wenn der Dienst laufen SOLL. Ein bewusst
         # angehaltener Dienst bleibt angehalten.
+        #
+        # Die Marke wird HIER noch einmal geprueft, obwohl starten() sie
+        # ebenfalls prueft: sonst schriebe der Waechter waehrend jeder
+        # Installation im Minutentakt seine Zeile auf die Ramdisk und das
+        # Protokoll behauptete Startversuche, die keine sind.
+        if sperre_gilt; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Waechter: eine Installation laeuft - kein Start." >> "$STARTLOG"
+            exit 0
+        fi
         if [ -f "$SOLL" ] && ! laeuft; then
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Waechter: Dienst lief nicht, wird neu gestartet." >> "$STARTLOG"
             starten >> "$STARTLOG" 2>&1

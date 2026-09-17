@@ -37,6 +37,12 @@
 #      verlauf.json - die Langzeitwerte, keine Zugangsdaten, aber sie
 #      gehoeren nach dem Entfernen nicht mehr auf die Karte.
 #
+#      Seit 0.11.7 liegt daneben aus demselben Grund die Marke
+#      data/plugins/<ordner>.upgrade_laeuft. Bliebe sie liegen, haette
+#      eine Neuinstallation innerhalb derselben Stunde einen Dienst,
+#      der nicht startet - und niemand wuesste, warum. Sie wird
+#      zusammen mit der Sicherung entfernt.
+#
 #   4. Die Container. Die werden ABSICHTLICH NICHT angefasst - siehe
 #      unten.
 #
@@ -158,6 +164,14 @@ echo "<INFO> vom LoxBerry entfernt."
 SICH="$BASE/data/plugins/$PFOLDER.upgrade_sicherung"
 if [ -d "$SICH" ]; then
     rm -rf "$SICH" && echo "<OK> Sicherung des Aktualisierens entfernt: $PFOLDER.upgrade_sicherung"
+fi
+# Seit 0.11.7 auch die Marke "Aktualisierung laeuft", aus demselben Grund:
+# sie liegt NEBEN dem Datenordner und uebersteht das Deinstallieren sonst.
+# Bliebe sie liegen, sperrte sie nach einer Neuinstallation innerhalb
+# derselben Stunde den ersten Dienststart (bin/dienst.sh, sperre_gilt).
+MARKE="$BASE/data/plugins/$PFOLDER.upgrade_laeuft"
+if [ -f "$MARKE" ]; then
+    rm -f "$MARKE" && echo "<OK> Marke des Aktualisierens entfernt: $PFOLDER.upgrade_laeuft"
 fi
 
 # ---------------------------------------------------------------

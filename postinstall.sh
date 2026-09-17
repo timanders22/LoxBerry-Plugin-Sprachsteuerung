@@ -31,6 +31,64 @@ PDATA="$BASE/data/plugins/$PFOLDER"
 PLOG="$BASE/log/plugins/$PFOLDER"
 PCONFIG="$BASE/config/plugins/$PFOLDER"
 VENV="$PBIN/venv"
+SPERRE="$BASE/data/plugins/$PFOLDER.upgrade_laeuft"
+
+# ---------- Die Marke "Aktualisierung laeuft" ----------
+# preupgrade.sh hat sie als Erstes gelegt; dienst.sh und der Waechter
+# starten nicht, solange sie gilt. Hier wird sie ausgewertet und am Ende
+# wieder entfernt.
+#
+# Sie zaehlt nur, wenn sie eine Unixzeit traegt und hoechstens eine Stunde
+# alt ist. Eine abgebrochene Installation darf das Plugin nicht fuer immer
+# stilllegen; ein Zeitpunkt in der Zukunft ist keine laufende Installation.
+MARKE_GILT=""
+if [ -f "$SPERRE" ]; then
+    MARKE_WERT=$(cat "$SPERRE" 2>/dev/null)
+    case "$MARKE_WERT" in
+        ''|*[!0-9]*) ;;
+        *)
+            MARKE_ALTER=$(( $(date +%s) - MARKE_WERT ))
+            if [ "$MARKE_ALTER" -ge -300 ] && [ "$MARKE_ALTER" -lt 3600 ]; then
+                MARKE_GILT=ja
+            fi
+            ;;
+    esac
+fi
+# Die Marke muss weg, BEVOR der Waechter den Dienst wieder starten darf -
+# und zwar auf JEDEM Ausgang dieses Skripts. Es steigt an sechs Stellen mit
+# 'exit 1' aus (Architektur, Python, venv, pip, Vorgabenliste); wuerde die
+# Marke nur am Ende entfernt, bliebe der Dienst nach einer gescheiterten
+# Installation eine Stunde gesperrt, ohne dass irgendwo stuende, warum.
+# Deshalb ein trap: er laeuft auch dann, wenn weiter unten abgebrochen wird.
+trap 'rm -f "$SPERRE" 2>/dev/null' EXIT
+
+# Ein Dienst, der WAEHREND der Installation laeuft, schreibt in denselben
+# Datenordner, in den gleich die Sicherung zurueckkommt. Bei liegender Marke
+# wird er deshalb angehalten - auch einer OHNE PID-Datei: die hat
+# purge_installation mit dem Datenordner geloescht, 'dienst.sh stop' sieht
+# ihn dann nicht (Regeln/06, Bauweise Einspeisebremse 0.9.20, Punkt 3).
+# Nur die eigene Befehlszeile (pfadgenau, am Ende verankert) und nur der
+# eigene Benutzer - sonst traefe es den Dienst einer Zweitinstallation.
+if [ -n "$MARKE_GILT" ]; then
+    [ -x "$PBIN/dienst.sh" ] && "$PBIN/dienst.sh" stop >/dev/null 2>&1
+    WAISENMUSTER="bin/plugins/$PFOLDER/sprachsteuerung_dienst\.py\$"
+    if pgrep -u "$(id -u)" -f "$WAISENMUSTER" >/dev/null 2>&1; then
+        pkill -u "$(id -u)" -f "$WAISENMUSTER" 2>/dev/null
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            pgrep -u "$(id -u)" -f "$WAISENMUSTER" >/dev/null 2>&1 || break
+            sleep 1
+        done
+        pgrep -u "$(id -u)" -f "$WAISENMUSTER" >/dev/null 2>&1 \
+            && pkill -9 -u "$(id -u)" -f "$WAISENMUSTER" 2>/dev/null
+        # Die Wirkung pruefen, nicht den Rueckgabewert von pkill.
+        if pgrep -u "$(id -u)" -f "$WAISENMUSTER" >/dev/null 2>&1; then
+            echo "<WARNING> Ein Dienst ohne PID-Datei lief waehrend der Installation"
+            echo "<INFO> und liess sich nicht beenden. Bitte den LoxBerry neu starten."
+        else
+            echo "<OK> Ein Dienst ohne PID-Datei lief waehrend der Installation und wurde beendet."
+        fi
+    fi
+fi
 
 mkdir -p "$PDATA/befehle" "$PDATA/antworten" "$PDATA/modelle" "$PDATA/timer" \
          "$PLOG" "$PCONFIG" || {
@@ -87,19 +145,87 @@ fi
 # ---------- Langzeitwerte zurueckholen ----------
 # Gegenstueck zu preupgrade.sh. Zwischen beiden Skripten hat der Installer
 # data/plugins/<x>/ vollstaendig geloescht; der Nachbar mit dem Punkt hat es
-# ueberstanden. Zurueckgeholt wird nur, was fehlt - eine Neuinstallation
-# findet nichts vor und faengt sauber bei null an.
+# ueberstanden. Eine Neuinstallation findet keine Sicherung vor und faengt
+# sauber bei null an.
+#
+# Traegt die Sicherung den Zeitpunkt aus preupgrade.sh und ist er hoechstens
+# eine Stunde alt, ist sie die von eben: dann kommt jede gesicherte Datei
+# zurueck, OHNE nach dem Inhalt der Zieldatei zu fragen. Bis 0.11.6 kam sie
+# nur zurueck, wenn die Zieldatei fehlte oder leer war. Der Installer legt
+# die Cron-Datei aber vor diesem Skript an (am Geraet 52 s vorher gemessen,
+# Einspeisebremse 08.09.2026). In WSL nachgestellt (17.09.2026): startet der
+# Waechter in dieser Luecke den Dienst und verarbeitet der einen Satz, legt
+# er verlauf.json selbst an - die Rueckholung sprang nicht an, die Sicherung
+# wurde trotzdem geloescht, der Verlauf war fort. Laeuft der Dienst danach
+# weiter, schadet das nicht: er liest die Datei vor jedem Eintrag neu und
+# schreibt an die zurueckgeholte an. Was er in der Luecke eingetragen hat,
+# geht dabei verloren.
+#
+# Entschieden wird am Zeitpunkt IN der Sicherung, nicht an der Marke oben:
+# preupgrade.sh schreibt beide im selben Durchlauf, aber der Zeitpunkt
+# gehoert zur Sicherung und liegt bei ihr. Er beantwortet deshalb auch den
+# Fall, in dem die Marke fehlt (Erstinstallation dieser Fassung ueber eine
+# aeltere hinweg, von Hand entfernt) - und er beantwortet ihn fuer GENAU
+# diese Sicherung, waehrend die Marke nur sagt, dass irgendetwas laeuft.
+#
+# Ohne Zeitpunkt, mit einem aelteren oder einem in der Zukunft stammt die
+# Sicherung NICHT aus diesem Vorgang. Dann wird daraus NICHTS eingespielt.
+# Bis 0.11.6 fuellte sie noch, was im Datenordner fehlte oder leer war -
+# das ist falsch: eine solche Sicherung kann von einer Deinstallation
+# stammen, die nicht aufgeraeumt hat, oder von einem Update vor Monaten.
+# Was sie traegt, ist dann aelter als alles, was jetzt dasteht, und das
+# Einspielen legte alten Verlauf ueber eine frische Installation
+# (Entscheidung des Hausherrn, 17.09.2026). Sie bleibt liegen und wird
+# EINMAL gemeldet; wer sie doch will, kopiert sie von Hand. Damit sie gar
+# nicht erst liegenbleibt, raeumt uninstall/uninstall sie weg.
+#
+# Die Sicherung verschwindet erst, wenn jede Rueckholung gelungen ist.
+# Zurueckgeschrieben wird ueber eine Nebendatei und mv: cp schreibt in die
+# Zieldatei hinein, mv tauscht sie in einem Schritt aus.
 LANG_SICHER="$BASE/data/plugins/$PFOLDER.upgrade_sicherung"
 if [ -d "$LANG_SICHER" ]; then
-    for LANG_F in verlauf.json messwerte.json ansagen.json; do
-        if [ -f "$LANG_SICHER/$LANG_F" ] \
-           && [ ! -s "$BASE/data/plugins/$PFOLDER/$LANG_F" ]; then
-            mkdir -p "$BASE/data/plugins/$PFOLDER" 2>/dev/null
-            cp -p "$LANG_SICHER/$LANG_F" "$BASE/data/plugins/$PFOLDER/$LANG_F" \
-                2>/dev/null && echo "<OK> $LANG_F ueber das Update gerettet."
+    LANG_JETZT=$(date +%s)
+    LANG_ANGELEGT=$(cat "$LANG_SICHER/angelegt" 2>/dev/null)
+    LANG_FRISCH=""
+    case "$LANG_ANGELEGT" in
+        ''|*[!0-9]*) ;;
+        *)
+            if [ "$LANG_JETZT" -ge "$LANG_ANGELEGT" ] \
+               && [ $((LANG_JETZT - LANG_ANGELEGT)) -le 3600 ]; then
+                LANG_FRISCH=ja
+            fi
+            ;;
+    esac
+    if [ -z "$LANG_FRISCH" ]; then
+        LANG_WANN="unbekannt"
+        [ -n "$LANG_ANGELEGT" ] && LANG_WANN=$(date -d "@$LANG_ANGELEGT" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$LANG_ANGELEGT")
+        echo "<WARNING> Die Sicherung der Langzeitwerte stammt nicht aus diesem Vorgang (angelegt: $LANG_WANN)."
+        echo "<INFO> Daraus wird nichts eingespielt - sie koennte aelter sein als das,"
+        echo "<INFO> was jetzt im Datenordner steht. Sie bleibt unberuehrt liegen:"
+        echo "<INFO> $LANG_SICHER"
+        echo "<INFO> Wer sie doch will, kopiert die Dateien von dort nach $PDATA/."
+    else
+        LANG_FEHLER=0
+        for LANG_F in verlauf.json messwerte.json ansagen.json; do
+            [ -f "$LANG_SICHER/$LANG_F" ] || continue
+            LANG_ZIEL="$PDATA/$LANG_F"
+            if cp -p "$LANG_SICHER/$LANG_F" "$LANG_ZIEL.rueckholung" 2>/dev/null \
+               && mv -f "$LANG_ZIEL.rueckholung" "$LANG_ZIEL" 2>/dev/null; then
+                echo "<OK> $LANG_F ueber das Update gerettet."
+            else
+                rm -f "$LANG_ZIEL.rueckholung" 2>/dev/null
+                LANG_FEHLER=$((LANG_FEHLER + 1))
+                echo "<WARNING> $LANG_F liess sich nicht aus der Sicherung zurueckholen."
+            fi
+        done
+        if [ "$LANG_FEHLER" -eq 0 ]; then
+            rm -rf "$LANG_SICHER" 2>/dev/null
+            [ -d "$LANG_SICHER" ] && echo "<INFO> Die Sicherung liess sich nicht entfernen: $LANG_SICHER"
+        else
+            echo "<INFO> Die Sicherung bleibt deshalb liegen: $LANG_SICHER"
+            echo "<INFO> Von dort laesst sich die Datei von Hand nach $PDATA/ kopieren."
         fi
-    done
-    rm -rf "$LANG_SICHER" 2>/dev/null
+    fi
 fi
 
 # ---------- Der Sollmerker ----------

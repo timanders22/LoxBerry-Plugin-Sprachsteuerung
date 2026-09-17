@@ -233,6 +233,52 @@ function sp_retain_fuer($schluessel)
 }
 
 /**
+ * Traegt diese Datei ueberhaupt etwas?
+ *
+ * Nicht "ist sie leer?", sondern "laesst sie sich als JSON-Objekt mit
+ * mindestens einem Schluessel lesen?". Der Unterschied ist gemessen
+ * (17.09.2026, WSL): eine abgeschnittene sprachsteuerung.json - nicht leer,
+ * nicht "{}", aber unlesbar - ging bis 0.11.6 an der Selbstheilung vorbei.
+ * json_decode lieferte null, sp_json_lesen() daraus array(), sp_config()
+ * gab die blanken Vorgaben zurueck, sp_token() wuerfelte ein NEUES
+ * Aktionstoken und sp_config_speichern() schrieb es samt Zweitschrift: die
+ * Zweitschrift mit dem alten Token war weg, alle Loxone-Aufrufe scheiterten.
+ * Dieselbe Bauart wie Intercom 2.2.10 und GardenaSmartSystem 1.2.8.
+ *
+ * Rueckgabe: die gelesenen Daten oder null, wenn die Datei nichts traegt.
+ */
+function sp_inhalt_oder_null($pfad)
+{
+    if (!is_file($pfad)) { return null; }
+    $roh = trim((string) @file_get_contents($pfad));
+    if ($roh === '') { return null; }
+    $d = json_decode($roh, true);
+    if (!is_array($d) || $d === array()) { return null; }
+    return $d;
+}
+
+/**
+ * Traegt diese Konfiguration das, was nur sie tragen kann?
+ *
+ * Das Aktionstoken. Es steht in JEDER Loxone-Adresse dieses Plugins; geht es
+ * verloren, scheitern alle virtuellen Eingaenge im Miniserver, und es gibt
+ * keinen Weg, es zurueckzurechnen. Alles andere laesst sich in der
+ * Oberflaeche noch einmal eintragen.
+ *
+ * Eine Konfiguration OHNE Token gibt es auf keinem Weg der Oberflaeche:
+ * sp_token() fuellt es beim ersten Seitenaufbau. Steht dort keines, ist die
+ * Datei nicht aus einem gespeicherten Stand hervorgegangen - dann wird aus
+ * der Zweitschrift geheilt, statt ein NEUES Token zu wuerfeln und damit die
+ * Anbindung an Loxone stillzulegen. Bauart: Intercom 2.2.11
+ * (ic_config_hat_inhalt(): Token oder Station).
+ */
+function sp_config_hat_inhalt($c)
+{
+    return is_array($c) && $c !== array()
+        && trim((string) (isset($c['aktionstoken']) ? $c['aktionstoken'] : '')) !== '';
+}
+
+/**
  * Die Konfiguration lesen.
  *
  * $erzeugen = false schaltet JEDEN Schreibvorgang ab. Der unangemeldete
@@ -240,14 +286,33 @@ function sp_retain_fuer($schluessel)
  * nichts Harmloses. Bei EVCC hinterliess ein einziger, korrekt mit 403
  * abgewiesener Aufruf eine frisch erzeugte Konfiguration samt Token und
  * Zweitschrift.
+ *
+ * Geheilt wird nach INHALT (sp_inhalt_oder_null(), sp_config_hat_inhalt()),
+ * nicht nach Dateigroesse, und nur aus einer Zweitschrift, die selbst
+ * Inhalt traegt: ein Stand ohne Inhalt darf keinen anderen ersetzen - in
+ * keine der beiden Richtungen. Was vorher in der Datei stand, wird nicht
+ * weggeworfen, sondern liegt als <datei>.kaputt daneben (0600, es koennen
+ * Zugangsdaten darin stehen).
  */
 function sp_config($erzeugen = true)
 {
     $p = sp_paths();
-    $roh = is_file($p['config']) ? trim((string) @file_get_contents($p['config'])) : '';
-    if ($erzeugen && ($roh === '' || $roh === '{}') && is_file($p['sicherung'])) {
+    if ($erzeugen && !sp_config_hat_inhalt(sp_inhalt_oder_null($p['config']))
+        && sp_config_hat_inhalt(sp_inhalt_oder_null($p['sicherung']))) {
         @mkdir($p['configdir'], 0775, true);
-        @copy($p['sicherung'], $p['config']);
+        $alt = is_file($p['config']) ? (string) @file_get_contents($p['config']) : '';
+        $rest = preg_replace('/\s+/', '', $alt);
+        if ($rest !== '' && $rest !== '{}' && $rest !== '[]') {
+            @copy($p['config'], $p['config'] . '.kaputt');
+            @chmod($p['config'] . '.kaputt', 0600);
+        }
+        if (@copy($p['sicherung'], $p['config'])) {
+            @chmod($p['config'], 0600);
+            sp_log('Die Konfiguration trug kein Aktionstoken und wurde aus der Zweitschrift '
+                . 'wiederhergestellt: ' . $p['sicherung']
+                . ($rest !== '' && $rest !== '{}' && $rest !== '[]'
+                    ? ' (der vorherige Inhalt liegt unter ' . $p['config'] . '.kaputt)' : '') . '.');
+        }
     }
     $vor = sp_vorgaben();
     $cfg = array_merge($vor, sp_json_lesen($p['config']));
@@ -319,8 +384,11 @@ function sp_cfg_vervollstaendigen()
         // Nicht bei jedem Lauf schreiben: sonst ist das Protokoll voll und die
         // Datei aendert sich ohne Anlass.
         sp_json_schreiben($p['config'], $roh, 0600);
-        @copy($p['config'], $p['sicherung']);
-        @chmod($p['sicherung'], 0600);
+        // Diese Funktion liest die Datei ROH, ohne die Selbstheilung aus
+        // sp_config(). Traegt die Datei nichts Lesbares, stuenden hier nur
+        // die Vorgaben - und die duerfen die Zweitschrift nicht ersetzen.
+        sp_zweitschrift_ziehen($p['config'], $p['sicherung'], $roh,
+                               array('aktionstoken'), 0600);
         sp_log('Konfiguration ergaenzt: ' . implode(', ', $fehlten));
     }
     return $fehlten;
@@ -332,8 +400,11 @@ function sp_config_speichern($cfg)
     // Die Konfiguration kann eine Miniserver-Adresse mit Zugangsdaten
     // enthalten - deshalb 0600, nicht 0644.
     if (!sp_json_schreiben($p['config'], $cfg, 0600)) { return false; }
-    @copy($p['config'], $p['sicherung']);
-    @chmod($p['sicherung'], 0600);
+    // Die Zweitschrift wird NICHT erneuert, wenn der neue Stand das
+    // Aktionstoken nicht traegt, das dort steht (sp_zweitschrift_fehlt()).
+    // Gespeichert wird trotzdem - nur der Rueckweg bleibt stehen.
+    sp_zweitschrift_ziehen($p['config'], $p['sicherung'], (array) $cfg,
+                           array('aktionstoken'), 0600);
     return true;
 }
 
@@ -349,20 +420,83 @@ function sp_config_speichern($cfg)
 function sp_saetze($erzeugen = true)
 {
     $p = sp_paths();
-    $roh = is_file($p['saetze']) ? trim((string) @file_get_contents($p['saetze'])) : '';
-    if ($erzeugen && ($roh === '' || $roh === '{}') && is_file($p['sicherung_saetze'])) {
+    // Wie bei sp_config(): nach INHALT entscheiden. Eine Satzdatei ohne die
+    // beiden Schluessel 'regeln' und 'ziele' ist keine Satzdatei - eine
+    // abgeschnittene erst recht nicht. Ein LEERER Regelsatz mit beiden
+    // Schluesseln ist dagegen ein gewolltes Loeschen und bleibt stehen.
+    $d = sp_inhalt_oder_null($p['saetze']);
+    $hat = is_array($d) && (array_key_exists('regeln', $d) || array_key_exists('ziele', $d));
+    $z = sp_inhalt_oder_null($p['sicherung_saetze']);
+    $z_hat = is_array($z) && (array_key_exists('regeln', $z) || array_key_exists('ziele', $z));
+    if ($erzeugen && !$hat && $z_hat) {
         @mkdir($p['configdir'], 0775, true);
-        @copy($p['sicherung_saetze'], $p['saetze']);
-        sp_log('Satzdatei war leer - aus der Zweitschrift wiederhergestellt.');
+        $alt = is_file($p['saetze']) ? (string) @file_get_contents($p['saetze']) : '';
+        $rest = preg_replace('/\s+/', '', $alt);
+        if ($rest !== '' && $rest !== '{}' && $rest !== '[]') {
+            @copy($p['saetze'], $p['saetze'] . '.kaputt');
+        }
+        if (@copy($p['sicherung_saetze'], $p['saetze'])) {
+            sp_log('Die Satzdatei trug keine Regeln und keine Ziele - aus der Zweitschrift '
+                . 'wiederhergestellt: ' . $p['sicherung_saetze']
+                . ($rest !== '' && $rest !== '{}' && $rest !== '[]'
+                    ? ' (der vorherige Inhalt liegt unter ' . $p['saetze'] . '.kaputt)' : '') . '.');
+        }
     }
     return sp_json_lesen($p['saetze']);
+}
+
+/**
+ * Was die Zweitschrift traegt und der neue Stand nicht.
+ *
+ * Leere Rueckgabe heisst: die Zweitschrift darf erneuert werden. Verglichen
+ * wird, ob ein SCHLUESSEL fehlt, nicht ob ein Wert leer ist - eine geleerte
+ * Regelliste ('regeln' vorhanden, aber leer) ist ein gewolltes Loeschen und
+ * wird nachgezogen; ein fehlender Schluessel heisst, der neue Stand ist gar
+ * nicht aus dem gespeicherten hervorgegangen. Ein leeres Aktionstoken gibt
+ * es auf keinem Weg der Oberflaeche (sp_token() fuellt es sofort) und gilt
+ * deshalb als fehlend.
+ *
+ * Bauart uebernommen aus Intercom 2.2.11 / GardenaSmartSystem 1.2.9
+ * (17.09.2026): eine Zweitschrift MIT Inhalt darf nie durch einen Stand
+ * OHNE Inhalt ersetzt werden. Das Speichern selbst wird nicht verhindert -
+ * nur der einzige Rueckweg nicht zerstoert; das Protokoll sagt es.
+ */
+function sp_zweitschrift_fehlt($sicherung, array $neu, array $felder)
+{
+    $z = sp_inhalt_oder_null($sicherung);
+    if ($z === null) { return array(); }
+    $fehlt = array();
+    foreach ($felder as $feld) {
+        if (!array_key_exists($feld, $z)) { continue; }
+        $hat_z = is_string($z[$feld]) ? (trim($z[$feld]) !== '') : !empty($z[$feld]);
+        if (!$hat_z) { continue; }
+        $hat_n = array_key_exists($feld, $neu)
+               && (is_string($neu[$feld]) ? (trim($neu[$feld]) !== '') : true);
+        if (!$hat_n) { $fehlt[] = $feld; }
+    }
+    return $fehlt;
+}
+
+/** Die Zweitschrift erneuern - oder begruendet nicht. */
+function sp_zweitschrift_ziehen($quelle, $ziel, array $neu, array $felder, $rechte = null)
+{
+    $fehlt = sp_zweitschrift_fehlt($ziel, $neu, $felder);
+    if ($fehlt) {
+        sp_log('WARNUNG: Die Zweitschrift bleibt unveraendert - der gespeicherte Stand '
+            . 'traegt nicht, was dort steht (' . implode(', ', $fehlt) . '): ' . $ziel);
+        return false;
+    }
+    @copy($quelle, $ziel);
+    if ($rechte !== null) { @chmod($ziel, $rechte); }
+    return true;
 }
 
 function sp_saetze_speichern($saetze)
 {
     $p = sp_paths();
     if (!sp_json_schreiben($p['saetze'], $saetze)) { return false; }
-    @copy($p['saetze'], $p['sicherung_saetze']);
+    sp_zweitschrift_ziehen($p['saetze'], $p['sicherung_saetze'], (array) $saetze,
+                           array('regeln', 'ziele'));
     return true;
 }
 

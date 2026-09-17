@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.11.6
+Version 0.11.7
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,76 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.11.7
+
+- **Verlauf, Messreihe und Ansagezeiten überstehen ein Update jetzt auch dann,
+  wenn der Dienst mitten in der Installation schon läuft.** Der LoxBerry legt
+  die Cron-Datei des Plugins an, bevor `postinstall.sh` läuft (am Gerät an
+  einem anderen Plugin 52 s vorher gemessen). Startet der minütliche Wächter
+  in dieser Lücke den Dienst und verarbeitet der einen Satz, legt er
+  `verlauf.json` selbst an. Bis 0.11.6 holte `postinstall.sh` eine gesicherte
+  Datei nur zurück, wenn die Zieldatei fehlte oder leer war — sie sprang dann
+  nicht an, löschte die Sicherung trotzdem, und der Verlauf war fort. In WSL
+  nachgestellt (17.09.2026). Seit dieser Fassung verhindert die Sperrmarke
+  (nächster Punkt) den Start in der Lücke überhaupt; die bedingungslose
+  Rückholung bleibt als zweite Sicherung.
+- **Während einer Installation startet der Dienst nicht mehr.** `preupgrade.sh`
+  legt als Erstes die Marke `data/plugins/<ordner>.upgrade_laeuft` mit der
+  Unixzeit neben den Datenordner. Solange sie gilt, beenden sich
+  `bin/dienst.sh start` und der minütliche Wächter ohne Start;
+  `postinstall.sh` hält bei liegender Marke auch einen Dienst an, der keine
+  PID-Datei mehr hat (die löscht der Installer mit dem Datenordner), und
+  entfernt die Marke, bevor der Wächter wieder starten darf — auch dann, wenn
+  die Installation vorher mit einem Fehler abbricht. Älter als eine Stunde
+  oder unlesbar gilt sie nicht: eine abgebrochene Installation darf das Plugin
+  nicht dauerhaft stilllegen. `uninstall` räumt sie weg. Nachgestellt
+  (17.09.2026): ohne Marke liefen nach einem Update zwei Dienste, mit Marke
+  genau einer, und ein in der Lücke gesprochener Befehl bleibt in der
+  Warteschlange und wird nach der Installation verarbeitet, statt verloren zu
+  gehen.
+- **`preupgrade.sh` schreibt den Zeitpunkt in die Sicherung.** Ist er höchstens
+  eine Stunde alt, stammt die Sicherung aus diesem Vorgang, und
+  `postinstall.sh` holt jede Datei daraus zurück, ohne nach dem Inhalt der
+  Zieldatei zu fragen.
+- **Eine liegengebliebene Sicherung spielt nichts mehr ein.** Fehlt der
+  Zeitpunkt, ist er älter als eine Stunde oder liegt er in der Zukunft, stammt
+  die Sicherung nicht aus diesem Vorgang — sie kann von einer Deinstallation
+  übrig sein, die nicht aufgeräumt hat, oder von einem Update vor Monaten.
+  Bis 0.11.6 füllte sie damit noch, was im Datenordner fehlte oder leer war;
+  das legte alten Verlauf über eine frische Installation. Jetzt wird daraus
+  nichts eingespielt: sie bleibt unberührt liegen, und das
+  Installationsprotokoll nennt sie einmal mit `<WARNING>` samt Ablageort.
+  `uninstall` entfernt sie, damit sie gar nicht erst liegenbleibt.
+- **Die Sicherung bleibt liegen, wenn eine Rückholung scheitert.** Bis 0.11.6
+  wurde sie auch dann gelöscht; jetzt nennt das Protokoll die Datei mit
+  `<WARNING>` und den Ort der Sicherung, von dem sie sich von Hand
+  zurückkopieren lässt.
+- **Die Selbstheilung der Einstellungen entscheidet nach Inhalt.** Bis 0.11.6
+  sprang sie nur an, wenn `sprachsteuerung.json` fehlte, leer war oder `{}`
+  enthielt. Eine abgeschnittene Datei — nicht leer, aber unlesbar — ging daran
+  vorbei: die Oberfläche las die blanken Vorgaben, würfelte ein **neues
+  Aktionstoken** und schrieb es samt Zweitschrift; das alte Token war weg, und
+  jeder virtuelle Eingang im Miniserver bekam HTTP 403. Jetzt gilt eine
+  Konfiguration als leer, wenn sie sich nicht als Objekt lesen lässt **oder
+  kein Aktionstoken trägt**; geheilt wird nur aus einer Zweitschrift, die
+  selbst eines hat, und der vorherige Inhalt bleibt als
+  `sprachsteuerung.json.kaputt` (0600) daneben liegen. Dasselbe gilt für die
+  Satzdatei: eine Datei ohne `regeln` und ohne `ziele` wird aus der
+  Zweitschrift geholt, ein bewusst geleerter Regelsatz bleibt stehen.
+- **Die Zweitschrift wird nie durch einen Stand ohne Inhalt ersetzt.**
+  Speichern die Einstellungen oder die Sätze einen Stand, dem das
+  Aktionstoken beziehungsweise `regeln`/`ziele` fehlt, während die
+  Zweitschrift sie führt, wird die Zweitschrift nicht erneuert; gespeichert
+  wird trotzdem, und das Protokoll sagt, warum der Rückweg stehen geblieben
+  ist. Bauart wie Intercom 2.2.11 und GardenaSmartSystem 1.2.9.
+
+Unverändert bleibt die Rückholung der Einstellungen und der Satzdatei: die
+Oberfläche holt beide in der Lücke aus derselben Zweitschrift, die auch
+`postinstall.sh` benutzt; nachgestellt ging dabei nichts verloren — weder beim
+bloßen Öffnen der Seite noch beim Speichern. Die Seite bleibt deshalb während
+einer Installation bedienbar; ein Vergleich mit Intercom, wo sie in derselben
+Lage gesperrt wird, ist gemessen und fiel hier anders aus.
 
 ## Neu in 0.11.5
 
