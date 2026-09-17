@@ -1,6 +1,6 @@
 #!/bin/sh
 # Sprachsteuerung lokal - Waechter, minuetlich.
-# REPLACELBPBINDIR wird bei der Installation durch den bin-Pfad ersetzt.
+# Den bin-Pfad des Plugins setzt der Installer in der Befehlszeile ein.
 # Nur die NORMALE Ausgabe wird unterdrueckt. Die Fehlerausgabe gehoert in
 # die Startdatei des Plugins: ohne sie waeren ein fehlendes dienst.sh, ein
 # gescheiterter Abstieg und eine CRLF-Shebang lautlos (REGELN_2).

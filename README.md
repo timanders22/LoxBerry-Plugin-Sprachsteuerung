@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.11.5
+Version 0.11.6
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
