@@ -26,11 +26,19 @@ if (!function_exists('sp_e')) {
 /* Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
  *
  * Vom eigenen Ablageort aufwaerts, bis ein Verzeichnis gefunden ist, das
- * config/plugins UND webfrontend enthaelt. Das trifft die uebliche
- * Installation genauso wie eine an einem anderen Ort - und es trifft auch
- * den Fall, dass das Plugin noch als entpacktes Archiv daliegt (dann findet
- * es nichts und gibt einen Leerstring zurueck, was der Aufrufer ohnehin
- * abfangen muss).
+ * config/plugins, webfrontend UND config/system/general.json enthaelt. Das
+ * trifft die uebliche Installation genauso wie eine an einem anderen Ort -
+ * und es trifft auch den Fall, dass das Plugin noch als entpacktes Archiv
+ * daliegt (dann findet es nichts und gibt einen Leerstring zurueck, was der
+ * Aufrufer ohnehin abfangen muss).
+ *
+ * general.json ist die dritte Bedingung (Regeln/06): ein Rest aus
+ * Pruefstaenden traegt config/plugins und webfrontend, eine LoxBerry-Wurzel
+ * immer auch general.json. Bis 0.11.8 fehlte sie; gemessen am 18.09.2026 in
+ * WSL (Pruefung-Sprachsteuerung-0.11.9, messe_h2.sh, Faelle C1-C4): aus einem
+ * Archiv unter einem solchen Rest las die Bibliothek dessen Konfiguration,
+ * schrieb dort aus der Zweitschrift eine sprachsteuerung.json und lud dessen
+ * Sprachdatei. Bauart: Govee 0.9.20 (gv_lib.php).
  *
  * Der Name traegt kein Plugin-Kuerzel und ist deshalb abgesichert: zwei
  * Bibliotheken landen nie im selben Prozess, aber die Pruefung kostet nichts.
@@ -40,7 +48,8 @@ if (!function_exists('lb_wurzel_ermitteln')) {
     {
         $d = __DIR__;
         for ($i = 0; $i < 8; $i++) {
-            if (is_dir($d . '/config/plugins') && is_dir($d . '/webfrontend')) {
+            if (is_dir($d . '/config/plugins') && is_dir($d . '/webfrontend')
+                && is_file($d . '/config/system/general.json')) {
                 return $d;
             }
             $eltern = dirname($d);
@@ -51,18 +60,41 @@ if (!function_exists('lb_wurzel_ermitteln')) {
     }
 }
 
+/* Die Wurzel: $LBHOMEDIR, wenn darunter config/plugins liegt, sonst die
+ * Suche aufwaerts (mit general.json). Findet sie nichts, gibt es KEINE
+ * Wurzel - sp_paths() arbeitet dann im Archivmodus auf dem eigenen Ordner.
+ *
+ * Bis 0.11.8 stand in sp_paths() und sp_t()
+ *     foreach (array(lb_wurzel_ermitteln(), '/home/loxberry/loxberry') as $k)
+ * hinter einem $LBHOMEDIR, das nur ein Verzeichnis sein musste. Gemessen am
+ * 18.09.2026 in WSL (Pruefung-Sprachsteuerung-0.11.9, messe_h2.sh): aus
+ * einem ausgepackten Archiv las die Bibliothek die Konfiguration eines
+ * Baums unter /home/loxberry/loxberry, schrieb dort aus dessen Zweitschrift
+ * eine sprachsteuerung.json und lud dessen Sprachdatei (B1-B4); ein auf
+ * nichts zeigendes $LBHOMEDIR blieb als Wurzel stehen (B5), ein beliebiges
+ * Verzeichnis wurde Wurzel (B6, B8). Unter /home/loxberry/loxberry liegt auf
+ * einem LoxBerry keine Wurzel (Regeln/06) - der feste Pfad traf nie die
+ * eigene Anlage.
+ *
+ * Fuer $LBHOMEDIR wird config/plugins verlangt, nicht general.json: die
+ * Attrappe Werkzeuge/lb, gegen die rendern.py und wirkungstest.py die
+ * Oberflaeche laufen lassen, traegt keine general.json. */
+function sp_lbhome()
+{
+    $home = getenv('LBHOMEDIR');
+    if ($home && is_dir($home . '/config/plugins')) {
+        return $home;
+    }
+    return lb_wurzel_ermitteln();
+}
+
 function sp_paths()
 {
     static $p = null;
     if ($p !== null) {
         return $p;
     }
-    $home = getenv('LBHOMEDIR');
-    if (!$home || !is_dir($home)) {
-        foreach (array(lb_wurzel_ermitteln(), '/home/loxberry/loxberry') as $k) {
-            if (is_dir($k)) { $home = $k; break; }
-        }
-    }
+    $home = sp_lbhome();
     // Der Pluginordner ergibt sich aus dem Ablageort dieser Datei. Der
     // MD5-Schluessel aus der plugindatabase.json wird bewusst NICHT benutzt.
     $dir = basename(dirname(__FILE__));
@@ -1510,15 +1542,8 @@ function sp_t($schluessel)
 {
     static $texte = null;
     if ($texte === null) {
-        $home = getenv('LBHOMEDIR');
-        if (!$home || !is_dir($home)) {
-            foreach (array(lb_wurzel_ermitteln(), '/home/loxberry/loxberry') as $k) {
-                if (is_dir($k)) {
-                    $home = $k;
-                    break;
-                }
-            }
-        }
+        // Wie in sp_paths() (siehe sp_lbhome(); Faelle B4, B8, C4).
+        $home = sp_lbhome();
         $ordner = basename(dirname(__FILE__));
         $pfad = $home . '/templates/plugins/' . $ordner . '/lang';
         if (!is_dir($pfad)) {

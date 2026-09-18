@@ -37,13 +37,20 @@ def lb_wurzel_ermitteln():
     """Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
 
     Vom eigenen Ablageort aufwaerts, bis ein Verzeichnis gefunden ist, das
-    config/plugins UND webfrontend enthaelt. Trifft die uebliche
-    Installation genauso wie eine an einem anderen Ort.
+    config/plugins, webfrontend UND config/system/general.json enthaelt.
+    Trifft die uebliche Installation genauso wie eine an einem anderen Ort.
+
+    general.json unterscheidet einen LoxBerry von einem Rest aus
+    Pruefstaenden: ein LoxBerry hat sie immer, ein solcher Rest nie
+    (Regeln/06). Ohne sie galt ein fremder Baum mit config/plugins und
+    webfrontend als Wurzel (gemessen am 18.09.2026 in WSL,
+    Pruefung-Sprachsteuerung-0.11.9, messe_nachtrag2.sh, Faelle W1-W7).
     """
     d = os.path.dirname(os.path.abspath(__file__))
     for _ in range(8):
         if os.path.isdir(os.path.join(d, "config", "plugins")) \
-                and os.path.isdir(os.path.join(d, "webfrontend")):
+                and os.path.isdir(os.path.join(d, "webfrontend")) \
+                and os.path.isfile(os.path.join(d, "config", "system", "general.json")):
             return d
         eltern = os.path.dirname(d)
         if eltern == d:
@@ -65,22 +72,46 @@ def _wurzel_pruefen(k) -> bool:
     127.0.0.1, also genau die Fehlmessung, die 0.9.7 abgestellt hatte.
     """
     try:
-        return (k / "config" / "plugins").is_dir() and (k / "webfrontend").is_dir()
+        return ((k / "config" / "plugins").is_dir() and (k / "webfrontend").is_dir()
+                and (k / "config" / "system" / "general.json").is_file())
     except OSError:
         return False
 
 
-if len(SELF.parents) >= 3 and _wurzel_pruefen(SELF.parents[2]):
+# Die Wurzel wird GELESEN, bevor sie aus dem Ablageort gerechnet wird
+# (Regeln/03: Stufe 1 ist $LBHOMEDIR). Bis 0.11.8 stand SELF.parents[2]
+# an erster Stelle und gewann, sobald dort config/plugins und webfrontend
+# lagen - aus einem Pruefarchiv unter <Wurzel>/pruefung/<plugin>/bin ist das
+# die LAUFENDE Installation, gleichgueltig, wohin $LBHOMEDIR zeigt. Gemessen
+# am 18.09.2026 in WSL (Pruefung-Sprachsteuerung-0.11.9, Faelle P1 und P4;
+# Bauart H1 aus Bestand-2026-09-18/klasse-H).
+#
+# Die Reihenfolge zaehlt: die Auskunft von LoxBerry selbst, wenn sie eine
+# Wurzel bezeichnet; dann der Ablageort, wenn er nachweislich in einer liegt;
+# dann die Suche aufwaerts. Jede Stufe verlangt config/system/general.json
+# (Regeln/06). Ohne Wurzel wird abgebrochen, nicht geraten: bis 0.11.8
+# stand am Ende wieder die feste Zahl "..", SELF.parents[2] - aus einem
+# fremden Baum oder einer Kopie heraus genau der Baum, den die Suche gerade
+# abgelehnt hatte. Gemessen am 18.09.2026: der Selbsttest des Freigabetors
+# legte in der Kettenkopie log/plugins/sprachsteuerung an, in WSL legte
+# der Selbsttest-Aufruf aus einem fremden Baum dort log/plugins/... an
+# (W1b).
+# Bauart: Weissware 0.9.28 (_lbhome_ermitteln).
+_umgebung = os.environ.get("LBHOMEDIR") or ""
+if _umgebung and _wurzel_pruefen(Path(_umgebung)):
+    LBHOME = Path(_umgebung)
+elif len(SELF.parents) >= 3 and _wurzel_pruefen(SELF.parents[2]):
     LBHOME = SELF.parents[2]
 else:
-    # Die Reihenfolge zaehlt: die Auskunft von LoxBerry selbst, dann die
-    # Suche aufwaerts, und erst als LETZTES wieder die feste Zahl "..".
-    # lb_wurzel_ermitteln() gibt bei Misserfolg eine LEERE Zeichenkette
-    # zurueck - daraus wuerde Path(".") und damit ein Schreibweg in das
-    # gerade aktuelle Verzeichnis. Genau das steht in REGELN_1 als
-    # "ein Pruefling schreibt dorthin, wo seine Umgebung hinzeigt".
-    _kandidat = os.environ.get("LBHOMEDIR") or lb_wurzel_ermitteln()
-    LBHOME = Path(_kandidat) if _kandidat else SELF.parents[2]
+    _kandidat = lb_wurzel_ermitteln()
+    if not _kandidat:
+        sys.stderr.write(
+            "FEHLER: Es wurde kein LoxBerry-Wurzelverzeichnis gefunden. "
+            "LBHOMEDIR bezeichnet keine, und oberhalb von %s traegt kein "
+            "Verzeichnis config/plugins, webfrontend und "
+            "config/system/general.json. Es wurde nichts angelegt.\n" % SELF)
+        raise SystemExit(1)
+    LBHOME = Path(_kandidat)
 
 # Aus dem entpackten Archiv heraus heisst der Ordner ueber bin/ nicht wie
 # das Plugin. Dann gilt die Auskunft von LoxBerry, sonst der feste Name -

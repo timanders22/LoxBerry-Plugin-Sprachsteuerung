@@ -41,16 +41,30 @@ SPERRE="$BASE/data/plugins/$PFOLDER.upgrade_laeuft"
 # Sie zaehlt nur, wenn sie eine Unixzeit traegt und hoechstens eine Stunde
 # alt ist. Eine abgebrochene Installation darf das Plugin nicht fuer immer
 # stilllegen; ein Zeitpunkt in der Zukunft ist keine laufende Installation.
+#
+# Ohne lesbare Uhr gilt eine liegende Marke (auch eine unlesbare) - die
+# Pruefung faellt geschlossen aus, wie sperre_gilt() in bin/dienst.sh. Bis
+# 0.11.8 stand hier 'MARKE_ALTER=$(( $(date +%s) - MARKE_WERT ))' ohne
+# Pruefung der Uhr: lieferte 'date' nichts, galt die Marke nicht, und ein
+# Dienst ohne PID-Datei lief waehrend der Installation weiter; eine Ausgabe
+# 'a[$(befehl)]' fuehrte die Rechnung aus. Gemessen am 18.09.2026 in WSL
+# (Pruefung-Sprachsteuerung-0.11.9, messe_nachtrag2.sh, Faelle Q2-Q5).
 MARKE_GILT=""
 if [ -f "$SPERRE" ]; then
+    MARKE_JETZT=$(date +%s 2>/dev/null)
     MARKE_WERT=$(cat "$SPERRE" 2>/dev/null)
-    case "$MARKE_WERT" in
-        ''|*[!0-9]*) ;;
+    case "$MARKE_JETZT" in
+        ''|*[!0-9]*) MARKE_GILT=ja ;;
         *)
-            MARKE_ALTER=$(( $(date +%s) - MARKE_WERT ))
-            if [ "$MARKE_ALTER" -ge -300 ] && [ "$MARKE_ALTER" -lt 3600 ]; then
-                MARKE_GILT=ja
-            fi
+            case "$MARKE_WERT" in
+                ''|*[!0-9]*) ;;
+                *)
+                    MARKE_ALTER=$((MARKE_JETZT - MARKE_WERT))
+                    if [ "$MARKE_ALTER" -ge -300 ] && [ "$MARKE_ALTER" -lt 3600 ]; then
+                        MARKE_GILT=ja
+                    fi
+                    ;;
+            esac
             ;;
     esac
 fi

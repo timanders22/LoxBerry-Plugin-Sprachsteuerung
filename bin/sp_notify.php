@@ -33,7 +33,11 @@ function sp_notify_wurzel()
 {
     $d = __DIR__;
     for ($i = 0; $i < 8; $i++) {
-        if (is_dir($d . '/config/plugins') && is_dir($d . '/webfrontend')) {
+        // general.json wie in sp_lib.php: sonst band dieses Skript aus einem
+        // Archiv unter einem Pruefstand-Rest dessen libs/phplib ein - fremder
+        // Code (gemessen 18.09.2026, messe_h2.sh, Fall N1).
+        if (is_dir($d . '/config/plugins') && is_dir($d . '/webfrontend')
+            && is_file($d . '/config/system/general.json')) {
             return $d;
         }
         $eltern = dirname($d);

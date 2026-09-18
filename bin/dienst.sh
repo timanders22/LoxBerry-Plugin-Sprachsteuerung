@@ -43,8 +43,90 @@ if [ "$(id -u)" = "0" ] && id loxberry >/dev/null 2>&1; then
 fi
 
 SELF=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)          # <home>/bin/plugins/<ordner>
-PNAME=$(basename "$SELF")
-LBHOMEDIR=$(cd "$SELF/../../.." && pwd)
+
+# ---------- Wurzel und Ordnername: GELESEN, nicht geraten ----------
+#
+# Bis 0.11.8 stand hier
+#     PNAME=$(basename "$SELF")
+#     LBHOMEDIR=$(cd "$SELF/../../.." && pwd)
+# und weiter unten ein 'mkdir -p "$PDATA" "$PLOG"' auf oberster Ebene. Der
+# eigene Ablageort war damit die EINZIGE Quelle: ein gesetztes $LBHOMEDIR
+# wurde ueberschrieben, der Ordnername kam aus dem Verzeichnisnamen, und der
+# geratene Pfad wurde bei JEDEM Aufruf angelegt - auch bei 'status'.
+# Gemessen am 18.09.2026 in WSL (Pruefung-Sprachsteuerung-0.11.9, rot
+# vorher; Bauart H1 aus Bestand-2026-09-18/klasse-H):
+#   - 'dienst.sh status' aus einem Pruefarchiv unter
+#     <Wurzel>/pruefung/sprachsteuerung/bin legte in der LAUFENDEN
+#     Installation data/plugins/bin und log/plugins/bin an (Fall F6a);
+#   - aus einem ausgepackten Archiv heraus wurde das gesetzte $LBHOMEDIR
+#     uebergangen: "gestoppt", waehrend der Dienst der Installation lief
+#     (F5a), und neben dem Archiv entstanden Ordner (F5b);
+#   - in der Upgrade-Luecke legten 'status', ein abgewiesener Start und der
+#     Waechter den abgeraeumten Datenordner wieder an (F8a, F9a, F12a).
+#
+# Hausform (Regeln/03 und Regeln/06, lb_wurzel_suchen): Stufe 1 ist die
+# gelesene Umgebung, Stufe 2 die Aufwaertssuche nach einem Verzeichnis, das
+# nachweislich eine Wurzel IST - config/plugins, data/plugins UND
+# config/system/general.json (ohne den dritten Nachweis gilt ein fremder Baum
+# mit den beiden Ordnern als Wurzel, Fall F16).
+sp_wurzel_taugt() {          # $1 Kandidat
+    [ -n "$1" ] && [ -d "$1/config/plugins" ] && [ -d "$1/data/plugins" ]
+}
+sp_wurzel_suchen() {
+    sp_v="$SELF"
+    sp_i=0
+    while [ -n "$sp_v" ] && [ "$sp_v" != "/" ] && [ "$sp_i" -lt 8 ]; do
+        if sp_wurzel_taugt "$sp_v" && [ -f "$sp_v/config/system/general.json" ]; then
+            echo "$sp_v"
+            return 0
+        fi
+        sp_v=$(dirname "$sp_v")
+        sp_i=$((sp_i + 1))
+    done
+    return 1
+}
+if ! sp_wurzel_taugt "${LBHOMEDIR:-}"; then
+    LBHOMEDIR=$(sp_wurzel_suchen)
+fi
+# Der Ordnername ebenso. $LBPPLUGINDIR steht am Geraet in einer Cron-Schale
+# nie (Regeln/03, am 17.09.2026 gemessen) - dann traegt der Ablageort, und
+# das ist bei einer regulaeren Installation genau richtig.
+if [ -n "${LBPPLUGINDIR:-}" ]; then
+    PNAME=$(basename "$LBPPLUGINDIR")
+else
+    PNAME=$(basename "$SELF")
+fi
+
+# Die Gegenprobe steht VOR dem ersten Anlegen. Ein Aufruf, der weder aus
+# <Wurzel>/bin/plugins/<ordner> kommt noch ein eingerichtetes Plugin
+# benennt, kommt aus einem ausgepackten Archiv oder einem Pruefordner: er
+# faellt geschlossen aus und legt nichts an (F6).
+if [ -z "$LBHOMEDIR" ] || [ ! -d "$LBHOMEDIR" ]; then
+    echo "FEHLER: Es wurde kein LoxBerry-Wurzelverzeichnis gefunden."
+    echo "        \$LBHOMEDIR ist nicht gesetzt, und oberhalb von $SELF traegt"
+    echo "        kein Verzeichnis config/plugins, data/plugins und"
+    echo "        config/system/general.json. Es wurde nichts angelegt."
+    exit 1
+fi
+LBH_R=$(cd "$LBHOMEDIR" 2>/dev/null && pwd -P)
+if [ "$SELF" != "$LBH_R/bin/plugins/$PNAME" ] \
+   && [ ! -d "$LBHOMEDIR/config/plugins/$PNAME" ]; then
+    echo "FEHLER: '$PNAME' ist unter $LBHOMEDIR kein eingerichtetes Plugin,"
+    echo "        und $SELF ist nicht dessen bin-Ordner."
+    echo "        Der Aufruf kommt offenbar aus einem ausgepackten Archiv oder"
+    echo "        einem Pruefordner. Es wurde nichts angelegt."
+    echo "        Abhilfe: LBHOMEDIR und LBPPLUGINDIR setzen oder dienst.sh aus"
+    echo "        <LoxBerry-Wurzel>/bin/plugins/<ordner> aufrufen."
+    exit 1
+fi
+# Dienstskript und venv kommen aus der gelesenen Wurzel, nicht aus dem
+# Ablageort - sonst verwaltete eine Datei aus dem Archiv den Dienst des
+# ARCHIVS (F5a). 'pwd -P' wie bei SELF: aus der Installation heraus ist das
+# zeichengenau derselbe Pfad wie bisher "$SELF", ein von einer frueheren
+# Fassung gestarteter Dienst bleibt erkannt - auch ueber einen Verweis auf
+# die Wurzel (F13).
+PBIN=$(cd "$LBHOMEDIR/bin/plugins/$PNAME" 2>/dev/null && pwd -P)
+[ -n "$PBIN" ] || PBIN="$LBHOMEDIR/bin/plugins/$PNAME"
 PDATA="$LBHOMEDIR/data/plugins/$PNAME"
 PLOG="$LBHOMEDIR/log/plugins/$PNAME"
 PCONFIG="$LBHOMEDIR/config/plugins/$PNAME"
@@ -67,10 +149,15 @@ SPERRE="$LBHOMEDIR/data/plugins/$PNAME.upgrade_laeuft"
 # gehoert deshalb in eine eigene.
 LOGDATEI="$PLOG/sprachsteuerung.log"
 STARTLOG="$PLOG/start.log"
-SKRIPT="$SELF/sprachsteuerung_dienst.py"
-PY="$SELF/venv/bin/python3"
+SKRIPT="$PBIN/sprachsteuerung_dienst.py"
+PY="$PBIN/venv/bin/python3"
 
-mkdir -p "$PDATA" "$PLOG" 2>/dev/null
+# Angelegt wird erst dort, wo wirklich geschrieben wird - beim Start und im
+# Waechter -, nicht bei jedem Aufruf. Bis 0.11.8 stand hier ein unbedingtes
+# 'mkdir -p "$PDATA" "$PLOG"' (siehe oben, F6a, F8a, F9a, F12a).
+ordner_anlegen() {
+    mkdir -p "$PDATA" "$PLOG" 2>/dev/null
+}
 
 laeuft() {
     [ -f "$PID" ] || return 1
@@ -90,11 +177,26 @@ laeuft() {
 # nicht als frisch - eine vorgestellte Uhr sperrte den Dienst sonst bis zu
 # dem Zeitpunkt, den sie nennt. Ein paar Minuten Vorlauf sind aber eine
 # nachgestellte Uhr und kein Grund, die Sperre zu verwerfen.
+#
+# Ohne lesbare Uhr faellt die Pruefung GESCHLOSSEN aus: eine liegende Marke
+# gilt dann, auch eine unlesbare. Bis 0.11.8 stand hier
+#     ALTER=$(( $(date +%s) - SEIT ))
+# ohne Pruefung der Uhr. Lieferte 'date' nichts, war das Alter -SEIT, die
+# Marke galt nicht, und der Dienst startete mitten in der Aktualisierung;
+# eine Ausgabe wie 'a[$(befehl)]' fuehrte die Rechnung sogar aus (Klasse M,
+# Bestand-2026-09-18/klasse-M). Gemessen am 18.09.2026 in WSL
+# (Pruefung-Sprachsteuerung-0.11.9, Faelle U1-U3, U9, U10: vorher 1 Dienst
+# bzw. Befehl ausgefuehrt, nachher 0). Ohne Marke aendert die fehlende Uhr
+# nichts (U4). Bauart: Bewaesserung 0.9.31 marke_sperrt().
+# Beide Zahlen werden VOR der Rechnung als Zahl geprueft - bash wertet in
+# $(( )) den Inhalt aus (U5, U9).
 sperre_gilt() {
     [ -f "$SPERRE" ] || return 1
+    JETZT=$(date +%s 2>/dev/null)
+    case "$JETZT" in ''|*[!0-9]*) return 0 ;; esac
     SEIT=$(cat "$SPERRE" 2>/dev/null)
     case "$SEIT" in ''|*[!0-9]*) return 1 ;; esac
-    ALTER=$(( $(date +%s) - SEIT ))
+    ALTER=$((JETZT - SEIT))
     [ "$ALTER" -ge -300 ] && [ "$ALTER" -lt 3600 ]
 }
 
@@ -121,6 +223,10 @@ starten() {
         echo "FEHLER: Konfiguration fehlt ($PCONFIG/sprachsteuerung.json). Erst die Oberflaeche oeffnen."
         return 1
     fi
+    # Erst hier anlegen: alle Abweisungen stehen davor und schreiben nichts
+    # (F9a: ein wegen der Marke abgewiesener Start legte bis 0.11.8 den
+    # Datenordner in der Upgrade-Luecke wieder an).
+    ordner_anlegen
     touch "$SOLL"
     # Ausgabe geht in die Logdatei. Das Python-Skript protokolliert deshalb
     # NICHT zusaetzlich nach stdout - sonst stuende jede Zeile doppelt darin.
@@ -191,10 +297,18 @@ case "$1" in
         # Installation im Minutentakt seine Zeile auf die Ramdisk und das
         # Protokoll behauptete Startversuche, die keine sind.
         if sperre_gilt; then
+            # Nur den Protokollordner: der Datenordner ist in der Luecke von
+            # purge_installation abgeraeumt und bleibt es, bis postinstall.sh
+            # ihn zurueckholt (F12a).
+            mkdir -p "$PLOG" 2>/dev/null
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Waechter: eine Installation laeuft - kein Start." >> "$STARTLOG"
             exit 0
         fi
         if [ -f "$SOLL" ] && ! laeuft; then
+            # log/ liegt auf einer RAM-Platte (Regeln/06); fehlt der Ordner,
+            # scheitert die Umleitung nach start.log - und mit ihr der Start
+            # selbst (F11).
+            ordner_anlegen
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Waechter: Dienst lief nicht, wird neu gestartet." >> "$STARTLOG"
             starten >> "$STARTLOG" 2>&1
         fi

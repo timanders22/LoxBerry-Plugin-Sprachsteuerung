@@ -29,13 +29,20 @@ def lb_wurzel_ermitteln():
     """Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
 
     Vom eigenen Ablageort aufwaerts, bis ein Verzeichnis gefunden ist, das
-    config/plugins UND webfrontend enthaelt. Trifft die uebliche
-    Installation genauso wie eine an einem anderen Ort.
+    config/plugins, webfrontend UND config/system/general.json enthaelt.
+    Trifft die uebliche Installation genauso wie eine an einem anderen Ort.
+
+    general.json unterscheidet einen LoxBerry von einem Rest aus
+    Pruefstaenden: ein LoxBerry hat sie immer, ein solcher Rest nie
+    (Regeln/06). Ohne sie galt ein fremder Baum mit config/plugins und
+    webfrontend als Wurzel (gemessen am 18.09.2026 in WSL,
+    Pruefung-Sprachsteuerung-0.11.9, messe_nachtrag2.sh, Faelle W1-W7).
     """
     d = os.path.dirname(os.path.abspath(__file__))
     for _ in range(8):
         if os.path.isdir(os.path.join(d, "config", "plugins")) \
-                and os.path.isdir(os.path.join(d, "webfrontend")):
+                and os.path.isdir(os.path.join(d, "webfrontend")) \
+                and os.path.isfile(os.path.join(d, "config", "system", "general.json")):
             return d
         eltern = os.path.dirname(d)
         if eltern == d:
@@ -533,8 +540,29 @@ def laden(pfad: Path) -> Verstehen:
 
 
 if __name__ == "__main__":
+    # Die Wurzel wie in sprachsteuerung_dienst.py: zuerst $LBHOMEDIR, wenn es
+    # eine bezeichnet, dann die Suche - beide mit general.json. Ohne Wurzel
+    # wird abgebrochen. Bis 0.11.8 fragte der Direktaufruf $LBHOMEDIR nicht,
+    # nahm einen fremden Baum ohne general.json als Wurzel und las dessen
+    # saetze.json; ohne Fund wurde "" + "/config/plugins/..." ein Pfad unter
+    # / (gemessen am 18.09.2026, messe_nachtrag2.sh, Faelle W5, W10).
+    _umgebung = os.environ.get("LBHOMEDIR") or ""
+    if _umgebung and os.path.isdir(os.path.join(_umgebung, "config", "plugins")) \
+            and os.path.isdir(os.path.join(_umgebung, "webfrontend")) \
+            and os.path.isfile(os.path.join(_umgebung, "config", "system", "general.json")):
+        _wurzel = _umgebung
+    else:
+        _wurzel = lb_wurzel_ermitteln()
+    if not _wurzel:
+        sys.stderr.write(
+            "FEHLER: Es wurde kein LoxBerry-Wurzelverzeichnis gefunden. "
+            "LBHOMEDIR bezeichnet keine, und oberhalb von %s traegt kein "
+            "Verzeichnis config/plugins, webfrontend und "
+            "config/system/general.json. Es wurde nichts gelesen.\n"
+            % Path(__file__).resolve().parent)
+        sys.exit(1)
     kandidaten = [Path(p) for p in (
-        lb_wurzel_ermitteln() + "/config/plugins/sprachsteuerung/saetze.json",
+        _wurzel + "/config/plugins/sprachsteuerung/saetze.json",
         str(Path(__file__).resolve().parent.parent / "templates" / "saetze_de.json"),
     )]
     quelle = next((k for k in kandidaten if k.is_file()), kandidaten[-1])

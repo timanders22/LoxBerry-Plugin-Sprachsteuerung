@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.11.8
+Version 0.11.9
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,81 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.11.9
+
+- **Ein bloßes `dienst.sh status` legt keine Ordner mehr an, und die gesetzte
+  Umgebung gilt wieder.** `bin/dienst.sh` rechnete die LoxBerry-Wurzel als
+  „drei Ebenen über dem eigenen Ablageort" aus, nahm den Ordnernamen aus dem
+  Verzeichnisnamen und überschrieb dabei ein gesetztes `$LBHOMEDIR`; gleich
+  danach legte es Daten- und Protokollordner an — bei **jedem** Aufruf.
+  **Gemessen am 18.09.2026** in WSL mit einem Platzhalter als Dienst: aus
+  einem Prüfarchiv unter `<LoxBerry-Wurzel>/pruefung/sprachsteuerung/bin`
+  legte `status` in der laufenden Installation `data/plugins/bin` und
+  `log/plugins/bin` an; aus einem ausgepackten Archiv heraus, mit `LBHOMEDIR`
+  und `LBPPLUGINDIR` auf die Installation gesetzt, meldete es „gestoppt",
+  obwohl der Dienst lief; und in der Lücke eines Updates legten `status`, ein
+  wegen der Marke abgewiesener Start und der Minutentakt den abgeräumten
+  Datenordner wieder an.
+  Jetzt kommt die Wurzel zuerst aus `$LBHOMEDIR`, sonst aus einer Suche
+  aufwärts nach `config/plugins`, `data/plugins` **und**
+  `config/system/general.json`; der Ordnername aus `$LBPPLUGINDIR`, sonst aus
+  dem Ablageort. Liegt `dienst.sh` weder in `<LoxBerry-Wurzel>/bin/plugins/<ordner>`
+  noch benennt der Aufruf ein eingerichtetes Plugin, endet es mit einer
+  Fehlermeldung und legt nichts an. Dienstskript und virtuelle Umgebung kommen
+  aus der gelesenen Wurzel. Angelegt wird nur noch beim Start (nach allen
+  Abweisungen) und im Minutentakt — dort in der Lücke nur der
+  Protokollordner.
+- **Dieselbe Rechnung stand in `bin/sprachsteuerung_dienst.py` und
+  `bin/hardware.py`.** Beide nahmen die Wurzel drei Ebenen über `bin/`,
+  sobald dort eine lag, und fragten `$LBHOMEDIR` erst danach — aus einem
+  Prüfarchiv unter der Wurzel arbeiteten sie damit auf der laufenden
+  Installation, auch wenn `$LBHOMEDIR` woandershin zeigte (gemessen). Jetzt
+  gilt zuerst `$LBHOMEDIR`, wenn es eine Wurzel bezeichnet.
+- **Ohne lesbare Uhr startet der Dienst während eines Updates nicht mehr.**
+  `dienst.sh` rechnete das Alter der Update-Marke mit der Ausgabe von `date`,
+  ohne sie zu prüfen. Lieferte `date` nichts, galt die Marke nicht — der
+  Dienst startete mitten in der Aktualisierung, per `start` wie per
+  Minutentakt (gemessen am 18.09.2026 in WSL: je **1** Dienst; eine Ausgabe
+  der Form `a[$(befehl)]` führte die Schale sogar aus). Jetzt wird die Uhr
+  vor der Rechnung als Zahl geprüft, und ohne lesbare Uhr gilt eine liegende
+  Marke — die Prüfung fällt geschlossen aus (nachher je **0** Dienste). Ohne
+  Marke ändert eine fehlende Uhr nichts. Der Markeninhalt wurde schon vorher
+  als Zahl geprüft, der Vorlauf von 300 s galt schon; beides hat jetzt eigene
+  Fälle (290 s aus der Zukunft sperrt, 310 s nicht).
+- **Dasselbe in `postinstall.sh`.** Dort entscheidet die Marke, ob ein Dienst
+  ohne PID-Datei während der Installation angehalten wird; ohne lesbare Uhr
+  galt sie nicht, und der Dienst lief weiter (gemessen: der Köder überlebte
+  bei leerer Uhr, bei `x` und bei unlesbarer Marke ohne Uhr). Jetzt wird die
+  Uhr auch hier zuerst geprüft, und ohne sie gilt die Marke.
+- **Die Python-Dateien erkennen eine LoxBerry-Wurzel nur noch mit
+  `config/system/general.json` und raten sonst nicht mehr.**
+  `sprachsteuerung_dienst.py`, `hardware.py` und `verstehen.py` hielten jedes
+  Verzeichnis mit `config/plugins` und `webfrontend` für eine Wurzel, und
+  ohne Fund nahmen die beiden ersten zuletzt doch wieder „drei Ebenen über
+  `bin/`". Gemessen am 18.09.2026: `--selbsttest` aus einem fremden Baum legte
+  dort `log/plugins/sprachsteuerung/` an, `verstehen.py` las dessen
+  Satzdatei, und der Selbsttest des Freigabetors schrieb in einer Kopie auf
+  dem Bau-Rechner ein Protokoll neben den Prüfling. Jetzt enden alle drei
+  ohne Wurzel mit einer Fehlermeldung und Rückgabe 1 und legen nichts an;
+  `verstehen.py` fragt im Direktaufruf zuerst `$LBHOMEDIR`. Auf einem
+  LoxBerry ändert sich nichts — dort liegt `general.json` immer.
+- **Dasselbe in der Oberfläche und in `bin/sp_notify.php`.** Die Bibliothek
+  `sp_lib.php` suchte die Wurzel ebenfalls ohne `general.json`, nahm jedes
+  gesetzte `LBHOMEDIR`, sobald es ein Verzeichnis war (ein nicht vorhandenes
+  blieb sogar stehen), und fiel zuletzt fest auf `/home/loxberry/loxberry`
+  zurück. Gemessen am 18.09.2026 in WSL: aus einem ausgepackten Archiv las sie
+  die Konfiguration eines fremden Baums, schrieb dort aus dessen Zweitschrift
+  eine `sprachsteuerung.json` und lud dessen Sprachdatei; `sp_notify.php` band
+  aus einem Archiv unter einem Prüfstand-Rest dessen LoxBerry-Bibliotheken
+  ein. Jetzt gilt `LBHOMEDIR` nur, wenn darunter `config/plugins` liegt, die
+  Suche verlangt `general.json`, und ohne Wurzel arbeitet die Oberfläche wie
+  bisher im Archivmodus auf dem eigenen Ordner; `sp_notify.php` bricht ab.
+
+Gegenproben, vorher wie nachher grün: aus der Installation heraus, aus `/`,
+mit und ohne `LBHOMEDIR`, über einen Verweis auf die Wurzel, Neuinstallation,
+Minutentakt ohne Protokollordner, die Upgrade-Marke mit ihren 300 s Vorlauf.
+Nicht am Gerät gemessen.
 
 ## Neu in 0.11.8
 
