@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.11.7
+Version 0.11.8
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,45 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.11.8
+
+- **Ein Update beendet keinen fremden Prozess mehr.** `preupgrade.sh` schickte
+  bis 0.11.7 beide Signale — erst das weiche, zwei Sekunden später das harte —
+  ungeprüft an die Zahl aus `dienst.pid`. Prozessnummern werden aber
+  wiederverwendet: liegt die Datei von einem früheren Lauf herum und trägt ihre
+  Zahl inzwischen ein anderes Programm, traf es genau dieses.
+  **Gemessen am 18.09.2026** in WSL (Wegwerfbaum unter `/tmp`): ein Prozess
+  `sleep 600`, der mit dem Plugin nichts zu tun hat, seine Nummer in
+  `dienst.pid` — das Hakenskript meldete `<INFO> Laufender Dienst angehalten.`
+  und der fremde Prozess war tot.
+  Seit 0.11.8 wird vor **jedem** Signal argumentweise geprüft, wem die Nummer
+  gehört: `argv[0]` muss ein Python sein und `argv[1]` genau der eigene
+  Dienstpfad. Gehört sie einem anderen, wird nichts beendet, die PID-Datei
+  aufgeräumt und das im Protokoll gesagt. Auch vor dem harten Signal wird
+  erneut nachgesehen — in den Sekunden davor kann der Dienst enden und seine
+  Nummer weitergehen.
+
+- **Dieselbe Prüfung an allen Stellen der Linie.** `uninstall/uninstall`
+  verglich nur `argv[1]`; ein `vim <dienstpfad>` oder ein Sicherungslauf mit
+  dem Pfad als erstem Argument wäre damit als „der Dienst" durchgegangen.
+  `postinstall.sh` suchte mit `pgrep -f` über die **ganze** Befehlszeile —
+  gemessen hat das ein `tail -f <dienstpfad>` desselben Benutzers getroffen und
+  beendet. Und die Oberfläche entschied mit einem `strpos` über den Dateinamen;
+  sie meldete denselben `tail`-Prozess als laufenden Dienst, und mit ihr die
+  Statuszeile, der Reiter *Test* und der Endpunkt (`OK=1`). Alle drei prüfen
+  jetzt argumentweise. `bin/dienst.sh` tat das schon vorher und ist unverändert.
+
+- **Ein Dienst ohne PID-Datei geht beim Update mit.** Er kann von Hand
+  gestartet worden sein oder die Datei verloren haben; bis 0.11.7 lief er durch
+  das ganze Update weiter und schrieb in den Datenordner, den der Installer
+  gerade abräumt (nachgestellt: hinterher lief noch einer). `preupgrade.sh`
+  sucht ihn jetzt über `/proc`, pfadgenau und nur beim Benutzer des Dienstes,
+  und meldet, wenn es einen gab. `postinstall.sh` hat diesen Durchgang seit
+  0.11.7 — zwischen beiden liegt rund eine Minute, in der bisher nichts prüfte.
+
+Der Prüfstand dazu steht unter `Pruefung-Sprachsteuerung-0.11.8/`: 20 Fälle,
+vorher 16 rot, nachher 0 rot, jede Korrektur einzeln zurückgebaut.
 
 ## Neu in 0.11.7
 

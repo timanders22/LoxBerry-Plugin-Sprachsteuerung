@@ -742,6 +742,25 @@ function sp_zeichen($s)
     return $n === false ? strlen((string) $s) : $n;
 }
 
+/**
+ * Die Nummer des laufenden Dienstes, oder 0.
+ *
+ * Bis 0.11.7 entschied hier ein strpos() ueber die ganze Befehlszeile. Das
+ * ist eine Teilzeichenkette, kein Argument: gemessen am 18.09.2026 in WSL
+ * (Fall oberflaeche_koeder) meldete die Funktion ein "tail -f <dienstpfad>"
+ * als laufenden Dienst - und mit ihm die Statuszeile, der Reiter Test und
+ * der Endpunkt (OK=1). Ein Editor mit der Datei offen faellt in dieselbe
+ * Klasse, und bei einer Zweitinstallation traf der blosse Dateiname auch den
+ * Nachbarn.
+ *
+ * Seit 0.11.8 argumentweise, wie in den Hakenskripten: /proc/<pid>/cmdline
+ * trennt die Argumente mit Nullbytes; argv[0] muss ein Python sein und
+ * argv[1] genau der eigene Dienstpfad.
+ *
+ * Diese Funktion schickt kein Signal. Sie ist aber die Vorstufe dazu - die
+ * Oberflaeche zeigt nach ihr den Knopf "Anhalten" - und sie beantwortet die
+ * Frage, auf die sich Loxone verlaesst.
+ */
 function sp_dienst_pid()
 {
     $f = sp_paths()['datadir'] . '/dienst.pid';
@@ -752,8 +771,33 @@ function sp_dienst_pid()
     if ($pid <= 0 || !is_dir('/proc/' . $pid)) {
         return 0;
     }
-    $cmd = (string) @file_get_contents('/proc/' . $pid . '/cmdline');
-    return strpos($cmd, 'sprachsteuerung_dienst.py') !== false ? $pid : 0;
+    return sp_ist_dienst($pid) ? $pid : 0;
+}
+
+/** Gehoert die Prozessnummer $pid dem eigenen Dienst? Argumentweise. */
+function sp_ist_dienst($pid)
+{
+    $pid = (int) $pid;
+    if ($pid <= 0) {
+        return false;
+    }
+    $roh = @file_get_contents('/proc/' . $pid . '/cmdline');
+    if ($roh === false || $roh === '') {
+        return false;
+    }
+    // Am Nullbyte trennen, nicht am Leerzeichen: ein Pfad darf Leerzeichen
+    // tragen. Das letzte Feld ist nach dem abschliessenden Nullbyte leer.
+    $argv = explode("\0", (string) $roh);
+    if (count($argv) < 2) {
+        return false;
+    }
+    // argv[0] ist der Interpreter - nur der Name, der Pfad ist beliebig
+    // (venv/bin/python3, /usr/bin/python3.11).
+    $a0 = basename($argv[0]);
+    if (preg_match('#^python[0-9.]*$#', $a0) !== 1) {
+        return false;
+    }
+    return $argv[1] === sp_paths()['bindir'] . '/sprachsteuerung_dienst.py';
 }
 
 function sp_dienst_soll()

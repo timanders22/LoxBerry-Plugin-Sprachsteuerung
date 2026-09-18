@@ -82,6 +82,11 @@ fi
 PDATA="$BASE/data/plugins/$PFOLDER"
 PBIN="$BASE/bin/plugins/$PFOLDER"
 PCONFIG="$BASE/config/plugins"
+# Der Benutzer, dem der Dienst gehoert. bin/dienst.sh steigt vor allem
+# anderen auf loxberry ab (Zeile 41) - der Dienst laeuft also nie als root,
+# auch wenn dieses Skript als root aufgerufen wird. Wo es den Benutzer nicht
+# gibt (Pruefstand in WSL), gilt der eigene.
+SP_UID=$(id -u loxberry 2>/dev/null || id -u)
 
 # ---------------------------------------------------------------
 # 1. Dienst anhalten
@@ -95,10 +100,18 @@ PCONFIG="$BASE/config/plugins"
 # Argument gegen den vollen Pfad - so wird auch nicht der Dienst eines
 # zweiten Exemplars abgeschossen (LoxBerry haengt bei Namenskonflikt
 # 01, 02 ... an den Ordnernamen an).
+# Seit 0.11.8 wird zusaetzlich argv[0] geprueft. argv[1] allein reicht nicht:
+# "vim <dienstpfad>" oder "tail -f <dienstpfad>" tragen denselben vollen Pfad
+# als erstes Argument. Ein Interpreter muss davorstehen (Regeln/03,
+# "Prozesse argumentweise erkennen": zwei Bedingungen, nicht eine).
 ist_unser_dienst() {
     [ -r "/proc/$1/cmdline" ] || return 1
-    [ "$(tr '\0' '\n' < "/proc/$1/cmdline" 2>/dev/null | sed -n '2p')" \
-        = "$PBIN/sprachsteuerung_dienst.py" ]
+    tr '\0' '\n' 2>/dev/null < "/proc/$1/cmdline" | {
+        IFS= read -r a0 || exit 1
+        IFS= read -r a1 || exit 1
+        case "${a0##*/}" in python|python3|python3.*) ;; *) exit 1 ;; esac
+        [ "$a1" = "$PBIN/sprachsteuerung_dienst.py" ]
+    }
 }
 
 beenden() {
@@ -108,8 +121,18 @@ beenden() {
         kill -0 "$P" 2>/dev/null || return 0
         sleep 1
     done
-    kill -9 "$P" 2>/dev/null
-    sleep 1
+    # Vor dem harten Signal noch einmal nachsehen, WEM die Nummer jetzt
+    # gehoert. In den zehn Sekunden kann der Dienst enden und seine Nummer an
+    # einen fremden Vorgang gehen; ein "kill -9" auf die alte Zahl traefe dann
+    # ihn. Im Prueflauf mit einem Dienst nachgestellt, der auf das weiche
+    # Signal hin die Gestalt wechselt (Fall uninstall_wechselt, 18.09.2026).
+    if ist_unser_dienst "$P"; then
+        kill -9 "$P" 2>/dev/null
+        sleep 1
+    else
+        echo "<INFO> Die Nummer $P gehoert inzwischen einem fremden Vorgang -"
+        echo "<INFO> es wurde nicht hart beendet."
+    fi
     return 0
 }
 
@@ -128,6 +151,7 @@ fi
 # von Hand gestartet oder die Datei geloescht wurde.
 for D in /proc/[0-9]*; do
     P=$(basename "$D")
+    [ "$(stat -c %u "$D" 2>/dev/null)" = "$SP_UID" ] || continue
     if ist_unser_dienst "$P" && kill -0 "$P" 2>/dev/null; then
         beenden "$P"
         GEFUNDEN=1

@@ -67,21 +67,54 @@ trap 'rm -f "$SPERRE" 2>/dev/null' EXIT
 # wird er deshalb angehalten - auch einer OHNE PID-Datei: die hat
 # purge_installation mit dem Datenordner geloescht, 'dienst.sh stop' sieht
 # ihn dann nicht (Regeln/06, Bauweise Einspeisebremse 0.9.20, Punkt 3).
-# Nur die eigene Befehlszeile (pfadgenau, am Ende verankert) und nur der
-# eigene Benutzer - sonst traefe es den Dienst einer Zweitinstallation.
+# Nur die eigene Befehlszeile und nur der eigene Benutzer - sonst traefe es
+# den Dienst einer Zweitinstallation.
+#
+# Bis 0.11.7 stand hier "pgrep -u ... -f 'bin/plugins/<x>/...\.py$'". Das ist
+# eine Suche ueber die ganze Befehlszeile, nicht ueber ein Argument: gemessen
+# am 18.09.2026 in WSL (Fall postinstall_pfadkoeder) hat sie ein
+# "tail -f <dienstpfad>" desselben Benutzers getroffen und beendet. Ein
+# Editor mit der Datei offen faellt in dieselbe Klasse. Seit 0.11.8 deshalb
+# argumentweise: argv[0] ist ein Python, argv[1] ist genau der Dienstpfad.
+# Bauweise wie in preupgrade.sh und uninstall/uninstall dieser Fassung, nach
+# LoxBerry-Plugin-APC-UPS-1.2.11 (apc_ist_dienst).
+sp_ist_dienst() {   # $1 Prozessnummer, $2 Dienstpfad
+    [ -r "/proc/$1/cmdline" ] || return 1
+    tr '\0' '\n' 2>/dev/null < "/proc/$1/cmdline" | {
+        IFS= read -r a0 || exit 1
+        IFS= read -r a1 || exit 1
+        case "${a0##*/}" in python|python3|python3.*) ;; *) exit 1 ;; esac
+        [ "$a1" = "$2" ]
+    }
+}
+sp_dienste_suchen() {  # $1 Dienstpfad, $2 Benutzernummer
+    for d in /proc/[0-9]*; do
+        [ "$(stat -c %u "$d" 2>/dev/null)" = "$2" ] || continue
+        sp_ist_dienst "${d#/proc/}" "$1" && echo "${d#/proc/}"
+    done
+    return 0
+}
+# Der Dienst gehoert loxberry - bin/dienst.sh steigt dafuer eigens ab
+# (Zeile 41). Dieses Skript laeuft als root; "id -u" allein faende den Dienst
+# deshalb am Geraet gar nicht.
+SP_DIENST="$PBIN/sprachsteuerung_dienst.py"
+SP_UID=$(id -u loxberry 2>/dev/null || id -u)
 if [ -n "$MARKE_GILT" ]; then
     [ -x "$PBIN/dienst.sh" ] && "$PBIN/dienst.sh" stop >/dev/null 2>&1
-    WAISENMUSTER="bin/plugins/$PFOLDER/sprachsteuerung_dienst\.py\$"
-    if pgrep -u "$(id -u)" -f "$WAISENMUSTER" >/dev/null 2>&1; then
-        pkill -u "$(id -u)" -f "$WAISENMUSTER" 2>/dev/null
+    SP_WAISEN=$(sp_dienste_suchen "$SP_DIENST" "$SP_UID")
+    if [ -n "$SP_WAISEN" ]; then
+        kill $SP_WAISEN 2>/dev/null
         for _ in 1 2 3 4 5 6 7 8 9 10; do
-            pgrep -u "$(id -u)" -f "$WAISENMUSTER" >/dev/null 2>&1 || break
+            [ -n "$(sp_dienste_suchen "$SP_DIENST" "$SP_UID")" ] || break
             sleep 1
         done
-        pgrep -u "$(id -u)" -f "$WAISENMUSTER" >/dev/null 2>&1 \
-            && pkill -9 -u "$(id -u)" -f "$WAISENMUSTER" 2>/dev/null
-        # Die Wirkung pruefen, nicht den Rueckgabewert von pkill.
-        if pgrep -u "$(id -u)" -f "$WAISENMUSTER" >/dev/null 2>&1; then
+        # Vor dem harten Signal neu suchen, nicht die alte Liste benutzen:
+        # eine Nummer aus der ersten Runde kann inzwischen einem fremden
+        # Vorgang gehoeren.
+        SP_REST=$(sp_dienste_suchen "$SP_DIENST" "$SP_UID")
+        [ -n "$SP_REST" ] && kill -9 $SP_REST 2>/dev/null
+        # Die Wirkung pruefen, nicht den Rueckgabewert von kill.
+        if [ -n "$(sp_dienste_suchen "$SP_DIENST" "$SP_UID")" ]; then
             echo "<WARNING> Ein Dienst ohne PID-Datei lief waehrend der Installation"
             echo "<INFO> und liess sich nicht beenden. Bitte den LoxBerry neu starten."
         else
