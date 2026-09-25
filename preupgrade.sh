@@ -58,6 +58,10 @@ sp_ist_dienst() {   # $1 Prozessnummer, $2 Dienstpfad
     tr '\0' '\n' 2>/dev/null < "/proc/$1/cmdline" | {
         IFS= read -r a0 || exit 1
         IFS= read -r a1 || exit 1
+        # Ein drittes Argument (auch ein leeres) heisst Einmallauf wie
+        # --selbsttest, kein Dienst. Bis 0.11.9 fehlte diese Zeile (gemessen
+        # am 25.09.2026 in WSL, Pruefung-Sprachsteuerung-0.11.10, Fall D3).
+        IFS= read -r a2 && exit 1
         case "${a0##*/}" in python|python3|python3.*) ;; *) exit 1 ;; esac
         [ "$a1" = "$2" ]
     }
@@ -129,9 +133,40 @@ fi
 SP_WAISEN=$(sp_dienste_beenden "$SP_DIENST" "$SP_UID")
 [ -n "$SP_WAISEN" ] && echo "<INFO> Ein Dienst ohne PID-Datei lief und wurde beendet (PID $SP_WAISEN)."
 
+# Die Zweitschrift wird nur mit einem Stand erneuert, der INHALT traegt -
+# dieselbe Regel wie sp_config_hat_inhalt() und sp_saetze() in sp_lib.php:
+# die Konfiguration mit Aktionstoken, die Satzdatei mit 'regeln' oder
+# 'ziele'. Bis 0.11.9 stand hier ein blankes 'cp -p': eine Konfiguration
+# ohne Token (etwa '{}') ueberschrieb die gute Zweitschrift, und das Token,
+# an dem jede Loxone-Adresse haengt, war nach dem Update fort (gemessen am
+# 25.09.2026 in WSL, Pruefung-Sprachsteuerung-0.11.10, Fall Z1).
+sp_hat_inhalt() {   # $1 Datei, $2 aktionstoken | saetze
+    [ -s "$1" ] || return 1
+    python3 -c 'import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(1)
+if not isinstance(d, dict) or not d:
+    sys.exit(1)
+if sys.argv[2] == "saetze":
+    sys.exit(0 if ("regeln" in d or "ziele" in d) else 1)
+sys.exit(0 if str(d.get("aktionstoken") or "").strip() else 1)' "$1" "$2" 2>/dev/null
+}
 for f in sprachsteuerung.json saetze.json; do
     CF="$BASE/config/plugins/$PFOLDER/$f"
-    [ -f "$CF" ] && cp -p "$CF" "$BASE/config/plugins/$PFOLDER.backup.$f"
+    BK="$BASE/config/plugins/$PFOLDER.backup.$f"
+    [ -f "$CF" ] || continue
+    MERKMAL=aktionstoken
+    [ "$f" = saetze.json ] && MERKMAL=saetze
+    if sp_hat_inhalt "$CF" "$MERKMAL"; then
+        cp -p "$CF" "$BK"
+    elif [ -f "$BK" ]; then
+        echo "<WARNING> $f traegt keinen Inhalt - die vorhandene Zweitschrift bleibt unveraendert:"
+        echo "<WARNING> $BK"
+    else
+        echo "<WARNING> $f traegt keinen Inhalt - es wurde keine Zweitschrift angelegt."
+    fi
 done
 CF=""
 chmod 600 "$BASE/config/plugins/$PFOLDER.backup.sprachsteuerung.json" 2>/dev/null

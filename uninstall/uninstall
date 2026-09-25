@@ -46,8 +46,9 @@
 #   4. Die Container. Die werden ABSICHTLICH NICHT angefasst - siehe
 #      unten.
 #
-# Was NICHT aufgeraeumt werden muss: MQTT. Der Dienst sendet mit
-# "publish", nicht mit "retain".
+#   5. Die zurueckbehaltenen MQTT-Themen (Abschnitt 1b). Bis 0.11.9 stand
+#      hier "Was NICHT aufgeraeumt werden muss: MQTT" - das war seit 0.11.5
+#      falsch, seither gehen Zustaende mit "retain" hinaus.
 
 ARGV3=$3
 ARGV5=$5
@@ -62,21 +63,33 @@ BASE="${ARGV5:-$LBHOMEDIR}"
 # <home>/data/plugins/<ordner>/uninstall/. Der Plugin-Pruefer sieht es
 # aber unter .../uploads/<zufall>/uninstall/ - dort sind es andere
 # Ebenen, und eine feste Zahl ist nur die naechste Wette.
-if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
-    SUCH=$(dirname "$(readlink -f "$0")")
-    for _ in 1 2 3 4 5 6 7 8; do
-        if [ -d "$SUCH/config/plugins" ] && [ -d "$SUCH/webfrontend" ]; then
-            BASE="$SUCH"
-            break
+#
+# Seit 0.11.10 zaehlt dabei nur ein Verzeichnis, das config/plugins,
+# data/plugins UND config/system/general.json traegt (Regeln/06). Bis 0.11.9
+# genuegten config/plugins und webfrontend: gemessen am 25.09.2026 in WSL
+# (Pruefung-Sprachsteuerung-0.11.10, Fall W1) entfernte dieses Skript aus
+# einem fremden Baum ohne general.json dessen Zweitschriften. Ohne
+# brauchbare Wurzel wird gewarnt, nicht vollzogen. $5 und $LBHOMEDIR gelten
+# nur mit config/plugins darunter. Bauart Weissware 0.9.30.
+sp_wurzel_suchen() {
+    v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd)
+    i=0
+    while [ -n "$v" ] && [ "$v" != "/" ] && [ $i -lt 8 ]; do
+        if [ -d "$v/config/plugins" ] && [ -d "$v/data/plugins" ] \
+           && [ -f "$v/config/system/general.json" ]; then
+            printf '%s\n' "$v"; return 0
         fi
-        ELTERN=$(dirname "$SUCH")
-        [ "$ELTERN" = "$SUCH" ] && break
-        SUCH="$ELTERN"
+        v=$(dirname "$v"); i=$((i + 1))
     done
+    return 1
+}
+if [ -z "$BASE" ] || [ ! -d "$BASE/config/plugins" ]; then
+    BASE=$(sp_wurzel_suchen)
 fi
 if [ -z "$BASE" ] || [ ! -d "$BASE/config/plugins" ]; then
-    echo "<INFO> LoxBerry-Wurzel nicht ermittelbar - es wurde nichts entfernt."
-    exit 0
+    echo "<WARNING> Es wurde kein LoxBerry-Wurzelverzeichnis gefunden - nichts beendet, nichts entfernt."
+    echo "<WARNING> Liegen bleiben koennen config/plugins/$PFOLDER.backup.* mit Miniserver-Zugangsdaten."
+    exit 1
 fi
 
 PDATA="$BASE/data/plugins/$PFOLDER"
@@ -109,6 +122,10 @@ ist_unser_dienst() {
     tr '\0' '\n' 2>/dev/null < "/proc/$1/cmdline" | {
         IFS= read -r a0 || exit 1
         IFS= read -r a1 || exit 1
+        # Ein drittes Argument (auch ein leeres) heisst Einmallauf wie
+        # --selbsttest, kein Dienst. Bis 0.11.9 fehlte diese Zeile (gemessen
+        # am 25.09.2026 in WSL, Pruefung-Sprachsteuerung-0.11.10, Fall D5).
+        IFS= read -r a2 && exit 1
         case "${a0##*/}" in python|python3|python3.*) ;; *) exit 1 ;; esac
         [ "$a1" = "$PBIN/sprachsteuerung_dienst.py" ]
     }
@@ -161,6 +178,40 @@ done
 
 [ "$GEFUNDEN" -eq 0 ] && echo "<INFO> Es lief kein Dienst."
 rm -f "$PIDDATEI" "$PDATA/soll_laufen" 2>/dev/null
+
+# ---------------------------------------------------------------
+# 1b. Zurueckbehaltene MQTT-Themen abraeumen
+# ---------------------------------------------------------------
+# Seit 0.11.5 gehen Zustaende mit 'retain' ueber den UDP-Eingang des
+# MQTT-Gateways; nach dem Entfernen stuenden sie sonst fuer immer im Broker
+# (gemessen am 25.09.2026 in WSL, Pruefung-Sprachsteuerung-0.11.10, Fall
+# R15). Praefix, Themen und Ziele kennt der Dienst selbst (--mqtt-leeren);
+# er liest beim Broker nach, was noch steht. Als loxberry, wie der Dienst.
+# Bauart Weissware 0.9.32.
+#
+# 'timeout -k 5 60': ohne -k schickt timeout nach 60 s nur SIGTERM - ein
+# Programm, das es nicht annimmt, haelt die Deinstallation fuer immer an.
+# Gemessen am 25.09.2026 in WSL: mit einem SIGTERM-festen Platzhalter an der
+# Stelle des Dienstes hing uninstall ueber acht Stunden (Pruefstand 0.11.8,
+# Fall uninstall_hartnaeckig; hier Fall R17).
+SP_PY=""
+if [ -x "$PBIN/venv/bin/python3" ]; then
+    SP_PY="$PBIN/venv/bin/python3"
+elif command -v python3 >/dev/null 2>&1; then
+    SP_PY=$(command -v python3)
+fi
+if [ -n "$SP_PY" ] && [ -f "$PBIN/sprachsteuerung_dienst.py" ]; then
+    if [ "$(id -u)" = "0" ] && id loxberry >/dev/null 2>&1; then
+        su -s /bin/bash loxberry -c "$(printf '%q ' env PYTHONDONTWRITEBYTECODE=1 \
+            "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PFOLDER" timeout -k 5 60 "$SP_PY" \
+            "$PBIN/sprachsteuerung_dienst.py" --mqtt-leeren)" < /dev/null 2>&1 || true
+    else
+        env PYTHONDONTWRITEBYTECODE=1 "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PFOLDER" \
+            timeout -k 5 60 "$SP_PY" "$PBIN/sprachsteuerung_dienst.py" --mqtt-leeren < /dev/null 2>&1 || true
+    fi
+else
+    echo "<INFO> Python oder bin/sprachsteuerung_dienst.py fehlt - zurueckbehaltene MQTT-Themen wurden nicht geleert."
+fi
 
 # ---------------------------------------------------------------
 # 2. Sicherungsdateien ausserhalb der Plugin-Ordner

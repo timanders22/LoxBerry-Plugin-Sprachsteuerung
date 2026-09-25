@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.11.9
+Version 0.11.10
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,85 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.11.10
+
+- **Die Kachel „MQTT" zeigt jetzt, ob dieses Plugin veröffentlicht.** Bis 0.11.9
+  stand dort als großer Wert der Autostart des MQTT-Gateways von LoxBerry, und
+  „MQTT ein" las sich, als sende das Plugin — auch wenn es im Reiter MQTT
+  ausgeschaltet war. Der Autostart des Gateways steht jetzt klein darunter;
+  fehlt der MQTT-Abschnitt in der LoxBerry-Konfiguration, heißt er dort
+  „nicht feststellbar" statt „aus".
+- **Das Ergebnis des letzten Satzes, der Zustand der Verbindungen und die
+  Befehle an die Ziele bleiben nicht mehr im Broker stehen.** `ok`, `grund` und
+  `antwort` (das Ergebnis des letzten Satzes), `bereit` (Mikrofone mit
+  Verbindung zum Dienst), `dienste_ok` (Sprachdienste, die der Dienst erreicht)
+  und `ruhe` gingen seit 0.11.5 mit `retain` hinaus. Das sind Aussagen des
+  Dienstes über sich selbst — bei `ok=0` auch Ausfälle der eigenen Kette, etwa
+  ein Sprachmodell, das nicht antwortet — und `ruhe` wechselt mit der Ruhezeit
+  allein durch die Uhr. Stirbt der Dienst, stünde der letzte Wert für immer im
+  Broker. Ebenso flüchtig gehen jetzt `<thema>/aktion` und `<thema>/wert` jedes
+  Ziels: ein Befehl soll nach einem Neustart von Broker oder Gateway nicht noch
+  einmal ankommen (Entscheidung wie beim Stellbefehl der Einspeisebremse).
+  **Wer in Loxone Config einen virtuellen Eingang an diese Themen gehängt hat,
+  bekommt nach einem Neustart des Miniservers dort erst beim nächsten Wert
+  wieder etwas.** In der Anlage des Hausherrn hängt kein Baustein daran
+  (Projektdatei vom 11.09.2026 durchsucht).
+  Den alten Wert löscht der Dienst mit einer leeren Nutzlast unmittelbar vor dem
+  gültigen Wert. **Ob noch etwas zu löschen ist, fragt er den Broker** (mit den
+  Zugangsdaten aus der LoxBerry-Konfiguration); erst wenn der Broker bestätigt,
+  dass keiner der alten Werte mehr dasteht, legt er den Merker
+  `data/plugins/<ordner>/retain_altlast` an. **Grenze:** ist der Broker nicht zu
+  fragen (kein Port, Anmeldung abgewiesen, Abonnement abgelehnt), gibt es keinen
+  Merker, und jede Sendung löscht unmittelbar vor dem Wert — der UDP-Eingang des
+  Gateways bestätigt nichts und verwirft unter Last Datagramme.
+  Zurückbehalten bleiben der letzte ausgeführte Satz samt `zeit` und die
+  Zählungen aus der Konfiguration (`mikrofone`, `dienste_gesamt`, `regeln`,
+  `ziele`).
+- **Die Deinstallation räumt die zurückbehaltenen Themen ab und liest nach.**
+  Bis 0.11.9 stand in `uninstall/uninstall`, MQTT müsse nicht aufgeräumt
+  werden — seit 0.11.5 stimmte das nicht mehr. Jetzt fragt
+  `sprachsteuerung_dienst.py --mqtt-leeren` den Broker, welche Themen der Linie
+  noch zurückbehalten stehen, löscht genau diese und fragt nach jeder Runde
+  wieder, höchstens dreimal; das Protokoll der Deinstallation sagt, was der
+  Broker bestätigt hat. Ist er nicht zu fragen, gehen alle Themen dreimal
+  hinaus, und das Protokoll sagt, dass nicht nachgelesen wurde. Nur das
+  **aktuelle** Präfix ist bekannt; wer es früher geändert hat, löscht die alten
+  Themen von Hand. Der Aufruf endet spätestens nach 65 s (`timeout -k 5 60`).
+- **Ein Archiv neben der Installation fasst die Anlage nicht mehr an.** Die
+  Bibliothek, `bin/dienst.sh`, der Dienst und `hardware.py` arbeiten nur dann
+  auf der Anlage, wenn sie dort installiert liegen oder `LBHOMEDIR` **und**
+  `LBPPLUGINDIR` gesetzt sind. Gemessen am 25.09.2026 in WSL: aus einem
+  ausgepackten Archiv unter der LoxBerry-Wurzel schrieben `--satz` und
+  `hardware.py --messen` Protokoll, Verlauf und Messwerte in die Anlage, und mit
+  `LBPPLUGINDIR` allein hielten `dienst.sh stop` und der Knopf „Anhalten" den
+  Dienst der Anlage an. Knöpfe für Dienst und Container verweigern aus einem
+  Archiv heraus.
+- **Ein Selbsttest gilt nicht mehr als laufender Dienst.** `dienst.sh`,
+  `preupgrade.sh`, `postinstall.sh`, `uninstall/uninstall` und die Oberfläche
+  erkennen den Dienst jetzt an **genau zwei** Argumenten. Bis 0.11.9 meldete
+  `dienst.sh status` einen `--selbsttest` aus dem Reiter Test als laufenden
+  Dienst, und `stop`, `preupgrade.sh`, `postinstall.sh` und `uninstall`
+  beendeten ihn.
+- **Liegengebliebene Aufträge werden beim Dienststart verworfen.** Ein Befehl
+  aus der Warteschlange, der älter als 60 s ist, und ein vorgemerkter Befehl,
+  der seit mehr als 60 s fällig ist, stammen aus einer Zeit, in der der Dienst
+  nicht lief. Bis 0.11.9 führte der nächste Start sie aus — eine Ansage aus dem
+  Nichts oder ein „Licht aus" Stunden später. Das Protokoll nennt, was
+  verworfen wurde.
+- **Die Zweitschrift wird nach Inhalt behandelt.** `preupgrade.sh` erneuert sie
+  nur mit einer Konfiguration, die das Aktionstoken trägt (bis 0.11.9
+  überschrieb eine leere Konfiguration die gute Zweitschrift), und
+  `postinstall.sh` spielt nur eine Zweitschrift mit Inhalt zurück und meldet
+  eine leere nicht mehr als „wiederhergestellt". Eine Konfiguration `{ }` mit
+  Leerzeichen gilt jetzt als leer.
+- **Die Hakenskripte suchen die Wurzel wie die übrigen Teile.** `postinstall.sh`
+  und `postupgrade.sh` fielen ohne Wurzel auf „zwei Ebenen über dem eigenen
+  Ablageort" zurück, `uninstall/uninstall` hielt jeden Baum mit
+  `config/plugins` und `webfrontend` für eine Wurzel. Jetzt zählt nur ein
+  Verzeichnis mit `config/system/general.json`, sonst wird gewarnt und nichts
+  getan. `sp_t()` liest ohne Wurzel keine Sprachdatei mehr ab `/`, und
+  `htmlauth/index.php` bindet nur noch die eigene Bibliothek ein.
 
 ## Neu in 0.11.9
 

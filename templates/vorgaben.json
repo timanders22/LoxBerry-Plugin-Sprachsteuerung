@@ -103,7 +103,18 @@
     "1 = zurueckbehalten, 0 = fluechtig. Ein Thema OHNE Eintrag geht",
     "fluechtig: was niemand bedacht hat, darf nicht auf Dauer im Broker",
     "stehenbleiben. 'endungen' gilt fuer die Themen des Ziels, die einen",
-    "frei gewaehlten Stamm davor tragen (<thema>/aktion)."
+    "frei gewaehlten Stamm davor tragen (<thema>/aktion).",
+    "",
+    "SEIT 0.11.10 FLUECHTIG (Regeln/07, Entscheidungen vom 18./19.09.2026):",
+    "ok, grund und antwort - das Ergebnis des letzten Satzes; bei ok=0 stehen",
+    "darin auch Ausfaelle der eigenen Kette (llm_fehler, istwert_fehlt), ohne",
+    "eigenen Zeitstempel; bereit und dienste_ok - Aussagen des Dienstes ueber",
+    "seine eigenen Verbindungen; ruhe - die Ruhezeit wechselt allein mit der",
+    "Uhr; <thema>/aktion und <thema>/wert - Befehle an ein Ziel, die nach",
+    "einem Neustart von Broker oder Gateway nicht noch einmal ankommen",
+    "sollen (Entscheidung des Hausherrn 25.09.2026, wie der Stellbefehl der",
+    "Einspeisebremse). Den Altwert raeumt der Dienst ab und liest beim Broker",
+    "nach (altlast_lage() in bin/sprachsteuerung_dienst.py)."
   ],
 
   "retain": {
@@ -111,16 +122,16 @@
       "satz": 1, "absicht": 1, "aktion": 1, "ziel": 1, "wert": 1,
       "einheit": 1, "quelle": 1, "mikrofon": 1, "zeit": 1,
 
-      "antwort": 1, "ok": 1, "grund": 1,
+      "antwort": 0, "ok": 0, "grund": 0,
       "ansage": 0,
 
       "online": 0, "ts": 0,
-      "mikrofone": 1, "bereit": 1,
-      "dienste_ok": 1, "dienste_gesamt": 1,
-      "regeln": 1, "ziele": 1, "ruhe": 1,
+      "mikrofone": 1, "bereit": 0,
+      "dienste_ok": 0, "dienste_gesamt": 1,
+      "regeln": 1, "ziele": 1, "ruhe": 0,
       "letzter_satz_alter": 0
     },
-    "endungen": { "/aktion": 1, "/wert": 1 }
+    "endungen": { "/aktion": 0, "/wert": 0 }
   },
 
   "wakewords": [

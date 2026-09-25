@@ -21,9 +21,34 @@ ARGV3=$3
 ARGV5=$5
 PFOLDER="${ARGV3:-sprachsteuerung}"
 BASE="${ARGV5:-$LBHOMEDIR}"
-if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
-    SELF=$(cd "$(dirname "$0")" && pwd)
-    BASE=$(cd "$SELF/../.." 2>/dev/null && pwd)
+# Die Wurzel nach Hausregel (Regeln/06): was der Installer uebergibt oder
+# $LBHOMEDIR, wenn darunter config/plugins liegt; sonst vom eigenen Ablageort
+# aufwaerts ein Verzeichnis mit config/plugins, data/plugins UND
+# config/system/general.json; sonst NICHTS. Bis 0.11.9 stand hier als
+# Rueckfall die feste Zahl "$SELF/../..": gemessen am 25.09.2026 in WSL
+# (Pruefung-Sprachsteuerung-0.11.10, Fall W3) legte das Skript aus
+# <irgendwo>/a/b heraus unter <irgendwo> data/plugins/, log/plugins/ und
+# config/plugins/ an.
+sp_wurzel_suchen() {
+    v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd)
+    i=0
+    while [ -n "$v" ] && [ "$v" != "/" ] && [ $i -lt 8 ]; do
+        if [ -d "$v/config/plugins" ] && [ -d "$v/data/plugins" ] \
+           && [ -f "$v/config/system/general.json" ]; then
+            printf '%s\n' "$v"; return 0
+        fi
+        v=$(dirname "$v"); i=$((i + 1))
+    done
+    return 1
+}
+if [ -z "$BASE" ] || [ ! -d "$BASE/config/plugins" ]; then
+    BASE=$(sp_wurzel_suchen)
+fi
+if [ -z "$BASE" ] || [ ! -d "$BASE/config/plugins" ]; then
+    echo "<FAIL> Es wurde kein LoxBerry-Wurzelverzeichnis gefunden - es wurde nichts eingerichtet."
+    echo "<INFO> Weder das Installationsprogramm noch \$LBHOMEDIR nennen eine Wurzel, und oberhalb"
+    echo "<INFO> dieses Skripts traegt kein Verzeichnis config/system/general.json."
+    exit 1
 fi
 
 PBIN="$BASE/bin/plugins/$PFOLDER"
@@ -97,6 +122,10 @@ sp_ist_dienst() {   # $1 Prozessnummer, $2 Dienstpfad
     tr '\0' '\n' 2>/dev/null < "/proc/$1/cmdline" | {
         IFS= read -r a0 || exit 1
         IFS= read -r a1 || exit 1
+        # Ein drittes Argument (auch ein leeres) heisst Einmallauf wie
+        # --selbsttest, kein Dienst. Bis 0.11.9 fehlte diese Zeile (gemessen
+        # am 25.09.2026 in WSL, Pruefung-Sprachsteuerung-0.11.10, Fall D4).
+        IFS= read -r a2 && exit 1
         case "${a0##*/}" in python|python3|python3.*) ;; *) exit 1 ;; esac
         [ "$a1" = "$2" ]
     }
@@ -151,14 +180,47 @@ chmod 755 "$PDATA" "$PLOG" "$PCONFIG" 2>/dev/null
 # danach weder leer noch "{}", die Ruecknahme sprang nicht an, und die
 # gepflegten Satzmuster und Ziele waren nach jedem Update fort - waehrend
 # die Zweitschrift unversehrt daneben lag.
+#
+# Nach INHALT, nicht nach Groesse - dieselbe Regel wie sp_config_hat_inhalt()
+# und sp_saetze() in sp_lib.php. Bis 0.11.9 entschied hier '[ ! -s ]' oder
+# ein woertliches '{}': eine Zieldatei '{ }' blieb stehen, obwohl die
+# Zweitschrift das Token trug, und eine Zweitschrift '{}' wurde als
+# "wiederhergestellt" gemeldet (gemessen am 25.09.2026 in WSL,
+# Pruefung-Sprachsteuerung-0.11.10, Faelle Z3, Z5, Z6). Was vorher in der
+# Zieldatei stand, liegt danach als <datei>.kaputt daneben (0600), wie in
+# sp_config().
+sp_hat_inhalt() {   # $1 Datei, $2 aktionstoken | saetze
+    [ -s "$1" ] || return 1
+    python3 -c 'import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(1)
+if not isinstance(d, dict) or not d:
+    sys.exit(1)
+if sys.argv[2] == "saetze":
+    sys.exit(0 if ("regeln" in d or "ziele" in d) else 1)
+sys.exit(0 if str(d.get("aktionstoken") or "").strip() else 1)' "$1" "$2" 2>/dev/null
+}
 for f in sprachsteuerung.json saetze.json; do
     BK="$BASE/config/plugins/$PFOLDER.backup.$f"
     CF="$PCONFIG/$f"
-    if [ -f "$BK" ]; then
-        INHALT=$(cat "$CF" 2>/dev/null)
-        if [ ! -s "$CF" ] || [ "$INHALT" = "{}" ]; then
-            cp -p "$BK" "$CF" && echo "<OK> $f aus Sicherung wiederhergestellt."
-        fi
+    [ -f "$BK" ] || continue
+    MERKMAL=aktionstoken
+    [ "$f" = saetze.json ] && MERKMAL=saetze
+    sp_hat_inhalt "$CF" "$MERKMAL" && continue
+    if ! sp_hat_inhalt "$BK" "$MERKMAL"; then
+        echo "<INFO> Die Zweitschrift von $f traegt keinen Inhalt - daraus wird nichts zurueckgespielt."
+        continue
+    fi
+    REST=$(tr -d '[:space:]' < "$CF" 2>/dev/null)
+    if [ -n "$REST" ] && [ "$REST" != "{}" ] && [ "$REST" != "[]" ]; then
+        cp -p "$CF" "$CF.kaputt" 2>/dev/null && chmod 600 "$CF.kaputt" 2>/dev/null
+    fi
+    if cp -p "$BK" "$CF" && cmp -s "$BK" "$CF"; then
+        echo "<OK> $f aus der Zweitschrift wiederhergestellt."
+    else
+        echo "<WARNING> $f liess sich nicht aus der Zweitschrift zurueckspielen: $BK"
     fi
 done
 

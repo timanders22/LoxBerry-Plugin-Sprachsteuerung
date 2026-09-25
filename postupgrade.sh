@@ -23,9 +23,29 @@ ARGV3=$3
 ARGV5=$5
 PFOLDER="${ARGV3:-sprachsteuerung}"
 BASE="${ARGV5:-$LBHOMEDIR}"
-if [ -z "$BASE" ] || [ ! -d "$BASE" ]; then
-    SELF=$(cd "$(dirname "$0")" && pwd)
-    BASE=$(cd "$SELF/../.." 2>/dev/null && pwd)
+# Dieselbe Wurzelregel wie in postinstall.sh (Regeln/06). Bis 0.11.9 stand
+# hier der feste Rueckfall "$SELF/../..": gemessen am 25.09.2026 in WSL
+# (Pruefung-Sprachsteuerung-0.11.10, Fall W4) loeschte das Skript aus
+# <irgendwo>/a/b heraus unter <irgendwo> bin/plugins/<ordner>/__pycache__
+# und data/plugins/<ordner>/zustand.json.
+sp_wurzel_suchen() {
+    v=$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd)
+    i=0
+    while [ -n "$v" ] && [ "$v" != "/" ] && [ $i -lt 8 ]; do
+        if [ -d "$v/config/plugins" ] && [ -d "$v/data/plugins" ] \
+           && [ -f "$v/config/system/general.json" ]; then
+            printf '%s\n' "$v"; return 0
+        fi
+        v=$(dirname "$v"); i=$((i + 1))
+    done
+    return 1
+}
+if [ -z "$BASE" ] || [ ! -d "$BASE/config/plugins" ]; then
+    BASE=$(sp_wurzel_suchen)
+fi
+if [ -z "$BASE" ] || [ ! -d "$BASE/config/plugins" ]; then
+    echo "<WARNING> Es wurde kein LoxBerry-Wurzelverzeichnis gefunden - es wurde nichts geaendert."
+    exit 1
 fi
 
 PBIN="$BASE/bin/plugins/$PFOLDER"

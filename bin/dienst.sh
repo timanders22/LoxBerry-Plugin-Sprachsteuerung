@@ -85,7 +85,12 @@ sp_wurzel_suchen() {
     done
     return 1
 }
-if ! sp_wurzel_taugt "${LBHOMEDIR:-}"; then
+# Gemerkt wird, ob die Wurzel aus der Umgebung kam: nur dann nennt der
+# Aufrufer die Anlage AUSDRUECKLICH (siehe die Gegenprobe unten).
+SP_UMGEBUNG=0
+if sp_wurzel_taugt "${LBHOMEDIR:-}"; then
+    SP_UMGEBUNG=1
+else
     LBHOMEDIR=$(sp_wurzel_suchen)
 fi
 # Der Ordnername ebenso. $LBPPLUGINDIR steht am Geraet in einer Cron-Schale
@@ -109,10 +114,22 @@ if [ -z "$LBHOMEDIR" ] || [ ! -d "$LBHOMEDIR" ]; then
     exit 1
 fi
 LBH_R=$(cd "$LBHOMEDIR" 2>/dev/null && pwd -P)
-if [ "$SELF" != "$LBH_R/bin/plugins/$PNAME" ] \
-   && [ ! -d "$LBHOMEDIR/config/plugins/$PNAME" ]; then
-    echo "FEHLER: '$PNAME' ist unter $LBHOMEDIR kein eingerichtetes Plugin,"
-    echo "        und $SELF ist nicht dessen bin-Ordner."
+# Die Anlage gilt nur, wenn dieses Skript in ihrem bin-Ordner liegt oder der
+# Aufrufer Wurzel UND Ordner ausdruecklich nennt ($LBHOMEDIR und
+# $LBPPLUGINDIR, und <ordner> ist dort eingerichtet) - dieselbe Regel wie
+# sp_paths() in sp_lib.php. Bis 0.11.9 genuegte, dass config/plugins/<name>
+# existierte: mit $LBPPLUGINDIR allein fand ein Archiv unter der Wurzel diese
+# per Suche, und 'stop' hielt den Dienst der Anlage an (gemessen am
+# 25.09.2026 in WSL, Pruefung-Sprachsteuerung-0.11.10, Fall A5; Bauart
+# Spotpreis-Tibber 0.9.19).
+SP_AUSDRUECKLICH=0
+if [ "$SP_UMGEBUNG" = 1 ] && [ -n "${LBPPLUGINDIR:-}" ] \
+   && [ -d "$LBHOMEDIR/config/plugins/$PNAME" ]; then
+    SP_AUSDRUECKLICH=1
+fi
+if [ "$SELF" != "$LBH_R/bin/plugins/$PNAME" ] && [ "$SP_AUSDRUECKLICH" != 1 ]; then
+    echo "FEHLER: $SELF ist nicht der bin-Ordner von '$PNAME' unter $LBHOMEDIR,"
+    echo "        und LBHOMEDIR und LBPPLUGINDIR nennen die Anlage nicht beide."
     echo "        Der Aufruf kommt offenbar aus einem ausgepackten Archiv oder"
     echo "        einem Pruefordner. Es wurde nichts angelegt."
     echo "        Abhilfe: LBHOMEDIR und LBPPLUGINDIR setzen oder dienst.sh aus"
@@ -170,6 +187,13 @@ laeuft() {
     ARGS=$(tr '\0' '\n' < "/proc/$P/cmdline" 2>/dev/null)
     [ "$(printf '%s\n' "$ARGS" | sed -n '2p')" = "$SKRIPT" ] || return 1
     printf '%s\n' "$ARGS" | sed -n '1p' | grep -qE '(^|/)python3?[0-9.]*$' || return 1
+    # Genau zwei Argumente: ein drittes (--selbsttest, --satz, --trocken,
+    # --mqtt-leeren) ist ein Einmallauf, kein Dienst. Gezaehlt werden die
+    # Nullbytes, nicht die Zeilen - ein leeres drittes Argument zaehlt mit.
+    # Bis 0.11.9 fehlte das: 'status' meldete einen Selbsttest aus dem Reiter
+    # Test als laufenden Dienst, und 'stop' beendete ihn (gemessen am
+    # 25.09.2026 in WSL, Pruefung-Sprachsteuerung-0.11.10, Faelle D1, D2).
+    [ "$(tr -cd '\0' < "/proc/$P/cmdline" 2>/dev/null | wc -c)" = 2 ] || return 1
     return 0
 }
 

@@ -162,6 +162,44 @@ else:
 if PNAME in ("bin", "", ".", "/"):
     PNAME = os.environ.get("LBPPLUGINDIR") or "sprachsteuerung"
 
+# ---------- Archiv unter einer echten Wurzel ----------
+# Die Anlage gilt nur, wenn diese Datei in ihrem bin-Ordner liegt
+# (<Wurzel>/bin/plugins/<ordner>, physisch verglichen) oder der Aufrufer
+# Wurzel UND Ordner ausdruecklich nennt ($LBHOMEDIR und $LBPPLUGINDIR - so
+# arbeiten die Pruefwerkzeuge mit ihrer Attrappe, und so ruft uninstall
+# --mqtt-leeren). Dieselbe Regel wie sp_paths() in sp_lib.php und
+# bin/dienst.sh. Bis 0.11.9 nahm eine Kopie aus einem ausgepackten Archiv
+# unterhalb einer echten Wurzel diese Wurzel und den festen Namen
+# 'sprachsteuerung': gemessen am 25.09.2026 in WSL
+# (Pruefung-Sprachsteuerung-0.11.10, Faelle A8, A9, A10) schrieben
+# '--satz' und 'hardware.py --messen' aus dem Archiv Protokoll, Verlauf und
+# Messwerte in die Anlage - ohne Umgebung ebenso wie mit $LBHOMEDIR allein,
+# wie es am Geraet in /etc/environment steht. Bauart Spotpreis-Tibber 0.9.19.
+def _in_der_anlage() -> bool:
+    try:
+        if (LBHOME / "bin" / "plugins" / PNAME).resolve() == SELF:
+            return True
+    except OSError:
+        pass
+    lbp = os.path.basename((os.environ.get("LBPPLUGINDIR") or "").rstrip("/"))
+    if lbp in ("", ".", "/", "html", "bin", "plugins") or not _umgebung:
+        return False
+    try:
+        return Path(_umgebung).resolve() == LBHOME.resolve()
+    except OSError:
+        return False
+
+
+if not _in_der_anlage():
+    sys.stderr.write(
+        "FEHLER: %s liegt nicht in der Installation unter %s (ausgepacktes "
+        "Archiv oder Pruefordner). Damit nichts in die Anlage kommt, wurde "
+        "nichts angelegt und nichts gesendet. Abhilfe: das Programm aus "
+        "<LoxBerry-Wurzel>/bin/plugins/<ordner> aufrufen oder LBHOMEDIR und "
+        "LBPPLUGINDIR ausdruecklich setzen.\n" % (SELF, LBHOME))
+    raise SystemExit(1)
+
+
 PDATA = LBHOME / "data" / "plugins" / PNAME
 PLOG = LBHOME / "log" / "plugins" / PNAME
 PCONFIG = LBHOME / "config" / "plugins" / PNAME
@@ -622,6 +660,280 @@ def mqtt_retain_fuer(schluessel) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Altwerte abraeumen - beim Broker nachgelesen (seit 0.11.10)
+#
+# Bis 0.11.9 gingen ok, grund, antwort, bereit, dienste_ok, ruhe und die
+# Zielthemen <thema>/aktion und <thema>/wert mit 'retain' hinaus; seit
+# 0.11.10 fluechtig (Tabelle in templates/vorgaben.json, Begruendung dort).
+# Ein spaeteres 'publish' ersetzt einen zurueckbehaltenen Wert NICHT - er
+# bliebe fuer immer im Broker. Geloescht wird mit einer leeren Nutzlast und
+# dem Befehlswort 'retain' (mqttgateway.pl, am Geraet 19.09.2026 belegt,
+# Regeln/07), UNMITTELBAR vor dem gueltigen Wert.
+#
+# Ob etwas geloescht werden muss, sagt der BROKER, nicht der Sendeerfolg:
+# sendto() meldet auch fuer ein verworfenes Datagramm Erfolg, und der
+# UDP-Eingang des Gateways verwirft unter Last bis etwa 70 % (Regeln/07,
+# am Geraet: Merker gesetzt, Altwert stand weiter im Broker). Deshalb
+#   - Merker mit passender Kennung: der Broker wird nicht gefragt;
+#   - der Broker bestaetigt, dass keines der Themen zurueckbehalten steht:
+#     Merker schreiben, nichts loeschen;
+#   - er nennt belegte Themen: genau diese loeschen (vor ihrem Wert, sonst
+#     allein, fuer ok/grund/antwort gefolgt vom letzten Satz), KEIN Merker -
+#     die naechste Rueckfrage (fruehestens nach RUECKFRAGE_ABSTAND_S) liest
+#     nach;
+#   - er ist nicht zu fragen (kein Brokerport, keine Verbindung, CONNACK
+#     ungleich 0, SUBACK 0x80): KEIN Merker, und jedes Senden loescht
+#     unmittelbar vor dem Wert (Muster 11 der Nachlese 24.09.2026).
+# Gefragt wird mit MQTT 3.1.1 von Hand - diese Linie hat kein paho. Bauart
+# Weissware 0.9.32 (mqtt_behalten_liste(), altlast_lage()) und
+# Beschattungswaechter 0.9.21 (SUBACK-Rueckgabe). Die Kennung
+# "leer-bestaetigt <praefix>: <Themen>" traegt Praefix und Themenliste: ein
+# anderes Praefix, eine andere Zielliste oder ein Merker aus einem Zwischenbau
+# ("<praefix>|...", nur nach Sendeerfolg geschrieben) gelten nicht. Der
+# Merker liegt im Datenordner; purge_installation raeumt ihn bei jedem Update
+# ab (Regeln/06), dann wird genau einmal nachgefragt. Gemessen am 25.09.2026
+# in WSL mit Gateway- und Broker-Attrappe (Pruefung-Sprachsteuerung-0.11.10,
+# Faelle R10-R14).
+# ---------------------------------------------------------------------------
+RETAIN_ALTLAST = ("ok", "grund", "antwort", "bereit", "dienste_ok", "ruhe")
+DATEI_RETAIN_MERKER = PDATA / "retain_altlast"
+RUECKFRAGE_ABSTAND_S = 60
+_ALTLAST_STAND: dict = {"zeit": 0.0, "kennung": "", "lage": "", "themen": []}
+
+
+def altlast_themen() -> list:
+    """Die frueher zurueckbehaltenen Themen (ohne Praefix), in fester Folge."""
+    themen = list(RETAIN_ALTLAST)
+    ziele = json_lesen(DATEI_SAETZE).get("ziele")
+    for eintrag in (ziele.values() if isinstance(ziele, dict) else ()):
+        thema = str(eintrag.get("thema") or "").strip("/") if isinstance(eintrag, dict) else ""
+        if not thema or not re.match(r"^[A-Za-z0-9_/\-]+$", thema):
+            continue
+        for endung in ("/aktion", "/wert"):
+            if thema + endung not in themen:
+                themen.append(thema + endung)
+    return themen
+
+
+def mqtt_zugang() -> dict:
+    """Host, Port, Benutzer und Kennwort des Brokers aus der general.json.
+    port 0 heisst: nicht angegeben oder unbrauchbar - dann wird NICHT 1883
+    angenommen (ein Pruefstand ohne Port soll nie an einen fremden Broker)."""
+    gen = json_lesen(LBHOME / "config" / "system" / "general.json")
+    m = gen.get("Mqtt") or gen.get("mqtt") or {}
+    if not isinstance(m, dict):
+        m = {}
+
+    def hol(gross: str, klein: str) -> str:
+        v = m.get(gross, m.get(klein, ""))
+        return "" if v is None else str(v)
+
+    host = hol("Brokerhost", "brokerhost").strip()
+    if host in ("", "localhost"):
+        host = "127.0.0.1"
+    try:
+        port = int(hol("Brokerport", "brokerport").strip())
+    except ValueError:
+        port = 0
+    if not 0 < port < 65536:
+        port = 0
+    return {"host": host, "port": port,
+            "user": hol("Brokeruser", "brokeruser"),
+            "pass": hol("Brokerpass", "brokerpass")}
+
+
+def mqtt_behalten_liste(themen) -> tuple:
+    """Fragt den Broker in EINER Verbindung, welche der Themen er zurueckbehaelt.
+
+    Rueckgabe (lage, belegt). "ok": CONNACK 0 und jede SUBACK-Rueckgabe unter
+    0x80 - was dann nicht in belegt steht, ist leer. "unbekannt": nicht zu
+    fragen (kein Port, keine Verbindung, Anmeldung abgewiesen, ein Thema
+    abgelehnt, keine Antwort). Das Kennwort steht nur im CONNECT-Paket.
+    """
+    soll = []
+    for t in themen:
+        t = str(t)
+        if t and t not in soll:
+            soll.append(t)
+    if not soll:
+        return "ok", set()
+    z = mqtt_zugang()
+    if not z["port"]:
+        return "unbekannt", set()
+
+    def zk(text: str) -> bytes:
+        b = text.encode("utf-8")
+        return len(b).to_bytes(2, "big") + b
+
+    def laenge(n: int) -> bytes:
+        o = b""
+        while True:
+            b = n % 128
+            n //= 128
+            if n:
+                b |= 128
+            o += bytes([b])
+            if not n:
+                return o
+
+    try:
+        s = socket.create_connection((z["host"], z["port"]), timeout=2)
+    except OSError:
+        return "unbekannt", set()
+    belegt = set()
+    bestaetigt = False
+    abgelehnt = False
+    puffer = b""
+
+    def lies(n: int) -> bytes:
+        nonlocal puffer
+        while len(puffer) < n:
+            d = s.recv(4096)
+            if not d:
+                raise OSError("Verbindung beendet")
+            puffer += d
+        aus, puffer = puffer[:n], puffer[n:]
+        return aus
+
+    def paket() -> tuple:
+        k = lies(1)[0]
+        n, mult = 0, 1
+        for _ in range(4):
+            b = lies(1)[0]
+            n += (b & 127) * mult
+            mult *= 128
+            if not b & 128:
+                break
+        return k, (lies(n) if n else b"")
+
+    try:
+        s.settimeout(1.0)
+        flags = 0x02                                   # saubere Sitzung
+        nutz = zk("sprueck%d" % os.getpid())
+        if z["user"]:
+            flags |= 0x80
+            nutz += zk(z["user"])
+            if z["pass"]:
+                flags |= 0x40
+                nutz += zk(z["pass"])
+        kopf = zk("MQTT") + bytes([4, flags]) + (10).to_bytes(2, "big")
+        s.sendall(bytes([0x10]) + laenge(len(kopf) + len(nutz)) + kopf + nutz)
+        k, r = paket()
+        if k >> 4 == 2 and len(r) >= 2 and r[1] == 0:
+            sub = (1).to_bytes(2, "big")
+            for t in soll:
+                sub += zk(t) + b"\x00"
+            s.sendall(bytes([0x82]) + laenge(len(sub)) + sub)
+            ende = time.monotonic() + 3.0
+            while time.monotonic() < ende:
+                try:
+                    k, r = paket()
+                except OSError:                        # Zeitablauf: nichts mehr gekommen
+                    break
+                art = k >> 4
+                if art == 9:
+                    # Je Thema ein Rueckgabebyte hinter der Paketkennung;
+                    # 0x80 heisst abgelehnt - dann ist nichts zu erfahren.
+                    if any(c >= 0x80 for c in r[2:]) or len(r[2:]) != len(soll):
+                        abgelehnt = True
+                        break
+                    bestaetigt = True
+                    ende = min(ende, time.monotonic() + 1.0)
+                elif art == 3 and len(r) >= 2:
+                    tl = int.from_bytes(r[0:2], "big")
+                    t = r[2:2 + tl].decode("utf-8", "replace")
+                    versatz = 2 + tl + (2 if (k >> 1) & 3 else 0)
+                    if t in soll and (k & 1) and r[versatz:]:
+                        belegt.add(t)
+            try:
+                s.sendall(b"\xe0\x00")
+            except OSError:
+                pass
+    except OSError:
+        pass
+    finally:
+        s.close()
+    if abgelehnt or not bestaetigt:
+        return "unbekannt", set()
+    return "ok", belegt
+
+
+def altlast_lage(praefix: str) -> tuple:
+    """(lage, themen ohne Praefix), die in diesem Senden zu loeschen sind.
+    lage: "erledigt" | "belegt" | "unbekannt" - siehe Kopf dieses Abschnitts."""
+    liste = altlast_themen()
+    kennung = "leer-bestaetigt %s: %s" % (praefix, " ".join(liste))
+    try:
+        schon = DATEI_RETAIN_MERKER.read_text(encoding="utf-8").strip()
+    except OSError:
+        schon = ""
+    if schon == kennung:
+        return "erledigt", []
+    st = _ALTLAST_STAND
+    jetzt = time.monotonic()
+    if st["kennung"] == kennung and st["lage"] and jetzt - st["zeit"] < RUECKFRAGE_ABSTAND_S:
+        return st["lage"], list(st["themen"])
+    lage, belegt = mqtt_behalten_liste(["%s/%s" % (praefix, t) for t in liste])
+    if lage == "ok" and not belegt:
+        try:
+            PDATA.mkdir(parents=True, exist_ok=True)
+            DATEI_RETAIN_MERKER.write_text(kennung + "\n", encoding="utf-8")
+            _LOG.info("MQTT: unter %s/ steht keines der %d frueher zurueckbehaltenen "
+                      "Themen mehr im Broker (vom Broker bestaetigt).", praefix, len(liste))
+        except OSError as err:
+            melde_gebremst("retain_merker", "MQTT: Merker %s nicht schreibbar (%s) - der "
+                                            "Broker wird wieder gefragt." % (DATEI_RETAIN_MERKER, err))
+        st.update(zeit=jetzt, kennung=kennung, lage="erledigt", themen=[])
+        return "erledigt", []
+    if lage == "ok":
+        erg = ("belegt", [t for t in liste if "%s/%s" % (praefix, t) in belegt])
+    else:
+        grund = ("in der general.json steht kein Brokerport" if not mqtt_zugang()["port"]
+                 else "keine Verbindung, keine Antwort, Anmeldung oder Abonnement abgewiesen")
+        melde_gebremst("mqtt_rueckfrage",
+                       "MQTT: der Broker liess sich nicht befragen, ob unter %s/ noch frueher "
+                       "zurueckbehaltene Werte stehen (%s). Sie werden deshalb unmittelbar "
+                       "vor jedem Senden geloescht, bis er antwortet." % (praefix, grund), 3600)
+        erg = ("unbekannt", liste)
+    st.update(zeit=jetzt, kennung=kennung, lage=erg[0], themen=list(erg[1]))
+    return erg
+
+
+def altlast_vermerken(lage: str, geraeumt: list) -> None:
+    """Belegte Themen, die in diesem Senden geloescht wurden, nicht vor der
+    naechsten Rueckfrage noch einmal loeschen. Bei unbekannter Lage bleibt
+    die Liste: dann geht die Loeschung vor JEDEM Wert hinaus."""
+    if lage != "belegt":
+        return
+    _ALTLAST_STAND["themen"] = [t for t in _ALTLAST_STAND["themen"] if t not in geraeumt]
+
+
+def _altlast_letzte_werte() -> dict:
+    """Der zuletzt gueltige Wert fuer ok/grund/antwort (letzter Satz) und
+    bereit/dienste_ok/ruhe (Abbild, hoechstens 120 s alt) - oder keiner."""
+    werte = {}
+    liste = json_lesen(DATEI_VERLAUF).get("saetze") or []
+    letzter = liste[0] if isinstance(liste, list) and liste and isinstance(liste[0], dict) else {}
+    if letzter:
+        try:
+            werte["ok"] = int(letzter.get("ok") or 0)
+        except (TypeError, ValueError):
+            werte["ok"] = 0
+        werte["grund"] = str(letzter.get("grund") or "")
+        werte["antwort"] = str(letzter.get("antwort") or "")
+    ab = json_lesen(DATEI_LOXONE)
+    try:
+        frisch = abs(time.time() - float(ab.get("ts") or 0)) <= 120
+    except (TypeError, ValueError):
+        frisch = False
+    if frisch:
+        for k in ("bereit", "dienste_ok", "ruhe"):
+            if k in ab:
+                werte[k] = ab[k]
+    return werte
+
+
 def mqtt_senden(paare: dict, praefix: str, cfg: dict | None = None) -> None:
     z = mqtt_zustand()
     if not z["udpport"]:
@@ -636,6 +948,12 @@ def mqtt_senden(paare: dict, praefix: str, cfg: dict | None = None) -> None:
     except OSError as err:
         melde_gebremst("mqtt_socket", f"MQTT: Socket nicht moeglich ({err}).")
         return
+    # Frueher zurueckbehaltene Werte: was der Broker noch haelt (oder, wenn
+    # er nicht zu fragen ist, alles), wird unmittelbar vor seinem Wert
+    # geloescht - siehe altlast_lage().
+    lage, raeumen = altlast_lage(praefix)
+    raeumen = list(raeumen)
+    geraeumt: list = []
     try:
         for k, v in paare.items():
             # None heisst 'kein Wert' und wird nicht gesendet. Eine LEERE
@@ -657,7 +975,8 @@ def mqtt_senden(paare: dict, praefix: str, cfg: dict | None = None) -> None:
                                "MQTT: das Thema %r enthaelt unerlaubte Zeichen "
                                "und wurde nicht gesendet." % k)
                 continue
-            # ES GEHT NIE EINE LEERE NUTZLAST HINAUS - eine leere Nutzlast
+            # ES GEHT NIE EINE LEERE NUTZLAST HINAUS (einzige Ausnahme: das
+            # Loeschen frueher zurueckbehaltener Werte, altlast_lage()) - eine leere Nutzlast
             # loescht das Thema im Gateway (mqttgateway.pl, sub udpin:
             # "Delete $udptopic from memory because of empty message"), und
             # seit 0.11.5 stuende bei einem zurueckbehaltenen Thema damit der
@@ -671,11 +990,38 @@ def mqtt_senden(paare: dict, praefix: str, cfg: dict | None = None) -> None:
             # heraus ging '<praefix>/<thema> ' mit leerer Nutzlast. Das ist
             # der Loeschfall, und bis 0.11.4 war er unbemerkt erreichbar.
             sauber = mqtt_wert_saeubern(v) or "-"
+            # Die leere retain-Nutzlast loescht den Altwert; der gueltige
+            # Wert folgt im naechsten Datagramm.
+            if k in raeumen:
+                zeile = "retain %s/%s " % (praefix, k)
+                s.sendto(zeile.encode("utf-8"), ("127.0.0.1", z["udpport"]))
+                raeumen.remove(k)
+                geraeumt.append(k)
+                if cfg is not None:
+                    mitschnitt(cfg, "MQTT>", zeile)
             befehl = "retain" if mqtt_retain_fuer(k) else "publish"
             nachricht = f"{befehl} {praefix}/{k} {sauber}".encode("utf-8")
             s.sendto(nachricht, ("127.0.0.1", z["udpport"]))
             if cfg is not None:
                 mitschnitt(cfg, "MQTT>", nachricht.decode("utf-8", "ignore"))
+        # Was der Broker als belegt meldet, in diesem Senden aber keinen Wert
+        # hat, wird allein geloescht - fuer ok/grund/antwort und
+        # bereit/dienste_ok/ruhe gefolgt vom letzten gueltigen Wert, damit
+        # der Eingang in Loxone nicht leer stehen bleibt. Bei unbekannter
+        # Lage nicht: dann gehen Loeschungen nur unmittelbar vor einem Wert.
+        if lage == "belegt":
+            letzte = _altlast_letzte_werte()
+            for k in raeumen:
+                zeilen = ["retain %s/%s " % (praefix, k)]
+                if letzte.get(k) is not None:
+                    zeilen.append("publish %s/%s %s"
+                                  % (praefix, k, mqtt_wert_saeubern(letzte[k]) or "-"))
+                for zeile in zeilen:
+                    s.sendto(zeile.encode("utf-8"), ("127.0.0.1", z["udpport"]))
+                    if cfg is not None:
+                        mitschnitt(cfg, "MQTT>", zeile)
+                geraeumt.append(k)
+        altlast_vermerken(lage, geraeumt)
     except OSError as err:
         melde_gebremst("mqtt_senden", f"MQTT: Senden fehlgeschlagen ({err}).")
     finally:
@@ -684,6 +1030,102 @@ def mqtt_senden(paare: dict, praefix: str, cfg: dict | None = None) -> None:
 
 def praefix_von(cfg: dict) -> str:
     return str(cfg.get("mqtt_topic") or "sprachsteuerung").strip("/") or "sprachsteuerung"
+
+
+LEEREN_RUNDEN = 3
+LEEREN_PAUSE_S = 1.0
+
+
+def mqtt_leeren(runden: int = LEEREN_RUNDEN, pause: float = LEEREN_PAUSE_S) -> int:
+    """Beim Deinstallieren: die zurueckbehaltenen Themen dieser Installation leeren.
+
+    Aufruf aus uninstall/uninstall (--mqtt-leeren). Geleert wird jedes Thema,
+    das eine veroeffentlichte Fassung retained gesendet hat: die Themen mit 1
+    in der Retain-Tabelle und die Altlasten (altlast_themen(): ok, grund,
+    antwort, bereit, dienste_ok, ruhe und je Ziel <thema>/aktion und
+    <thema>/wert). Was nie retained ging (online, ts, ansage, ...), bleibt
+    unberuehrt.
+
+    VOR der ersten Runde und nach jeder Runde wird beim Broker nachgelesen
+    (mqtt_behalten_liste()); hinaus geht nur, was dort noch steht, hoechstens
+    LEEREN_RUNDEN Runden - der UDP-Eingang verwirft unter Last. Ist der
+    Broker nicht zu fragen, gehen alle Themen in jeder Runde hinaus, und die
+    Ausgabe sagt, dass nicht nachgelesen wurde. Bis 0.11.9 blieben die Themen
+    nach dem Entfernen fuer immer im Broker (gemessen am 25.09.2026 in WSL,
+    Pruefung-Sprachsteuerung-0.11.10, Fall R15). Nur das AKTUELLE Praefix ist
+    bekannt; wer es frueher geaendert hat, loescht die alten Themen von Hand.
+    Bauart Weissware 0.9.32. Rueckgabe 0 geleert (bestaetigt) oder nicht
+    nachpruefbar, 1 es steht noch etwas, 2 nicht moeglich. Legt nichts an.
+    """
+    praefix = praefix_von(config())
+    if any(c in praefix for c in "#+ \t\r\n"):
+        print("<WARNING> MQTT: das Themenpraefix enthaelt einen Platzhalter oder ein "
+              "Leerzeichen - zurueckbehaltene Themen wurden nicht geleert.")
+        return 2
+    z = mqtt_zustand()
+    if not z["udpport"]:
+        print("<INFO> MQTT: in der general.json steht kein UDP-Eingangsport des Gateways - "
+              "zurueckbehaltene Themen unter %s/ wurden nicht geleert." % praefix)
+        return 2
+    staemme = [k for k, v in MQTT_RETAIN.items() if v]
+    for t in altlast_themen():
+        if t not in staemme:
+            staemme.append(t)
+    alle = ["%s/%s" % (praefix, t) for t in staemme if re.match(r"^[A-Za-z0-9_/\-]+$", t)]
+    lage, belegt = mqtt_behalten_liste(alle)
+    nachgelesen = (lage == "ok")
+    offen = [t for t in alle if t in belegt] if nachgelesen else list(alle)
+    if nachgelesen and not offen:
+        print("<OK> MQTT: der Broker bestaetigt: keines der %d Themen unter %s/ steht "
+              "zurueckbehalten - nichts zu leeren." % (len(alle), praefix))
+        return 0
+    zu_leeren = len(offen)
+    gesendet = 0
+    runde = 0
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except OSError as err:
+        print("<WARNING> MQTT: kein Socket (%s) - zurueckbehaltene Themen unter %s/ "
+              "wurden nicht geleert." % (err, praefix))
+        return 2
+    try:
+        while offen and runde < max(1, int(runden)):
+            if runde:
+                time.sleep(pause)
+            runde += 1
+            for t in offen:
+                s.sendto(("retain %s " % t).encode("utf-8"), ("127.0.0.1", z["udpport"]))
+                gesendet += 1
+            if nachgelesen:
+                time.sleep(0.3)             # dem Gateway Zeit bis zum Broker lassen
+                lage, belegt = mqtt_behalten_liste(offen)
+                if lage == "ok":
+                    offen = [t for t in offen if t in belegt]
+                else:
+                    nachgelesen = False
+    except OSError as err:
+        print("<WARNING> MQTT: Senden an den UDP-Eingang %d gescheitert (%s) - "
+              "zurueckbehaltene Themen unter %s/ stehen womoeglich noch im Broker."
+              % (z["udpport"], err, praefix))
+        return 1
+    finally:
+        s.close()
+    print("<INFO> MQTT: %d von %d Themen unter %s/ mit leerer Nutzlast an den UDP-Eingang "
+          "%d des Gateways gesendet (%d Runde(n), %d Datagramme)."
+          % (zu_leeren, len(alle), praefix, z["udpport"], runde, gesendet))
+    if nachgelesen and not offen:
+        print("<OK> MQTT: der Broker bestaetigt: keines der %d Themen steht mehr "
+              "zurueckbehalten." % len(alle))
+        return 0
+    if nachgelesen:
+        print("<WARNING> MQTT: %d Themen stehen noch zurueckbehalten im Broker (%s%s). "
+              "Von Hand: mosquitto_pub -r -n -t <thema>"
+              % (len(offen), ", ".join(offen[:5]), ", ..." if len(offen) > 5 else ""))
+        return 1
+    print("<INFO> MQTT: der Broker liess sich nicht befragen - Nachlesen war nicht "
+          "moeglich. Der UDP-Eingang verwirft unter Last Datagramme; was stehen "
+          "bleibt, laesst sich mit mosquitto_pub -r -n -t <thema> von Hand loeschen.")
+    return 0
 
 
 def fehlertext(err: Exception) -> str:
@@ -1733,6 +2175,62 @@ def timer_faellig(cfg: dict) -> int:
         except Exception as err:  # noqa: BLE001
             _LOG.error("Vorgemerkter Befehl: %s", fehlertext(err))
     return anzahl
+
+
+# Aelter als das, und ein Auftrag wird beim Dienststart verworfen. Der
+# Aufrufer einer Warteschlange wartet hoechstens 12 s (SP_WARTEN_WEB in
+# sp_lib.php); ein vorgemerkter Befehl, der eine Minute ueberfaellig ist,
+# stammt aus einer Zeit, in der der Dienst nicht lief.
+AUFTRAG_VERALTET_S = 60
+
+
+def veraltetes_verwerfen() -> tuple:
+    """Beim Dienststart: Auftraege verwerfen, die niemand mehr erwartet.
+
+    Die Oberflaeche und der Endpunkt reihen ohne laufenden Dienst nichts ein
+    (sp_befehl_absetzen() fragt vorher). Stirbt der Dienst aber nach dieser
+    Frage, oder war er beim Faelligwerden eines vorgemerkten Befehls nicht
+    da, blieb der Auftrag liegen - und der naechste Start fuehrte ihn aus:
+    'sprechen' als Stimme aus dem Nichts, 'satz' und ein vorgemerktes
+    'schalte ... aus' als Schaltung Stunden spaeter. Gemessen am 25.09.2026
+    in WSL (Pruefung-Sprachsteuerung-0.11.10, Faelle Q1, Q3). Bauart
+    BatterieBMS 0.9.25 und ZendureSolarFlow 0.9.26 (60 s).
+
+    Rueckgabe: (verworfene Befehle, verworfene vorgemerkte Befehle).
+    """
+    jetzt = time.time()
+    befehle = timer = 0
+    if ORDNER_BEFEHLE.is_dir():
+        for datei in sorted(ORDNER_BEFEHLE.glob("*.json")):
+            try:
+                alter = jetzt - datei.stat().st_mtime
+            except OSError:
+                continue
+            if alter > AUFTRAG_VERALTET_S:
+                try:
+                    datei.unlink()
+                    befehle += 1
+                except OSError:
+                    pass
+    if ORDNER_TIMER.is_dir():
+        for datei in sorted(ORDNER_TIMER.glob("*.json")):
+            try:
+                faellig = float(json_lesen(datei).get("faellig") or 0)
+            except (TypeError, ValueError):
+                faellig = 0
+            if 0 < faellig < jetzt - AUFTRAG_VERALTET_S:
+                try:
+                    datei.unlink()
+                    timer += 1
+                except OSError:
+                    pass
+    if befehle or timer:
+        _LOG.warning("Beim Start verworfen: %d Befehl(e) aus der Warteschlange, aelter "
+                     "als %d s, und %d vorgemerkte(r) Befehl(e), seit mehr als %d s "
+                     "faellig. Sie stammen aus einer Zeit, in der der Dienst nicht "
+                     "lief; jetzt ausgefuehrt kaemen sie unerwartet.",
+                     befehle, AUFTRAG_VERALTET_S, timer, AUFTRAG_VERALTET_S)
+    return befehle, timer
 
 
 def timer_liste() -> list:
@@ -3045,6 +3543,7 @@ def satelliten_schluessel(cfg: dict) -> str:
 
 
 async def dienst() -> int:
+    veraltetes_verwerfen()
     cfg = config()
     fehlten = cfg_vervollstaendigen()
     if fehlten:
@@ -3417,6 +3916,9 @@ def satzproben(v) -> dict:
 
 
 def main() -> int:
+    # Vor log_einrichten(): beim Deinstallieren wird kein Protokoll angelegt.
+    if "--mqtt-leeren" in sys.argv:
+        return mqtt_leeren()
     log_einrichten()
     if "--selbsttest" in sys.argv:
         return selbsttest()

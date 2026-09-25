@@ -118,6 +118,45 @@ else:
 # dieselbe Regel wie in sp_paths() auf der PHP-Seite.
 if PNAME in ("bin", "", ".", "/"):
     PNAME = os.environ.get("LBPPLUGINDIR") or "sprachsteuerung"
+
+# ---------- Archiv unter einer echten Wurzel ----------
+# Die Anlage gilt nur, wenn diese Datei in ihrem bin-Ordner liegt
+# (<Wurzel>/bin/plugins/<ordner>, physisch verglichen) oder der Aufrufer
+# Wurzel UND Ordner ausdruecklich nennt ($LBHOMEDIR und $LBPPLUGINDIR - so
+# arbeiten die Pruefwerkzeuge mit ihrer Attrappe, und so ruft uninstall
+# --mqtt-leeren). Dieselbe Regel wie sp_paths() in sp_lib.php und
+# bin/dienst.sh. Bis 0.11.9 nahm eine Kopie aus einem ausgepackten Archiv
+# unterhalb einer echten Wurzel diese Wurzel und den festen Namen
+# 'sprachsteuerung': gemessen am 25.09.2026 in WSL
+# (Pruefung-Sprachsteuerung-0.11.10, Faelle A8, A9, A10) schrieben
+# '--satz' und 'hardware.py --messen' aus dem Archiv Protokoll, Verlauf und
+# Messwerte in die Anlage - ohne Umgebung ebenso wie mit $LBHOMEDIR allein,
+# wie es am Geraet in /etc/environment steht. Bauart Spotpreis-Tibber 0.9.19.
+def _in_der_anlage() -> bool:
+    try:
+        if (LBHOME / "bin" / "plugins" / PNAME).resolve() == SELF:
+            return True
+    except OSError:
+        pass
+    lbp = os.path.basename((os.environ.get("LBPPLUGINDIR") or "").rstrip("/"))
+    if lbp in ("", ".", "/", "html", "bin", "plugins") or not _umgebung:
+        return False
+    try:
+        return Path(_umgebung).resolve() == LBHOME.resolve()
+    except OSError:
+        return False
+
+
+if not _in_der_anlage():
+    sys.stderr.write(
+        "FEHLER: %s liegt nicht in der Installation unter %s (ausgepacktes "
+        "Archiv oder Pruefordner). Damit nichts in die Anlage kommt, wurde "
+        "nichts angelegt und nichts gesendet. Abhilfe: das Programm aus "
+        "<LoxBerry-Wurzel>/bin/plugins/<ordner> aufrufen oder LBHOMEDIR und "
+        "LBPPLUGINDIR ausdruecklich setzen.\n" % (SELF, LBHOME))
+    raise SystemExit(1)
+
+
 PTEMPLATES = LBHOME / "templates" / "plugins" / PNAME
 
 def _fassung() -> str:

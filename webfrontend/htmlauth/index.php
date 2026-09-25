@@ -16,12 +16,22 @@
 
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
 
+/* Welche Lage gilt, entscheidet der eigene Ablageort, nicht die Reihenfolge
+ * der Versuche: liegt diese Datei unter .../plugins/<ordner>, ist sie
+ * installiert (Bibliothek unter <home>/webfrontend/html/plugins/<ordner>),
+ * sonst liegt sie in einem ausgepackten Archiv (../html/). Bis 0.11.9 wurden
+ * drei Kandidaten der Reihe nach probiert, zwei davon VOR der eigenen
+ * Bibliothek - aus einem Archiv unter / war das
+ * /html/plugins/htmlauth/sp_lib.php ab der Laufwerkswurzel, und was dort lag,
+ * lief als Bibliothek (gemessen am 25.09.2026 in WSL im chroot,
+ * Pruefung-Sprachsteuerung-0.11.10, Fall P2). Bauart ZendureSolarFlow 0.9.26. */
 $sp_gefunden = false;
-foreach (array(
-    dirname(dirname(__DIR__)) . '/html/plugins/' . basename(__DIR__) . '/sp_lib.php',
-    dirname(dirname(dirname(__DIR__))) . '/html/plugins/' . basename(__DIR__) . '/sp_lib.php',
-    dirname(__DIR__) . '/html/sp_lib.php',
-) as $sp_kandidat) {
+if (basename(dirname(__DIR__)) === 'plugins') {
+    $sp_kandidaten = array(dirname(dirname(dirname(__DIR__))) . '/html/plugins/' . basename(__DIR__) . '/sp_lib.php');
+} else {
+    $sp_kandidaten = array(dirname(__DIR__) . '/html/sp_lib.php');
+}
+foreach ($sp_kandidaten as $sp_kandidat) {
     if (is_file($sp_kandidat)) { require_once $sp_kandidat; $sp_gefunden = true; break; }
 }
 if (!$sp_gefunden) {
@@ -914,9 +924,18 @@ if ($sp_rahmen) {
     <b><?= isset($sp_saetze['regeln']) ? count((array) $sp_saetze['regeln']) : 0 ?></b>
     <span class="sm-hilfe"><?= isset($sp_saetze['ziele']) ? count((array) $sp_saetze['ziele']) : 0 ?> <?= sp_e(sp_t('ALLG.ZIELE')) ?></span>
   </div>
+  <!-- Der grosse Wert ist die MQTT-Veroeffentlichung DIESES Plugins (mqtt_ein),
+       der Autostart des Gateways steht klein darunter. Bis 0.11.9 stand hier
+       der Autostart des Gateways; "MQTT ein" las sich, als sende das Plugin,
+       auch wenn es gar nicht veroeffentlichte.
+       Vorbild ZendureSolarFlow 0.9.21 und BatterieBMS 0.9.22. Ohne
+       MQTT-Abschnitt in general.json heisst der Autostart "nicht feststellbar"
+       statt "aus". -->
   <div class="sm-kachel">MQTT
-    <b class="<?= $sp_mqtt['autostart'] ? 'sm-an' : 'sm-aus' ?>"><?= $sp_mqtt['autostart'] ? sp_e(sp_t('ALLG.EIN')) : sp_e(sp_t('ALLG.AUS')) ?></b>
-    <span class="sm-hilfe"><?= sp_e(sp_t('ALLG.GATEWAY')) ?></span>
+    <b class="<?= !empty($sp_cfg['mqtt_ein']) ? 'sm-an' : 'sm-aus' ?>"><?= !empty($sp_cfg['mqtt_ein']) ? sp_e(sp_t('ALLG.EIN')) : sp_e(sp_t('ALLG.AUS')) ?></b>
+    <span class="sm-hilfe"><?= sp_e(sprintf(sp_t('ALLG.KACHEL_MQTT_HILFE'),
+        !$sp_mqtt['gefunden'] ? sp_t('ALLG.NICHT_FESTSTELLBAR')
+        : ($sp_mqtt['autostart'] ? sp_t('ALLG.EIN') : sp_t('ALLG.AUS')))) ?></span>
   </div>
   <div class="sm-kachel"><?= sp_e(sp_t('ALLG.RUHE')) ?>
     <b class="<?= $sp_ruhe_jetzt ? 'sm-aus' : 'sm-an' ?>"><?= $sp_ruhe_jetzt ? sp_e(sp_t('ALLG.STILL')) : sp_e(sp_t('ALLG.SPRICHT')) ?></b>

@@ -47,8 +47,12 @@ function sp_notify_wurzel()
     return '';
 }
 
+/* $LBHOMEDIR gilt wie in sp_lbhome() nur mit config/plugins darunter. Bis
+ * 0.11.9 genuegte ein Verzeichnis: gemessen am 25.09.2026 in WSL
+ * (Pruefung-Sprachsteuerung-0.11.10, Fall W6) band dieses Skript mit
+ * LBHOMEDIR auf einen beliebigen Baum dessen libs/phplib ein - fremder Code. */
 $home = getenv('LBHOMEDIR');
-if (!$home || !is_dir($home)) {
+if (!$home || !is_dir($home . '/config/plugins')) {
     $home = sp_notify_wurzel();
 }
 $sdk = $home . '/libs/phplib/loxberry_log.php';

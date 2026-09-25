@@ -109,15 +109,39 @@ function sp_paths()
      * Der feste Name greift nur noch dort, wo der ermittelte nachweislich kein
      * Plugin-Ordner sein kann: aus dem ausgepackten Archiv heraus heisst er
      * "html". */
-    $lbp = getenv('LBPPLUGINDIR');
-    if ($lbp) {
+    $lbp = basename(rtrim((string) getenv('LBPPLUGINDIR'), '/'));
+    $lbp_gilt = ($lbp !== '' && !in_array($lbp, array('.', '/', 'html', 'bin', 'plugins'), true));
+    if ($lbp_gilt) {
         $dir = $lbp;
     } elseif ($dir === '' || $dir === '.' || $dir === '/' || $dir === 'html') {
         $dir = 'sprachsteuerung';
     }
+    /* Archivmodus. Die Pfade DER ANLAGE gelten nur, wenn diese Bibliothek
+     * dort installiert liegt (<Wurzel>/webfrontend/html/plugins/<ordner>,
+     * physisch verglichen) oder der Aufrufer Wurzel UND Ordner ausdruecklich
+     * nennt ($LBHOMEDIR und $LBPPLUGINDIR - so arbeiten die Pruefwerkzeuge mit
+     * ihrer Attrappe). Sonst ist das ein ausgepacktes Archiv oder ein
+     * Pruefordner, und alles bleibt in dessen eigenem Ordner.
+     *
+     * Bis 0.11.9 nahm eine Archiv-Bibliothek unterhalb einer echten Wurzel
+     * diese Wurzel und den festen Namen 'sprachsteuerung' - ohne Umgebung
+     * ebenso wie mit $LBHOMEDIR allein, wie es am Geraet in /etc/environment
+     * steht; mit $LBPPLUGINDIR allein hielt sp_dienst('stop') den Dienst der
+     * Anlage an (gemessen am 25.09.2026 in WSL,
+     * Pruefung-Sprachsteuerung-0.11.10, Faelle A1, A2, A12). Bauart
+     * Spotpreis-Tibber 0.9.19 (tb_paths()). */
+    $gefunden = (string) $home;
+    if ($home) {
+        $soll = @realpath($home . '/webfrontend/html/plugins/' . basename(__DIR__));
+        $ist = @realpath(__DIR__);
+        $installiert = ($soll !== false && $ist !== false && $soll === $ist);
+        $ausdruecklich = $lbp_gilt
+            && rtrim((string) $home, '/') === rtrim((string) getenv('LBHOMEDIR'), '/');
+        if (!$installiert && !$ausdruecklich) { $home = ''; }
+    }
     if ($home) {
         $p = array(
-            'home' => $home, 'plugin' => $dir,
+            'home' => $home, 'plugin' => $dir, 'archiv' => '',
             'configdir' => $home . '/config/plugins/' . $dir,
             'config'    => $home . '/config/plugins/' . $dir . '/sprachsteuerung.json',
             'saetze'    => $home . '/config/plugins/' . $dir . '/saetze.json',
@@ -135,6 +159,9 @@ function sp_paths()
         $basis = dirname(dirname(__DIR__));
         $p = array(
             'home' => '', 'plugin' => $dir,
+            // Die gefundene Wurzel, wenn diese Datei NICHT darin installiert
+            // liegt (Archivmodus) - fuer die Meldung; sonst leer.
+            'archiv' => $gefunden,
             'configdir' => $basis . '/config',
             'config'    => $basis . '/config/sprachsteuerung.json',
             'saetze'    => $basis . '/config/saetze.json',
@@ -820,7 +847,13 @@ function sp_ist_dienst($pid)
     // Am Nullbyte trennen, nicht am Leerzeichen: ein Pfad darf Leerzeichen
     // tragen. Das letzte Feld ist nach dem abschliessenden Nullbyte leer.
     $argv = explode("\0", (string) $roh);
-    if (count($argv) < 2) {
+    // Genau zwei Argumente: der Dienst traegt argv[0] und argv[1], danach
+    // nur das abschliessende Nullbyte (drittes Feld leer). Ein drittes
+    // Argument (--selbsttest, --satz, --trocken) ist ein Einmallauf; bis
+    // 0.11.9 zeigte die Oberflaeche einen Selbsttest als laufenden Dienst
+    // (gemessen am 25.09.2026 in WSL, Pruefung-Sprachsteuerung-0.11.10,
+    // Fall D6).
+    if (count($argv) !== 3 || $argv[2] !== '') {
         return false;
     }
     // argv[0] ist der Interpreter - nur der Name, der Pfad ist beliebig
@@ -837,12 +870,33 @@ function sp_dienst_soll()
     return is_file(sp_paths()['datadir'] . '/soll_laufen') ? 1 : 0;
 }
 
+/**
+ * Leer, wenn diese Bibliothek in einer Installation liegt; sonst die
+ * Begruendung, warum ein Knopf nichts schaltet.
+ *
+ * Aus einem ausgepackten Archiv oder einem Pruefordner (sp_paths() im
+ * Archivmodus) wird weder der Dienst noch ein Container angefasst: Container
+ * sind rechnerweit, ein "stop" aus einem Archiv traefe die Container der
+ * Anlage (Muster 3 der Nachlese 24.09.2026; gemessen am 25.09.2026 in WSL,
+ * Pruefung-Sprachsteuerung-0.11.10, Fall A13).
+ */
+function sp_archiv_verweigert()
+{
+    $p = sp_paths();
+    if ($p['home'] !== '') { return ''; }
+    return 'Diese Oberflaeche liegt nicht in einer LoxBerry-Installation'
+        . (!empty($p['archiv']) ? ' (die Wurzel ' . $p['archiv'] . ' wurde gefunden, diese Datei liegt aber nicht darin)' : '')
+        . ' - ausgepacktes Archiv oder Pruefordner. Es wurde nichts geschaltet.';
+}
+
 /** $befehl ist 'start', 'stop' oder 'restart'. Rueckgabe: array(ok, Ausgabe) */
 function sp_dienst($befehl)
 {
     if (!in_array($befehl, array('start', 'stop', 'restart'), true)) {
         return array(0, 'Unbekannter Befehl.');
     }
+    $sp_nein = sp_archiv_verweigert();
+    if ($sp_nein !== '') { return array(0, $sp_nein); }
     $skript = sp_paths()['bindir'] . '/dienst.sh';
     if (!is_file($skript)) {
         return array(0, 'dienst.sh nicht gefunden: ' . $skript);
@@ -1542,11 +1596,17 @@ function sp_t($schluessel)
 {
     static $texte = null;
     if ($texte === null) {
-        // Wie in sp_paths() (siehe sp_lbhome(); Faelle B4, B8, C4).
-        $home = sp_lbhome();
+        // Die Wurzel aus sp_paths(): so bleibt ein Archiv unter einer echten
+        // Wurzel auch hier im eigenen Ordner. Ohne Wurzel NICHTS ab der
+        // Laufwerkswurzel: bis 0.11.9 hiess das
+        // '' . '/templates/plugins/html/lang', und was dort lag, galt vor den
+        // eigenen Sprachdateien (gemessen am 25.09.2026 in WSL im chroot,
+        // Pruefung-Sprachsteuerung-0.11.10, Fall P1; dieselbe Stelle fanden
+        // Spotpreis-Tibber 0.9.19 und ZendureSolarFlow 0.9.26).
+        $home = sp_paths()['home'];
         $ordner = basename(dirname(__FILE__));
-        $pfad = $home . '/templates/plugins/' . $ordner . '/lang';
-        if (!is_dir($pfad)) {
+        $pfad = $home !== '' ? $home . '/templates/plugins/' . $ordner . '/lang' : '';
+        if ($pfad === '' || !is_dir($pfad)) {
             $pfad = dirname(dirname(dirname(__FILE__))) . '/templates/lang';
         }
         $texte = @parse_ini_file($pfad . '/language_' . sp_sprache() . '.ini', true, INI_SCANNER_RAW);
@@ -1756,6 +1816,8 @@ function sp_container($dienst, $was)
     if (!in_array($dienst, sp_dienste(), true)) {
         return array(0, 'Unbekannter Dienst.');
     }
+    $sp_nein = sp_archiv_verweigert();
+    if ($sp_nein !== '') { return array(0, $sp_nein); }
     // Ausgelagerter Dienst: abweisen statt den falschen Rechner anzufassen.
     list($host, $port) = sp_dienst_ziel($dienst);
     if (!sp_ist_lokal($host)) {
