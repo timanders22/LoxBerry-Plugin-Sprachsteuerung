@@ -67,6 +67,15 @@ function sp_pruefungen()
         $zeilen[] = sp_pruefzeile(-1, sp_t('TEST.F_LLM'), sp_t('TEST.A_LLM_AUS'));
     }
 
+    /* Seit 0.11.11 (Bauliste Einrichtung E8): die Gesamtzeile der Ampel aus
+     * dem Reiter Dienste. Kein Haken ueber einer leeren Menge - ohne einen
+     * einzigen hier vorgesehenen Dienst bleibt die Zeile grau, und
+     * ausgelagerte Dienste stehen getrennt dahinter. */
+    $sp_ca = sp_ct_ampel($cfg, null);
+    $zeilen[] = sp_pruefzeile($sp_ca['gesamt'][0], sp_t('TEST.F_CT_EINGERICHTET'),
+        sp_e($sp_ca['gesamt'][1])
+        . ($sp_ca['gesamt'][2] !== '' ? '<br>' . sp_e($sp_ca['gesamt'][2]) : ''));
+
     $sats = isset($cfg['satelliten']) && is_array($cfg['satelliten']) ? $cfg['satelliten'] : array();
     $saetze = sp_saetze();
     $ziele = isset($saetze['ziele']) && is_array($saetze['ziele']) ? $saetze['ziele'] : array();

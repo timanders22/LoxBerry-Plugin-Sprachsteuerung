@@ -39,7 +39,9 @@ if ! command -v docker >/dev/null 2>&1; then
     echo "<INFO> Docker ist nicht installiert - es gibt keine Gruppe einzurichten."
     echo "<INFO> Ohne Docker kann das Plugin die Sprachdienste nicht selbst betreiben."
     echo "<INFO> Wer sie anderswo betreibt, traegt in den Einstellungen nur die"
-    echo "<INFO> Adressen ein. Docker nachruesten: LoxBerry-Plugin Docker."
+    echo "<INFO> Adressen ein. Docker nachruesten: LoxBerry-Plugin Docker NG,"
+    echo "<INFO> https://github.com/timanders22/LoxBerry-Plugin-Docker-NG"
+    echo "<INFO> (danach den LoxBerry einmal neu starten)."
     exit 0
 fi
 

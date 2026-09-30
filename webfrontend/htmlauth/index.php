@@ -708,20 +708,43 @@ if ($sp_post && isset($_POST['dienst'])) {
     $sp_tab = 'tab-settings';
 }
 
-/* ---------------- Container ---------------- */
+/* ---------------- Container ----------------
+ * Seit 0.11.11: "Sprachdienste einrichten", "Abbild holen" und "Anlegen"
+ * starten nur noch den Hintergrundvorgang (bin/container_vorgang.php) und
+ * leiten dann um (303) - ein Neuladen wiederholt so keinen POST, und die
+ * Seite zeigt den Stand aus der Zustandsdatei. Starten, Anhalten, Neu
+ * starten und Entfernen laufen im Seitenaufruf, mit Zeitgrenze, und nur am
+ * eigenen Container; bei einem fremden gibt es einen Hinweis mit Grund. */
+if ($sp_post && isset($_POST['ct_einrichten'])) {
+    list($sp_ok, $sp_satz) = sp_ct_vorgang_starten('einrichten');
+    if ($sp_ok) {
+        header('Location: index.php?form=services', true, 303);
+        exit;
+    }
+    $sp_fehler[] = sp_e($sp_satz);
+    $sp_tab = 'tab-services';
+}
 if ($sp_post && isset($_POST['container']) && isset($_POST['dienstname'])) {
     $sp_was = (string) $_POST['container'];
     $sp_dn = (string) $_POST['dienstname'];
-    if (!in_array($sp_was, array('anlegen', 'start', 'stop', 'restart', 'entfernen', 'holen'), true)) {
+    if (!in_array($sp_was, array('anlegen', 'start', 'stop', 'restart', 'entfernen', 'holen'), true)
+        || !in_array($sp_dn, sp_dienste(), true)) {
         $sp_fehler[] = sp_t('DIENST.FEHLER_BEFEHL');
-    } else {
-        list($sp_ok, $sp_aus) = sp_container($sp_dn, $sp_was);
+    } elseif ($sp_was === 'holen' || $sp_was === 'anlegen') {
+        list($sp_ok, $sp_satz) = sp_ct_vorgang_starten($sp_was, $sp_dn);
         if ($sp_ok) {
-            $sp_meldungen[] = sprintf(sp_t('DIENST.CONTAINER_OK'), sp_e($sp_dn), sp_e($sp_was))
-                            . ' <span class="sm-mono">' . sp_e(substr($sp_aus, 0, 160)) . '</span>';
+            header('Location: index.php?form=services', true, 303);
+            exit;
+        }
+        $sp_fehler[] = sprintf(sp_t('DIENST.CONTAINER_FEHL'), sp_e($sp_dn), sp_e($sp_was)) . ' ' . sp_e($sp_satz);
+    } else {
+        $sp_erg = sp_container($sp_dn, $sp_was);
+        if ($sp_erg[0]) {
+            $sp_meldungen[] = sprintf(sp_t('DIENST.CONTAINER_OK'), sp_e($sp_dn), sp_e($sp_was)) . ' ' . sp_e($sp_erg[1]);
+        } elseif ($sp_erg[2] === 'hinweis') {
+            $sp_hinweise[] = sp_e($sp_erg[1]);
         } else {
-            $sp_fehler[] = sprintf(sp_t('DIENST.CONTAINER_FEHL'), sp_e($sp_dn), sp_e($sp_was))
-                         . ' <span class="sm-mono">' . sp_e(substr($sp_aus, 0, 400)) . '</span>';
+            $sp_fehler[] = sprintf(sp_t('DIENST.CONTAINER_FEHL'), sp_e($sp_dn), sp_e($sp_was)) . ' ' . sp_e($sp_erg[1]);
         }
     }
     $sp_tab = 'tab-services';
@@ -806,6 +829,14 @@ $sp_offen = function ($t) use ($sp_tab) { return $sp_tab === $t; };
 
 $sp_hw = $sp_offen('tab-services') ? sp_hardware(false) : array();
 $sp_emp = isset($sp_hw['empfehlung']) ? $sp_hw['empfehlung'] : array();
+/* Seit 0.11.11: Stand des Hintergrundvorgangs und Ampel - nur im offenen
+ * Reiter Dienste. Die Ampel nicht, solange ein Vorgang laeuft: die Seite
+ * laedt sich dann alle 5 s neu und soll dabei nicht jedes Mal Docker
+ * fragen. */
+$sp_ctv = $sp_offen('tab-services') ? sp_ct_vorgang() : array('zustand' => 'keiner');
+$sp_ct_amp = ($sp_offen('tab-services')
+              && !in_array($sp_ctv['zustand'], array('gestartet', 'laeuft'), true))
+    ? sp_ct_ampel($sp_cfg, $sp_emp) : null;
 
 $sp_rahmen = class_exists('LBWeb', false);
 if ($sp_rahmen) {
@@ -1385,10 +1416,114 @@ foreach ($sp_modellfelder as $sp_feld => $sp_info) {
 </form>
 <div class="sm-hilfe"><?= sp_t('DIENST.MODELLE_LEER') ?></div>
 
-<h2><?= sp_e(sp_t('DIENST.H_CONTAINER')) ?></h2>
-<?php if (!sp_docker_da()) { ?>
-<div class="sm-fehler"><?= sp_t('DIENST.KEIN_DOCKER') ?></div>
+<?php
+/* Seit 0.11.11 (Bauliste Einrichtung E1, E3, E6, E7): EIN Knopf richtet die
+ * Sprachdienste ein - im Hintergrund, mit Ampel. Die Einzelknoepfe stehen
+ * darunter unter "Einzeln verwalten", die docker-run-Zeile nur noch dort
+ * (fuer ausgelagerte Dienste bleibt sie sichtbar wie bisher).
+ * Die Zeichen der Ampel sind feste Klassen (Regeln/04: CSS-Klassen
+ * woertlich, nicht zusammengesetzt). */
+$sp_ct_zeichen = function ($w) {
+    if ($w === 1) { return '<span class="sm-an">&#10004;</span>'; }
+    if ($w === 0) { return '<span class="sm-aus">&#10008;</span>'; }
+    return '<span style="color:#888;">&#9679;</span>';
+};
+$sp_ct_lauf = in_array($sp_ctv['zustand'], array('gestartet', 'laeuft'), true);
+$sp_ct_lage = $sp_ct_amp !== null ? $sp_ct_amp['lage'] : '';
+/* Der Zustand eines Containers in Worten: dieselben Schluessel ALLG.CONT_*
+ * wie bis 0.11.10, dazu CONT_FREMD und CONT_UNBEKANNT. */
+$sp_ct_ztext = function ($z) use ($sp_ct_lage) {
+    if ($z['container'] === 'unbekannt' && $sp_ct_lage === 'fehlt') {
+        return sp_t('ALLG.CONT_KEIN_DOCKER');
+    }
+    return sp_t('ALLG.CONT_' . strtoupper($z['container']));
+};
+$sp_ct_ohne_docker = in_array($sp_ct_lage, array('fehlt', 'kein_zugriff', 'dienst_aus'), true);
+?>
+<h2><?= sp_e(sp_t('CT.H_EINRICHTEN')) ?></h2>
+<?php if ($sp_ct_lauf) { ?>
+<meta http-equiv="refresh" content="5;url=index.php?form=services">
+<div class="sm-hinweis"><b><?= sp_e(sp_ct_vorgang_satz($sp_ctv)) ?></b><br><?= sp_e(sp_t('CT.V_NEU_LADEN')) ?>
+<a href="index.php?form=services"><?= sp_e(sp_t('DIENST.K_JETZT_LADEN')) ?></a></div>
+<?php } elseif ($sp_ctv['zustand'] === 'fertig') { ?>
+<div class="sm-hinweis"><?= sp_e(sp_ct_vorgang_satz($sp_ctv)) ?></div>
+<?php } elseif ($sp_ctv['zustand'] === 'fehler' || $sp_ctv['zustand'] === 'abgebrochen') { ?>
+<div class="sm-warnung"><?= sp_e(sp_ct_vorgang_satz($sp_ctv)) ?></div>
 <?php } ?>
+<?php if ($sp_ct_lage === 'fehlt') { ?>
+<div class="sm-fehler"><?= sp_t('DIENST.KEIN_DOCKER') ?></div>
+<?php } elseif ($sp_ct_lage === 'kein_zugriff' || $sp_ct_lage === 'dienst_aus') { ?>
+<div class="sm-fehler"><?= sp_e($sp_ct_amp['lagesatz']) ?><br><?= sp_t('DIENST.DOCKER_ANTWORTET_NICHT') ?></div>
+<?php } elseif ($sp_ct_lage === 'haengt' || $sp_ct_lage === 'fehler') { ?>
+<div class="sm-warnung"><?= sp_e($sp_ct_amp['lagesatz']) ?></div>
+<?php } ?>
+<p class="sm-hilfe"><?= sp_t('CT.EINRICHTEN_ERKLAERUNG') ?></p>
+<ul class="sm-hilfe">
+<?php foreach (sp_ct_vorschau($sp_cfg, $sp_emp) as $sp_cz) { ?>
+<li><?= sp_e(sp_ct_vorschau_satz($sp_cz)) ?></li>
+<?php } ?>
+</ul>
+<?php if (!$sp_ct_lauf && !$sp_ct_ohne_docker) { ?>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sp_t('LEGENDE.AKTION') ?></span></div>
+<div class="sm-knopfreihe">
+  <form action="index.php" method="post">
+    <?php $sp_hidden('tab-services'); ?>
+    <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="ct_einrichten" value="1"><?= sp_e(sp_t('CT.K_EINRICHTEN')) ?></button>
+  </form>
+</div>
+<?php } ?>
+
+<h3><?= sp_e(sp_t('CT.H_AMPEL')) ?></h3>
+<?php if ($sp_ct_amp === null) { ?>
+<div class="sm-hinweis"><?= sp_e(sp_t('CT.AMPEL_WARTET')) ?></div>
+<?php } else { ?>
+<div class="sm-roll">
+<table class="sm-tbl">
+<tr><th><?= sp_e(sp_t('CT.T_DIENST')) ?></th><th><?= sp_e(sp_t('CT.T_ABBILD')) ?></th><th><?= sp_e(sp_t('CT.T_LAEUFT')) ?></th><th><?= sp_e(sp_t('CT.T_PORT')) ?></th><th><?= sp_e(sp_t('CT.T_HINWEIS')) ?></th></tr>
+<?php foreach ($sp_ct_amp['dienste'] as $sp_cd => $sp_cz) {
+    if ($sp_cz['art'] === 'ausgelagert') {
+        $sp_ch = $sp_cz['antwortet'] === 1 ? sp_t('ALLG.CONT_EXTERN') : sp_t('ALLG.CONT_EXTERN_WEG');
+    } elseif ($sp_cz['art'] === 'ausgeschaltet') {
+        $sp_ch = sp_t('CT.A_AUSGESCHALTET');
+    } elseif ($sp_cz['art'] === 'nicht_vorgesehen') {
+        $sp_ch = sp_t('CT.A_NICHT_VORGESEHEN');
+    } else {
+        $sp_ch = $sp_ct_ztext($sp_cz) . ($sp_cz['grund'] !== '' ? ' - ' . $sp_cz['grund'] : '');
+    } ?>
+<tr><td><?= sp_e(sp_ct_dname($sp_cd)) ?></td>
+    <td style="text-align:center;"><?= $sp_cz['art'] === 'lokal' ? $sp_ct_zeichen($sp_cz['abbild']) : ($sp_cz['art'] === 'ausgeschaltet' ? $sp_ct_zeichen(-1) : '&mdash;') ?></td>
+    <td style="text-align:center;"><?= $sp_cz['art'] === 'lokal' ? $sp_ct_zeichen($sp_cz['laeuft']) : ($sp_cz['art'] === 'ausgeschaltet' ? $sp_ct_zeichen(-1) : '&mdash;') ?></td>
+    <td style="text-align:center;"><?= in_array($sp_cz['art'], array('lokal', 'ausgelagert'), true) ? $sp_ct_zeichen($sp_cz['antwortet']) : ($sp_cz['art'] === 'ausgeschaltet' ? $sp_ct_zeichen(-1) : '&mdash;') ?> <span class="sm-mono"><?= sp_e(($sp_cz['art'] === 'lokal' ? '127.0.0.1' : $sp_cz['host']) . ':' . $sp_cz['port']) ?></span></td>
+    <td><?= sp_e($sp_ch) ?></td></tr>
+<?php } ?>
+</table>
+</div>
+<div class="<?= $sp_ct_amp['gesamt'][0] === 1 ? 'sm-hinweis' : 'sm-warnung' ?>"><b><?= sp_e(sp_t('CT.GESAMT')) ?></b> <?= sp_e($sp_ct_amp['gesamt'][1]) ?>
+<?php if ($sp_ct_amp['gesamt'][2] !== '') { ?><br><?= sp_e($sp_ct_amp['gesamt'][2]) ?><?php } ?></div>
+<p class="sm-hilfe"><?= sp_e(sprintf(sp_t('CT.AMPEL_ZEIT'), date('d.m.Y H:i:s', (int) $sp_ct_amp['zeit']))) ?></p>
+<?php } ?>
+
+<?php foreach (sp_dienste() as $sp_d) {
+    list($sp_dhost, $sp_dport) = sp_dienst_ziel($sp_d, $sp_cfg);
+    if (sp_ist_lokal($sp_dhost)) { continue; }
+    $sp_bef = sp_container_befehl($sp_d, $sp_cfg, $sp_emp ?: null, true); ?>
+<h3><?= sp_e(sp_ct_dname($sp_d)) ?> <span class="sm-mono">(<?= sp_e($sp_dhost . ':' . $sp_dport) ?>)</span></h3>
+<div class="sm-hinweis"><?= sprintf(sp_t('DIENST.AUSGELAGERT'), sp_e($sp_dhost . ':' . $sp_dport)) ?></div>
+<?php if ($sp_bef !== '') { ?>
+<p><span class="sm-mono">docker <?= sp_e($sp_bef) ?></span></p>
+<?php } ?>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-technik"></i> <?= sp_t('LEGENDE.TECHNIK') ?></span></div>
+<div class="sm-knopfreihe">
+  <form action="index.php" method="post">
+    <?php $sp_hidden('tab-services'); ?>
+    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="containerlog" value="<?= $sp_d ?>"><?= sp_e(sp_t('DIENST.KC_LOG')) ?></button>
+  </form>
+</div>
+<?php } ?>
+
+<details class="sm-step"<?= (isset($_POST['container']) || isset($_POST['containerlog'])) ? ' open' : '' ?>>
+<summary><b><?= sp_e(sp_t('CT.H_EINZELN')) ?></b></summary>
+<p class="sm-hilfe"><?= sp_t('CT.EINZELN_ERKLAERUNG') ?></p>
 <div class="sm-warnung"><?= sp_t('DIENST.MODELL_WARNUNG') ?></div>
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-lesen"></i><?= sp_t('LEGENDE.LESEN_START') ?></span>
@@ -1397,25 +1532,15 @@ foreach ($sp_modellfelder as $sp_feld => $sp_info) {
 </div>
 <?php foreach (sp_dienste() as $sp_d) {
     list($sp_dhost, $sp_dport) = sp_dienst_ziel($sp_d, $sp_cfg);
-    $sp_ext = !sp_ist_lokal($sp_dhost);
-    $sp_zu = sp_container_zustand($sp_d, $sp_cfg);
-    $sp_bef = sp_container_befehl($sp_d, $sp_cfg, $sp_emp ?: null, $sp_ext); ?>
-<h3><?= sp_e(sp_t('EINST.L_' . strtoupper($sp_d === 'wakeword' ? 'WAKE' : $sp_d))) ?>
-    <span class="<?= ($sp_zu === 'laeuft' || $sp_zu === 'extern') ? 'sm-an' : 'sm-aus' ?>">&mdash; <?= sp_e(sp_t('ALLG.CONT_' . strtoupper($sp_zu))) ?></span>
+    if (!sp_ist_lokal($sp_dhost)) { continue; }
+    $sp_cz = ($sp_ct_amp !== null && isset($sp_ct_amp['dienste'][$sp_d])) ? $sp_ct_amp['dienste'][$sp_d] : null;
+    $sp_bef = sp_container_befehl($sp_d, $sp_cfg, $sp_emp ?: null, false); ?>
+<h3><?= sp_e(sp_ct_dname($sp_d)) ?>
+<?php if ($sp_cz !== null && $sp_cz['art'] === 'lokal') { ?>
+    <span class="<?= $sp_cz['container'] === 'laeuft' ? 'sm-an' : 'sm-aus' ?>">&mdash; <?= sp_e($sp_ct_ztext($sp_cz)) ?></span>
+<?php } ?>
     <span class="sm-mono">(<?= sp_e($sp_dhost . ':' . $sp_dport) ?>)</span></h3>
 <p class="sm-hilfe"><?= sp_t($sp_modelle['dienste'][$sp_d]['text']) ?></p>
-<?php if ($sp_ext) { ?>
-<div class="sm-hinweis"><?= sprintf(sp_t('DIENST.AUSGELAGERT'), sp_e($sp_dhost . ':' . $sp_dport)) ?></div>
-<?php if ($sp_bef !== '') { ?>
-<p><span class="sm-mono">docker <?= sp_e($sp_bef) ?></span></p>
-<?php } ?>
-<div class="sm-knopfreihe">
-  <form action="index.php" method="post">
-    <?php $sp_hidden('tab-services'); ?>
-    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="containerlog" value="<?= $sp_d ?>"><?= sp_e(sp_t('DIENST.KC_LOG')) ?></button>
-  </form>
-</div>
-<?php } else { ?>
 <?php if ($sp_bef !== '') { ?>
 <p><span class="sm-mono">docker <?= sp_e($sp_bef) ?></span></p>
 <?php } else { ?>
@@ -1458,7 +1583,7 @@ foreach ($sp_modellfelder as $sp_feld => $sp_info) {
   </form>
 </div>
 <?php } ?>
-<?php } ?>
+</details>
 
 <h2><?= sp_e(sp_t('DIENST.H_MESSEN')) ?></h2>
 <div class="sm-hinweis"><?= sp_t('DIENST.MESSEN_ERKLAERUNG') ?></div>

@@ -43,8 +43,8 @@
 #      der nicht startet - und niemand wuesste, warum. Sie wird
 #      zusammen mit der Sicherung entfernt.
 #
-#   4. Die Container. Die werden ABSICHTLICH NICHT angefasst - siehe
-#      unten.
+#   4. Die eigenen Container (seit 0.11.11; bis 0.11.10 blieben sie
+#      absichtlich stehen) - siehe unten.
 #
 #   5. Die zurueckbehaltenen MQTT-Themen (Abschnitt 1b). Bis 0.11.9 stand
 #      hier "Was NICHT aufgeraeumt werden muss: MQTT" - das war seit 0.11.5
@@ -250,19 +250,44 @@ if [ -f "$MARKE" ]; then
 fi
 
 # ---------------------------------------------------------------
-# 4. Container: bewusst NICHT anfassen
+# 4. Die eigenen Container (seit 0.11.11)
 # ---------------------------------------------------------------
-# In den Datenordnern der Container liegen die heruntergeladenen
-# Modelle - Whisper und das Sprachmodell sind zusammen mehrere
-# Gigabyte. Wer das Plugin nur neu installiert oder auf eine andere
-# Fassung wechselt, soll sie nicht erneut laden muessen. Und die
-# Container koennen von anderen Plugins oder von Hand mitbenutzt
-# werden; sie ungefragt zu loeschen waere ein Eingriff in fremde
-# Einrichtung.
-echo "<INFO> Die Container fuer Whisper, Piper, Wortwecker und Sprachmodell"
-echo "<INFO> bleiben unberuehrt - dort liegen die heruntergeladenen Modelle"
-echo "<INFO> (mehrere Gigabyte). Wer sie nicht mehr braucht, entfernt sie"
-echo "<INFO> ueber das Docker-Plugin oder mit 'docker rm -f <name>'."
+# Bis 0.11.10 blieben die Container ABSICHTLICH stehen, mit der Begruendung,
+# in ihren Datenordnern laegen die Modelle. Die liegen aber unter
+# data/plugins/<ordner>/modelle, und diesen Ordner raeumt LoxBerry beim
+# Deinstallieren ohnehin ab (plugininstall.pl, purge_installation - Regeln/06).
+# Zurueck blieben laufende Container, die auf einen geloeschten Ordner zeigten
+# und ihren Port weiter belegten.
+#
+# Entfernt wird NUR, was diesem Plugin gehoert: ein Container mit beiden
+# Labels de.loxberry.plugin.folder=<ordner> und de.loxberry.plugin.name=
+# sprachsteuerung, oder Altbestand ohne diese Labels, der genau
+# sprachsteuerung-<dienst> heisst UND aus dem Abbild aus templates/modelle.json
+# stammt. Die Entscheidung trifft dieselbe Bibliothek wie die Oberflaeche
+# (sp_ct_deinstallieren() ueber bin/container_vorgang.php), damit es nur EINE
+# Regel gibt. Jeder docker-Aufruf darin hat seine Zeitgrenze; dazu kommt hier
+# eine fuer den ganzen Schritt. Als root: der Gruppenzugang von loxberry wirkt
+# erst nach einem Neustart (postroot.sh), root braucht ihn nicht.
+# Der Modellordner wird hier nicht angefasst.
+if ! command -v docker >/dev/null 2>&1; then
+    echo "<INFO> Docker ist nicht installiert - es gibt keine Container dieses Plugins zu entfernen."
+elif ! command -v php >/dev/null 2>&1 || [ ! -f "$PBIN/container_vorgang.php" ]; then
+    echo "<WARNING> php oder bin/container_vorgang.php fehlt - die Container dieses Plugins wurden NICHT entfernt."
+    echo "<WARNING> Von Hand nachsehen: docker ps -a --filter label=de.loxberry.plugin.folder=$PFOLDER"
+    echo "<WARNING> und nach Containern mit dem Namen sprachsteuerung-whisper, -piper, -wakeword, -llm."
+else
+    env "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PFOLDER" timeout -k 5 300 \
+        php "$PBIN/container_vorgang.php" deinstallieren < /dev/null 2>&1
+    CT_RC=$?
+    if [ "$CT_RC" -eq 124 ] || [ "$CT_RC" -eq 137 ]; then
+        echo "<WARNING> Das Entfernen der Container wurde nach 300 Sekunden abgebrochen."
+        echo "<WARNING> Von Hand nachsehen: docker ps -a --filter label=de.loxberry.plugin.folder=$PFOLDER"
+    elif [ "$CT_RC" -ne 0 ]; then
+        echo "<WARNING> Nicht jeder Container dieses Plugins liess sich entfernen (Rueckgabewert $CT_RC) - siehe oben."
+    fi
+fi
+echo "<INFO> Die heruntergeladenen Modelle liegen unter data/plugins/$PFOLDER/modelle;"
+echo "<INFO> dieses Skript fasst sie nicht an, LoxBerry entfernt sie mit dem Datenordner."
 
 # ---------------------------------------------------------------
 # 5. Was bleibt, wird gesagt

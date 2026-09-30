@@ -1640,26 +1640,151 @@ function sp_t($schluessel)
  * Vier Container, alle nur im Heimnetz: Spracherkennung (Whisper),
  * Sprachausgabe (Piper), Wortwecker (openWakeWord) und wahlweise das
  * Sprachmodell. Die Aufrufzeilen folgen den Anleitungen der jeweiligen
- * Projekte. Der Modellordner wird NIE mitgeloescht - darin liegen Gigabyte,
- * die sonst erneut aus dem Netz kommen muessten.
+ * Projekte. Entfernen nimmt nur den Container, nie den Modellordner
+ * data/plugins/<ordner>/modelle - darin liegen Gigabyte, die sonst erneut
+ * aus dem Netz kommen muessten. (Den Datenordner samt Modellordner raeumt
+ * LoxBerry selbst beim Deinstallieren ab; das tut nicht dieses Plugin.)
+ *
+ * Seit 0.11.11 (Bauliste "Einrichtung", Muster MGiSmart 1.1.18/1.1.19):
+ *   - Jeder docker-Aufruf geht argumentweise (proc_open mit einer Liste,
+ *     keine Schale) und mit "timeout -k 5": inspect und ps 30 s, start, stop,
+ *     restart und rm 60 s. Bis 0.11.10 lief exec('docker ...') ohne Grenze
+ *     im Seitenaufruf; ein "docker pull" eines Abbilds von mehreren Gigabyte
+ *     hielt die Seite, bis Apache oder PHP abbrach, und der Anwender sah
+ *     nichts.
+ *   - pull und run laufen nur noch im Hintergrundvorgang
+ *     (bin/container_vorgang.php), pull mit 3600 s.
+ *   - Angefasst wird nur ein EIGENER Container: er traegt beide Labels
+ *     de.loxberry.plugin.folder=<ordner> und de.loxberry.plugin.name=
+ *     sprachsteuerung, oder er ist Altbestand ohne diese Labels, heisst genau
+ *     sprachsteuerung-<dienst> UND stammt aus dem Abbild, das
+ *     templates/modelle.json fuer diesen Dienst nennt (docker inspect).
+ *     Jeder andere bleibt stehen, und die Oberflaeche sagt, warum
+ *     (sinngemaess ENTSCHEIDUNGEN 2026-09-29 Nr. 9, Docker NG).
  * ================================================================== */
 
-function sp_docker_da()
+define('SP_CT_ZEIT_LAGE', 10);
+define('SP_CT_ZEIT_LESEN', 30);
+define('SP_CT_ZEIT_SCHALTEN', 60);
+define('SP_CT_ZEIT_PULL', 3600);
+define('SP_CT_ZEIT_RUN', 600);
+define('SP_CT_LABEL_ORDNER', 'de.loxberry.plugin.folder');
+define('SP_CT_LABEL_NAME', 'de.loxberry.plugin.name');
+define('SP_CT_NAME', 'sprachsteuerung');
+
+/** Pfad zum docker-Programm, oder ''. */
+function sp_docker_bin()
 {
-    $a = array();
-    @exec('command -v docker 2>/dev/null', $a);
-    return count($a) > 0 ? 1 : 0;
+    static $pfad = null;
+    if ($pfad === null) {
+        $out = array();
+        @exec('command -v docker 2>/dev/null', $out);
+        $k = isset($out[0]) ? trim($out[0]) : '';
+        $pfad = ($k !== '' && is_file($k)) ? $k : '';
+    }
+    return $pfad;
 }
 
-function sp_docker($argumente)
+/* Die fruehere Funktion, die nur fragte, ob das Programm docker da ist,
+ * gibt es seit 0.11.11 nicht mehr: ob docker da ist UND antwortet, sagt
+ * sp_docker_lage(). Die blosse Frage stellte nur die alte Anzeige. */
+
+/**
+ * docker argumentweise ausfuehren, begrenzt durch "timeout -k 5".
+ * Rueckgabe array(rc, stdout, stderr). rc 124 heisst Zeitablauf (137, wenn
+ * erst das KILL nach weiteren 5 s griff), 127 docker fehlt. Ohne -k schickt
+ * timeout nur SIGTERM; ein docker, der es nicht annimmt, hielte den Aufrufer
+ * fest (gemessen im Pruefstand 0.11.8, Fall uninstall_hartnaeckig).
+ */
+function sp_docker_ruf(array $args, $sekunden)
 {
-    if (!sp_docker_da()) {
-        return array(0, 'Docker ist auf diesem LoxBerry nicht installiert.');
+    $bin = sp_docker_bin();
+    if ($bin === '' || !function_exists('proc_open')) {
+        return array(127, '', 'docker fehlt');
     }
-    $ausgabe = array();
-    $code = 0;
-    @exec('docker ' . $argumente . ' 2>&1', $ausgabe, $code);
-    return array($code === 0 ? 1 : 0, implode("\n", $ausgabe));
+    $cmd = array('timeout', '-k', '5', (string) max(1, (int) $sekunden), $bin);
+    foreach ($args as $a) {
+        $cmd[] = (string) $a;
+    }
+    $desk = array(0 => array('file', '/dev/null', 'r'), 1 => array('pipe', 'w'), 2 => array('pipe', 'w'));
+    $pipes = array();
+    $proc = @proc_open($cmd, $desk, $pipes);
+    if (!is_resource($proc)) {
+        return array(127, '', 'proc_open gescheitert');
+    }
+    stream_set_blocking($pipes[1], false);
+    stream_set_blocking($pipes[2], false);
+    $aus = array(1 => '', 2 => '');
+    $offen = array(1 => $pipes[1], 2 => $pipes[2]);
+    $runden = 0;
+    // Rundenobergrenze und Puffergrenze (Regeln/03, fgets auf einer Pipe).
+    while ($offen && $runden < 100000) {
+        $runden++;
+        $lesen = array_values($offen);
+        $w = null;
+        $e = null;
+        if (@stream_select($lesen, $w, $e, 1) === false) {
+            break;
+        }
+        foreach ($offen as $n => $h) {
+            $t = fread($h, 65536);
+            if ($t !== false && $t !== '' && strlen($aus[$n]) < 1048576) {
+                $aus[$n] .= $t;
+            }
+            if (feof($h)) {
+                fclose($h);
+                unset($offen[$n]);
+            }
+        }
+    }
+    foreach ($offen as $h) {
+        fclose($h);
+    }
+    $rc = proc_close($proc);
+    return array((int) $rc, $aus[1], $aus[2]);
+}
+
+/** Hat timeout zugeschlagen? 124 nach TERM, 137 nach dem KILL von -k. */
+function sp_ct_zeitablauf($rc)
+{
+    return $rc === 124 || $rc === 137;
+}
+
+/** Einen Text fuer eine Meldung kuerzen, ohne ein UTF-8-Zeichen zu zerschneiden. */
+function sp_ct_kurz($text, $laenge = 200)
+{
+    $text = trim(preg_replace('/\s+/', ' ', (string) $text));
+    if (strlen($text) <= $laenge) {
+        return $text;
+    }
+    return rtrim(preg_replace('/[\x80-\xBF]+$/', '', preg_replace('/[\xC0-\xFF]$/', '', substr($text, 0, $laenge)))) . ' ...';
+}
+
+/**
+ * Ist Docker erreichbar? Rueckgabe array(lage, satz) mit lage
+ * ok | fehlt | kein_zugriff | dienst_aus | haengt | fehler.
+ * Bauart mg_docker_lage() aus MGiSmart 1.1.18.
+ */
+function sp_docker_lage($sekunden = SP_CT_ZEIT_LAGE)
+{
+    if (sp_docker_bin() === '') {
+        return array('fehlt', sp_t('CT.DOCKER_FEHLT'));
+    }
+    list($rc, $out, $err) = sp_docker_ruf(array('info', '--format', '{{.ServerVersion}}'), $sekunden);
+    if ($rc === 0) {
+        return array('ok', sprintf(sp_t('CT.DOCKER_OK'), trim($out)));
+    }
+    if (sp_ct_zeitablauf($rc)) {
+        return array('haengt', sprintf(sp_t('CT.DOCKER_HAENGT'), (int) $sekunden));
+    }
+    $t = strtolower($err);
+    if (strpos($t, 'permission denied') !== false) {
+        return array('kein_zugriff', sp_t('CT.DOCKER_KEIN_ZUGRIFF'));
+    }
+    if (strpos($t, 'cannot connect') !== false || strpos($t, 'daemon running') !== false) {
+        return array('dienst_aus', sp_t('CT.DOCKER_DIENST_AUS'));
+    }
+    return array('fehler', sprintf(sp_t('CT.DOCKER_FEHLER'), $rc, sp_ct_kurz($err, 200)));
 }
 
 /** Die vier Dienste mit Containernamen. */
@@ -1672,6 +1797,12 @@ function sp_container_name($dienst)
 {
     $dienst = preg_replace('/[^a-z]/', '', (string) $dienst);
     return 'sprachsteuerung-' . ($dienst !== '' ? $dienst : 'unbekannt');
+}
+
+/** Der Anzeigename eines Dienstes (dieselben Schluessel wie die Einstellungen). */
+function sp_ct_dname($dienst)
+{
+    return sp_t('EINST.L_' . strtoupper($dienst === 'wakeword' ? 'WAKE' : (string) $dienst));
 }
 
 /**
@@ -1733,140 +1864,943 @@ function sp_port_offen($host, $port, $timeout = 2.0)
     return true;
 }
 
-/**
- * 'laeuft', 'gestoppt', 'fehlt', 'kein_docker' fuer eigene Container;
- * 'extern' oder 'extern_weg' fuer Dienste auf einem anderen Rechner.
- */
-function sp_container_zustand($dienst, $cfg = null)
+/** Das Abbild eines Dienstes laut templates/modelle.json, oder ''. */
+function sp_ct_abbild($dienst)
 {
-    list($host, $port) = sp_dienst_ziel($dienst, $cfg);
-    if (!sp_ist_lokal($host)) {
-        return sp_port_offen($host, $port) ? 'extern' : 'extern_weg';
-    }
-    if (!sp_docker_da()) { return 'kein_docker'; }
-    list($ok, $aus) = sp_docker('inspect -f {{.State.Running}} '
-                                . escapeshellarg(sp_container_name($dienst)));
-    if (!$ok) { return 'fehlt'; }
-    return trim($aus) === 'true' ? 'laeuft' : 'gestoppt';
+    $tab = sp_modelle();
+    return isset($tab['dienste'][$dienst]['abbild']) ? (string) $tab['dienste'][$dienst]['abbild'] : '';
 }
 
 /**
- * Die Aufrufzeile fuer einen Dienst - auch fuer die Anzeige.
+ * Einen Abbildnamen vergleichbar machen: docker.io/ und library/ vorne weg,
+ * ohne Tag gilt :latest. So heissen 'rhasspy/wyoming-whisper',
+ * 'rhasspy/wyoming-whisper:latest' und 'docker.io/rhasspy/wyoming-whisper'
+ * gleich; 'ghcr.io/ggml-org/llama.cpp:server' bleibt, wie es ist.
+ */
+function sp_ct_abbild_norm($a)
+{
+    $a = trim((string) $a);
+    if ($a === '' || strpos($a, '@') !== false) {
+        return $a;
+    }
+    foreach (array('docker.io/library/', 'index.docker.io/library/', 'docker.io/', 'index.docker.io/') as $v) {
+        if (strpos($a, $v) === 0) {
+            $a = substr($a, strlen($v));
+            break;
+        }
+    }
+    $letzt = strrpos($a, '/');
+    $name = $letzt === false ? $a : substr($a, $letzt + 1);
+    if (strpos($name, ':') === false) {
+        $a .= ':latest';
+    }
+    return $a;
+}
+
+/** Traegt der Container BEIDE eigenen Labels dieses Ordners? */
+function sp_ct_label_eigen($info, $ordner)
+{
+    $l = (is_array($info) && isset($info['Config']['Labels']) && is_array($info['Config']['Labels']))
+        ? $info['Config']['Labels'] : array();
+    return isset($l[SP_CT_LABEL_ORDNER], $l[SP_CT_LABEL_NAME])
+        && (string) $l[SP_CT_LABEL_ORDNER] === (string) $ordner
+        && (string) $l[SP_CT_LABEL_NAME] === SP_CT_NAME;
+}
+
+/**
+ * Gehoert dieser Container (docker inspect, erstes Element) dem Plugin?
+ * Rueckgabe array(art, grund): art 'label' | 'altbestand' | '' (fremd),
+ * grund ein Satz, warum er fremd ist.
+ *
+ * Nur die EIGENEN Label-Schluessel zaehlen: Abbilder bringen oft eigene
+ * Labels mit (org.opencontainers.image.*), die sagen nichts ueber den
+ * Eigentuemer.
+ */
+function sp_ct_eigentum($info, $dienst, $ordner = null)
+{
+    if ($ordner === null) { $ordner = sp_paths()['plugin']; }
+    $l = (is_array($info) && isset($info['Config']['Labels']) && is_array($info['Config']['Labels']))
+        ? $info['Config']['Labels'] : array();
+    $lo = isset($l[SP_CT_LABEL_ORDNER]) ? (string) $l[SP_CT_LABEL_ORDNER] : '';
+    $ln = isset($l[SP_CT_LABEL_NAME]) ? (string) $l[SP_CT_LABEL_NAME] : '';
+    $name = ltrim(isset($info['Name']) ? (string) $info['Name'] : '', '/');
+    if ($lo !== '' || $ln !== '') {
+        if (sp_ct_label_eigen($info, $ordner)) {
+            return array('label', '');
+        }
+        return array('', sprintf(sp_t('CT.FREMD_LABEL'), $name, $lo !== '' ? $lo : '-',
+                                 $ln !== '' ? $ln : '-', $ordner));
+    }
+    if ($name !== sp_container_name($dienst)) {
+        return array('', sprintf(sp_t('CT.FREMD_NAME'), $name, sp_container_name($dienst)));
+    }
+    $ist = isset($info['Config']['Image']) ? (string) $info['Config']['Image'] : '';
+    $soll = sp_ct_abbild($dienst);
+    if ($soll === '' || sp_ct_abbild_norm($ist) !== sp_ct_abbild_norm($soll)) {
+        return array('', sprintf(sp_t('CT.FREMD_ABBILD'), $name, $ist !== '' ? $ist : '-',
+                                 $soll !== '' ? $soll : '-'));
+    }
+    return array('altbestand', '');
+}
+
+/** docker inspect eines Containers; null, wenn es ihn nicht gibt oder docker nicht antwortet. */
+function sp_ct_inspect($ref, $sekunden = SP_CT_ZEIT_LESEN)
+{
+    list($rc, $out, ) = sp_docker_ruf(array('inspect', '--type', 'container', (string) $ref), $sekunden);
+    if ($rc !== 0) {
+        return null;
+    }
+    $d = json_decode($out, true);
+    return (is_array($d) && isset($d[0]) && is_array($d[0])) ? $d[0] : null;
+}
+
+/**
+ * Den Container eines Dienstes suchen (nach dem Namen) und einordnen.
+ * 'fehler' ist gesetzt, wenn docker nicht zu fragen war - dann ist der
+ * Zustand UNBEKANNT, nicht "fehlt": sonst legte das Einrichten nach einer
+ * Zeitueberschreitung einen zweiten Container an.
+ */
+function sp_ct_finden($dienst, $sekunden = SP_CT_ZEIT_LESEN)
+{
+    $erg = array('da' => false, 'eigen' => '', 'grund' => '', 'laeuft' => false, 'status' => '',
+                 'id' => '', 'id_voll' => '', 'name' => sp_container_name($dienst), 'fehler' => '');
+    list($rc, $out, $err) = sp_docker_ruf(array('inspect', '--type', 'container', sp_container_name($dienst)),
+                                          $sekunden);
+    if ($rc !== 0) {
+        $t = strtolower($err);
+        if (sp_ct_zeitablauf($rc)) {
+            $erg['fehler'] = sprintf(sp_t('CT.ZEITABLAUF'), 'docker inspect', (int) $sekunden);
+        } elseif (strpos($t, 'no such') === false) {
+            $erg['fehler'] = sprintf(sp_t('CT.DOCKER_FEHLER'), $rc, sp_ct_kurz($err, 200));
+        }
+        return $erg;
+    }
+    $d = json_decode($out, true);
+    $info = (is_array($d) && isset($d[0]) && is_array($d[0])) ? $d[0] : null;
+    if ($info === null) {
+        $erg['fehler'] = sprintf(sp_t('CT.DOCKER_FEHLER'), $rc, sp_ct_kurz($out, 120));
+        return $erg;
+    }
+    list($art, $grund) = sp_ct_eigentum($info, $dienst);
+    $s = isset($info['State']) && is_array($info['State']) ? $info['State'] : array();
+    $erg['da'] = true;
+    $erg['eigen'] = $art;
+    $erg['grund'] = $grund;
+    $erg['laeuft'] = !empty($s['Running']);
+    $erg['status'] = isset($s['Status']) ? (string) $s['Status'] : '';
+    $erg['id_voll'] = isset($info['Id']) ? (string) $info['Id'] : '';
+    $erg['id'] = substr($erg['id_voll'], 0, 12);
+    return $erg;
+}
+
+/** Liegt das Abbild schon auf dem LoxBerry? 1 ja, 0 nein, -1 nicht feststellbar. */
+function sp_ct_abbild_da($abbild, $sekunden = SP_CT_ZEIT_LESEN)
+{
+    if ((string) $abbild === '') {
+        return -1;
+    }
+    list($rc, , $err) = sp_docker_ruf(array('image', 'inspect', '--format', '{{.Id}}', (string) $abbild), $sekunden);
+    if ($rc === 0) {
+        return 1;
+    }
+    return (!sp_ct_zeitablauf($rc) && stripos($err, 'no such') !== false) ? 0 : -1;
+}
+
+/**
+ * Das Modell, mit dem ein Dienst angelegt wird: eingestellt vor empfohlen
+ * vor Vorgabe. Beim Sprachmodell gibt es keine Vorgabe - '' heisst: kein
+ * Sprachmodell vorgesehen.
+ */
+function sp_ct_modell($dienst, $cfg, $emp)
+{
+    $emp = is_array($emp) ? $emp : array();
+    if ($dienst === 'whisper') {
+        $m = trim((string) (isset($cfg['whisper_modell']) ? $cfg['whisper_modell'] : ''));
+        if ($m === '' && isset($emp['whisper']['modell'])) { $m = (string) $emp['whisper']['modell']; }
+        return $m !== '' ? $m : 'base-int8';
+    }
+    if ($dienst === 'piper') {
+        $m = trim((string) (isset($cfg['piper_stimme']) ? $cfg['piper_stimme'] : ''));
+        if ($m === '' && isset($emp['piper']['stimme'])) { $m = (string) $emp['piper']['stimme']; }
+        return $m !== '' ? $m : 'de_DE-thorsten-low';
+    }
+    if ($dienst === 'wakeword') {
+        $m = trim((string) (isset($cfg['wakeword']) ? $cfg['wakeword'] : ''));
+        return $m !== '' ? $m : 'ok_nabu';
+    }
+    if ($dienst === 'llm') {
+        $m = trim((string) (isset($cfg['llm_modell']) ? $cfg['llm_modell'] : ''));
+        if ($m === '' && !empty($emp['llm']) && isset($emp['llm']['quelle'])) { $m = (string) $emp['llm']['quelle']; }
+        return $m;
+    }
+    return '';
+}
+
+/**
+ * Die Argumente von "docker run" fuer einen Dienst, argumentweise; array(),
+ * wenn fuer diesen Dienst nichts anzulegen ist (Sprachmodell ohne Modell).
  *
  * Absichtlich OHNE --network=host: diese Dienste brauchen kein Wirtsnetz,
  * eine Portweiterleitung genuegt. Das haelt sie vom uebrigen Netz fern.
  *
- * $fuer_extern = true liefert dieselbe Zeile zum Mitnehmen auf einen ANDEREN
- * Rechner. Zwei Unterschiede sind noetig: der Port muss ans Netz gebunden
- * werden (sonst kaeme der LoxBerry nicht heran), und der Modellordner liegt
- * dort natuerlich woanders - deshalb ein neutraler Pfad statt des hiesigen.
- * Diese Zeile wird NICHT ausgefuehrt, sie wird nur angezeigt.
+ * $fuer_extern = true liefert die Zeile zum Mitnehmen auf einen ANDEREN
+ * Rechner: der Port wird ans Netz gebunden (sonst kaeme der LoxBerry nicht
+ * heran), der Modellordner ist ein neutraler Pfad, und die Labels fehlen -
+ * sie sagen dort nichts. Diese Zeile wird NIE ausgefuehrt, nur angezeigt.
  */
-function sp_container_befehl($dienst, $cfg = null, $emp = null, $fuer_extern = false)
+function sp_ct_run_liste($dienst, $cfg = null, $emp = null, $fuer_extern = false)
 {
     if ($cfg === null) { $cfg = sp_config(); }
     $p = sp_paths();
     $tab = sp_modelle();
     $d = isset($tab['dienste'][$dienst]) ? $tab['dienste'][$dienst] : null;
-    if ($d === null) { return ''; }
-    $modelle = $fuer_extern ? '/opt/sprachsteuerung/modelle' : $p['datadir'] . '/modelle';
-    $name = sp_container_name($dienst);
+    if ($d === null || !isset($d['abbild'], $d['port'])) { return array(); }
+    $modell = sp_ct_modell($dienst, $cfg, $emp);
+    if ($modell === '') { return array(); }
+    $ordner = $fuer_extern ? '/opt/sprachsteuerung/modelle' : $p['datadir'] . '/modelle';
     $port = (int) $d['port'];
-    $abbild = (string) $d['abbild'];
-
-    $zeile = 'run -d --name ' . escapeshellarg($name)
-           . ' --restart=unless-stopped'
-           . ' -p ' . ($fuer_extern ? '' : '127.0.0.1:') . $port . ':' . $port
-           . ' -v ' . escapeshellarg($modelle . '/' . $dienst . ':/data');
-
-    if ($dienst === 'whisper') {
-        $modell = trim((string) $cfg['whisper_modell']);
-        if ($modell === '' && $emp !== null) { $modell = (string) $emp['whisper']['modell']; }
-        if ($modell === '') { $modell = 'base-int8'; }
-        $zeile .= ' ' . escapeshellarg($abbild)
-                . ' --model ' . escapeshellarg($modell)
-                . ' --language ' . escapeshellarg((string) $cfg['sprache']);
-    } elseif ($dienst === 'piper') {
-        $stimme = trim((string) $cfg['piper_stimme']);
-        if ($stimme === '' && $emp !== null) { $stimme = (string) $emp['piper']['stimme']; }
-        if ($stimme === '') { $stimme = 'de_DE-thorsten-low'; }
-        $zeile .= ' ' . escapeshellarg($abbild) . ' --voice ' . escapeshellarg($stimme);
-    } elseif ($dienst === 'wakeword') {
-        $wort = trim((string) $cfg['wakeword']);
-        if ($wort === '') { $wort = 'ok_nabu'; }
-        $zeile .= ' ' . escapeshellarg($abbild)
-                . ' --preload-model ' . escapeshellarg($wort);
-    } elseif ($dienst === 'llm') {
-        $modell = trim((string) $cfg['llm_modell']);
-        if ($modell === '' && $emp !== null && !empty($emp['llm'])) {
-            $modell = (string) $emp['llm']['quelle'];
-        }
-        if ($modell === '') { return ''; }
-        // llama.cpp laedt das Modell selbst von HuggingFace, wenn -hf gesetzt ist.
-        $zeile .= ' ' . escapeshellarg($abbild)
-                . ' -hf ' . escapeshellarg($modell)
-                . ' --host 0.0.0.0 --port ' . $port . ' -c 2048';
+    $a = array('run', '-d', '--name', sp_container_name($dienst), '--restart=unless-stopped',
+               '-p', ($fuer_extern ? '' : '127.0.0.1:') . $port . ':' . $port,
+               '-v', $ordner . '/' . $dienst . ':/data');
+    if (!$fuer_extern) {
+        $a[] = '--label';
+        $a[] = SP_CT_LABEL_ORDNER . '=' . $p['plugin'];
+        $a[] = '--label';
+        $a[] = SP_CT_LABEL_NAME . '=' . SP_CT_NAME;
     }
-    return $zeile;
+    $a[] = (string) $d['abbild'];
+    if ($dienst === 'whisper') {
+        $sprache = isset($cfg['sprache']) ? (string) $cfg['sprache'] : 'de';
+        array_push($a, '--model', $modell, '--language', $sprache);
+    } elseif ($dienst === 'piper') {
+        array_push($a, '--voice', $modell);
+    } elseif ($dienst === 'wakeword') {
+        array_push($a, '--preload-model', $modell);
+    } elseif ($dienst === 'llm') {
+        // llama.cpp laedt das Modell selbst von HuggingFace, wenn -hf gesetzt ist.
+        array_push($a, '-hf', $modell, '--host', '0.0.0.0', '--port', (string) $port, '-c', '2048');
+    }
+    return $a;
 }
 
-/** $was ist 'anlegen', 'start', 'stop', 'restart', 'entfernen' oder 'holen'. */
+/** Ein Argument fuer die ANZEIGE schreiben (einfach gequotet, wo noetig). */
+function sp_ct_zeigen($a)
+{
+    $a = (string) $a;
+    if ($a !== '' && preg_match('#^[A-Za-z0-9_./:=@,+-]+\z#', $a)) {
+        return $a;
+    }
+    return "'" . str_replace("'", "'\\''", $a) . "'";
+}
+
+/**
+ * Die Aufrufzeile fuer einen Dienst - fuer die Anzeige (ohne "docker"
+ * davor). Seit 0.11.11 aus derselben Liste, die der Hintergrundvorgang
+ * ausfuehrt; bis 0.11.10 gab es dafuer eine eigene Zeichenkette, und
+ * "Anlegen" benutzte sie ohne die Empfehlung, waehrend die Anzeige sie mit
+ * Empfehlung zeigte.
+ */
+function sp_container_befehl($dienst, $cfg = null, $emp = null, $fuer_extern = false)
+{
+    $liste = sp_ct_run_liste($dienst, $cfg, $emp, $fuer_extern);
+    if (!$liste) { return ''; }
+    return implode(' ', array_map('sp_ct_zeigen', $liste));
+}
+
+/**
+ * Das Sprachmodell ist ausgeschaltet (llm_ein=0)? Dann legt der Knopf
+ * "Sprachdienste einrichten" es NICHT an, auch wenn eines empfohlen ist - wer
+ * es ausgeschaltet hat, bekommt keine 1 bis 5 GB heruntergeladen
+ * (Entscheidung des Hausherrn, 30.09.2026). Die Einzelknoepfe bleiben nutzbar.
+ */
+function sp_ct_llm_aus($dienst, $cfg)
+{
+    return $dienst === 'llm' && empty($cfg['llm_ein']);
+}
+
+/**
+ * Was der Knopf "Sprachdienste einrichten" mit jedem Dienst tun wird -
+ * ohne docker zu fragen, fuer die Anzeige vor dem Druecken.
+ * Rueckgabe: je Dienst array(dienst, art, modell, host, port) mit art
+ * 'einrichten' | 'ausgelagert' | 'ausgeschaltet' | 'kein_modell'.
+ */
+function sp_ct_vorschau($cfg, $emp)
+{
+    $aus = array();
+    foreach (sp_dienste() as $d) {
+        list($host, $port) = sp_dienst_ziel($d, $cfg);
+        $art = 'einrichten';
+        if (!sp_ist_lokal($host)) {
+            $art = 'ausgelagert';
+        } elseif (sp_ct_llm_aus($d, $cfg)) {
+            $art = 'ausgeschaltet';
+        } elseif (!sp_ct_run_liste($d, $cfg, $emp, false)) {
+            $art = 'kein_modell';
+        }
+        $aus[] = array('dienst' => $d, 'art' => $art, 'modell' => sp_ct_modell($d, $cfg, $emp),
+                       'host' => $host, 'port' => $port);
+    }
+    return $aus;
+}
+
+/** Ein Satz je Zeile der Vorschau. */
+function sp_ct_vorschau_satz($z)
+{
+    if ($z['art'] === 'ausgelagert') {
+        return sprintf(sp_t('CT.P_AUSGELAGERT'), sp_ct_dname($z['dienst']), $z['host'] . ':' . $z['port']);
+    }
+    if ($z['art'] === 'ausgeschaltet') {
+        return sprintf(sp_t('CT.P_AUSGESCHALTET'), sp_ct_dname($z['dienst']));
+    }
+    if ($z['art'] === 'kein_modell') {
+        return sprintf(sp_t('CT.P_KEIN_MODELL'), sp_ct_dname($z['dienst']));
+    }
+    return sprintf(sp_t('CT.P_EINRICHTEN'), sp_ct_dname($z['dienst']), $z['modell'],
+                   sp_ct_abbild($z['dienst']));
+}
+
+/* ---------------- Der Hintergrundvorgang ---------------- */
+
+function sp_ct_vorgang_datei()
+{
+    return sp_paths()['datadir'] . '/container_vorgang.json';
+}
+
+function sp_ct_vorgang_schreiben(array $d)
+{
+    return sp_json_schreiben(sp_ct_vorgang_datei(), $d, 0600);
+}
+
+/** Das Programm des Hintergrundvorgangs (installiert unter bin/plugins/<ordner>/). */
+function sp_ct_vorgang_programm()
+{
+    return sp_paths()['bindir'] . '/container_vorgang.php';
+}
+
+/** Laeuft der Prozess $pid wirklich als dieser Hintergrundvorgang? Argumentweise. */
+function sp_ct_vorgang_prozess($pid)
+{
+    $pid = (int) $pid;
+    if ($pid <= 0 || !is_readable('/proc/' . $pid . '/cmdline')) {
+        return false;
+    }
+    $a = explode("\0", (string) @file_get_contents('/proc/' . $pid . '/cmdline'));
+    return isset($a[1]) && $a[1] === sp_ct_vorgang_programm()
+        && preg_match('#(^|/)php[0-9.]*\z#', (string) $a[0]) === 1;
+}
+
+/**
+ * Der Stand des Hintergrundvorgangs. zustand: keiner | gestartet | laeuft |
+ * fertig | fehler | abgebrochen. "abgebrochen": die Datei sagt "laeuft",
+ * aber der Prozess ist fort - oder er ist nach 20 s nie angelaufen.
+ */
+function sp_ct_vorgang()
+{
+    $d = sp_json_lesen(sp_ct_vorgang_datei());
+    if (!isset($d['zustand']) || !is_string($d['zustand'])) {
+        return array('zustand' => 'keiner');
+    }
+    $d += array('vorgang' => '', 'dienst' => '', 'start' => 0, 'pid' => 0, 'meldung' => '',
+                'schritt' => '', 'schritt_nr' => 0, 'schritte' => 0, 'ende' => 0);
+    if ($d['zustand'] === 'laeuft' && !sp_ct_vorgang_prozess($d['pid'])) {
+        $d['zustand'] = 'abgebrochen';
+    }
+    if ($d['zustand'] === 'gestartet' && time() - (int) $d['start'] > 20) {
+        $d['zustand'] = 'abgebrochen';
+    }
+    return $d;
+}
+
+/**
+ * Einen Hintergrundvorgang starten: 'einrichten' (alle Dienste), 'holen'
+ * oder 'anlegen' (ein Dienst). Kein Warten im Seitenaufbau: die Seite zeigt
+ * danach "wird eingerichtet ... Schritt x von y, seit N s" und laedt sich
+ * neu, solange er laeuft. Zweimal starten geht nicht: Pruefen und Eintragen
+ * stehen unter einer Sperre, die VOR dem Abzweigen wieder freigegeben wird -
+ * eine offene Sperre vererbte sich sonst an den Kindprozess (Gedaechtnis
+ * "Sperre vererbt sich an Kinder").
+ * Rueckgabe array(ok, satz).
+ */
+function sp_ct_vorgang_starten($auftrag, $dienst = '')
+{
+    if (!in_array($auftrag, array('einrichten', 'holen', 'anlegen'), true)) {
+        return array(false, sp_t('DIENST.FEHLER_BEFEHL'));
+    }
+    if ($auftrag === 'einrichten') {
+        $dienst = '';
+    } elseif (!in_array($dienst, sp_dienste(), true)) {
+        return array(false, sp_t('DIENST.FEHLER_BEFEHL'));
+    }
+    $nein = sp_archiv_verweigert();
+    if ($nein !== '') {
+        return array(false, $nein);
+    }
+    if ($dienst !== '') {
+        list($host, $port) = sp_dienst_ziel($dienst);
+        if (!sp_ist_lokal($host)) {
+            return array(false, sprintf(sp_t('CT.P_AUSGELAGERT'), sp_ct_dname($dienst), $host . ':' . $port));
+        }
+    }
+    $prog = sp_ct_vorgang_programm();
+    if (!is_file($prog) || !function_exists('proc_open')) {
+        return array(false, sprintf(sp_t('CT.VORGANG_FEHLT'), $prog));
+    }
+    $p = sp_paths();
+    if (!is_dir($p['datadir'])) {
+        @mkdir($p['datadir'], 0775, true);
+    }
+    $sperre = @fopen($p['datadir'] . '/container_vorgang.lock', 'c');
+    if ($sperre === false) {
+        return array(false, sp_t('CT.VORGANG_DATEI'));
+    }
+    if (!flock($sperre, LOCK_EX | LOCK_NB)) {
+        fclose($sperre);
+        return array(false, sp_t('CT.VORGANG_LAEUFT_SCHON'));
+    }
+    $v = sp_ct_vorgang();
+    $frei = !in_array($v['zustand'], array('gestartet', 'laeuft'), true);
+    $geschrieben = $frei && sp_ct_vorgang_schreiben(array('vorgang' => $auftrag, 'dienst' => $dienst,
+        'zustand' => 'gestartet', 'start' => time(), 'pid' => 0, 'schritt' => '', 'schritt_nr' => 0,
+        'schritte' => 0, 'meldung' => ''));
+    flock($sperre, LOCK_UN);
+    fclose($sperre);
+    if (!$frei) {
+        return array(false, sp_t('CT.VORGANG_LAEUFT_SCHON'));
+    }
+    if (!$geschrieben) {
+        return array(false, sp_t('CT.VORGANG_DATEI'));
+    }
+    $desk = array(0 => array('file', '/dev/null', 'r'), 1 => array('file', '/dev/null', 'w'),
+                  2 => array('file', '/dev/null', 'w'));
+    $pipes = array();
+    $args = array('sh', '-c', 'setsid "$0" "$@" </dev/null >/dev/null 2>&1 &', 'php', $prog, $auftrag);
+    if ($dienst !== '') {
+        $args[] = $dienst;
+    }
+    // setsid loest den Vorgang von Apache; "&" laesst die Schale sofort enden.
+    $proc = @proc_open($args, $desk, $pipes);
+    if (!is_resource($proc)) {
+        sp_ct_vorgang_schreiben(array('vorgang' => $auftrag, 'dienst' => $dienst, 'zustand' => 'fehler',
+            'start' => time(), 'ende' => time(), 'pid' => 0, 'meldung' => sp_t('CT.VORGANG_START')));
+        return array(false, sp_t('CT.VORGANG_START'));
+    }
+    proc_close($proc);
+    sp_log('Container: Vorgang "' . $auftrag . ($dienst !== '' ? ' ' . $dienst : '') . '" gestartet.');
+    // Gemeldet wird "angelaufen" erst, wenn der Vorgang seine Prozessnummer
+    // eingetragen hat - nicht auf den Rueckgabewert der Schale.
+    for ($i = 0; $i < 20; $i++) {
+        $v = sp_ct_vorgang();
+        if ($v['zustand'] !== 'gestartet') {
+            return array(true, sp_t('CT.VORGANG_GESTARTET'));
+        }
+        usleep(100000);
+    }
+    return array(true, sp_t('CT.VORGANG_NOCH_NICHT'));
+}
+
+/** Ein Satz zum Stand des Vorgangs, fuer Seite und Reiter Test. */
+function sp_ct_vorgang_satz($v, $jetzt = null)
+{
+    if ($jetzt === null) { $jetzt = time(); }
+    $seit = max(0, $jetzt - (int) (isset($v['start']) ? $v['start'] : $jetzt));
+    $z = isset($v['zustand']) ? $v['zustand'] : 'keiner';
+    $dn = (isset($v['dienst']) && $v['dienst'] !== '') ? sp_ct_dname($v['dienst']) : '-';
+    $schritt = isset($v['schritt']) && $v['schritt'] !== ''
+        ? sp_t('CT.S_' . strtoupper((string) $v['schritt'])) : '-';
+    if ($z === 'gestartet') {
+        return sprintf(sp_t('CT.V_GESTARTET'), $seit);
+    }
+    if ($z === 'laeuft') {
+        if ((int) $v['schritte'] > 0 && (int) $v['schritt_nr'] > 0) {
+            return sprintf(sp_t('CT.V_LAEUFT'), (int) $v['schritt_nr'], (int) $v['schritte'],
+                           $schritt, $dn, $seit);
+        }
+        return sprintf(sp_t('CT.V_PLANT'), $seit);
+    }
+    if ($z === 'abgebrochen') {
+        if ((int) $v['schritte'] < 1 || (int) $v['schritt_nr'] < 1) {
+            return sp_t('CT.V_ABGEBROCHEN_PLAN');
+        }
+        return sprintf(sp_t('CT.V_ABGEBROCHEN'), (int) $v['schritt_nr'], (int) $v['schritte'], $schritt, $dn);
+    }
+    $wann = (int) (isset($v['ende']) ? $v['ende'] : 0) > 0 ? date('d.m.Y H:i', (int) $v['ende']) : '-';
+    if ($z === 'fertig') {
+        return sprintf(sp_t('CT.V_FERTIG'), $wann) . ' ' . (string) $v['meldung'];
+    }
+    if ($z === 'fehler') {
+        return sprintf(sp_t('CT.V_FEHLER'), $wann) . ' ' . (string) $v['meldung'];
+    }
+    return '';
+}
+
+/** Ein Abbild holen - nur aus dem Hintergrundvorgang. Rueckgabe array(ok, satz). */
+function sp_ct_holen($dienst)
+{
+    $abbild = sp_ct_abbild($dienst);
+    if ($abbild === '') {
+        return array(false, sprintf(sp_t('CT.KEIN_ABBILD'), sp_ct_dname($dienst)));
+    }
+    list($rc, , $err) = sp_docker_ruf(array('pull', $abbild), SP_CT_ZEIT_PULL);
+    if (sp_ct_zeitablauf($rc)) {
+        return array(false, sprintf(sp_t('CT.PULL_ZEITABLAUF'), $abbild, (int) (SP_CT_ZEIT_PULL / 60)));
+    }
+    if ($rc !== 0) {
+        return array(false, sprintf(sp_t('CT.PULL_FEHLER'), $abbild, $rc, sp_ct_kurz($err, 200)));
+    }
+    // Die Wirkung, nicht den Rueckgabewert: liegt das Abbild jetzt da?
+    if (sp_ct_abbild_da($abbild) !== 1) {
+        return array(false, sprintf(sp_t('CT.PULL_NICHT_DA'), $abbild));
+    }
+    return array(true, sprintf(sp_t('CT.GEHOLT'), $abbild));
+}
+
+/** Einen Container anlegen (docker run) - nur aus dem Hintergrundvorgang. */
+function sp_ct_anlegen($dienst, $cfg, $emp)
+{
+    $liste = sp_ct_run_liste($dienst, $cfg, $emp, false);
+    if (!$liste) {
+        return array(false, sprintf(sp_t('CT.P_KEIN_MODELL'), sp_ct_dname($dienst)));
+    }
+    $ordner = sp_paths()['datadir'] . '/modelle/' . $dienst;
+    if (!is_dir($ordner)) {
+        @mkdir($ordner, 0775, true);
+    }
+    list($rc, , $err) = sp_docker_ruf($liste, SP_CT_ZEIT_RUN);
+    if (sp_ct_zeitablauf($rc)) {
+        return array(false, sprintf(sp_t('CT.RUN_ZEITABLAUF'), sp_container_name($dienst), SP_CT_ZEIT_RUN));
+    }
+    if ($rc !== 0) {
+        return array(false, sprintf(sp_t('CT.RUN_FEHLER'), sp_container_name($dienst), $rc, sp_ct_kurz($err, 200)));
+    }
+    $f = sp_ct_finden($dienst);
+    if (!$f['da'] || $f['eigen'] !== 'label') {
+        return array(false, sprintf(sp_t('CT.NICHT_DA'), sp_container_name($dienst)));
+    }
+    if (!$f['laeuft']) {
+        return array(false, sprintf(sp_t('CT.ANGELEGT_STEHT'), sp_container_name($dienst), $f['id'], $f['status']));
+    }
+    return array(true, sprintf(sp_t('CT.ANGELEGT'), sp_container_name($dienst), $f['id']));
+}
+
+/**
+ * Starten, Anhalten, Neu starten, Entfernen - nur am EIGENEN Container, mit
+ * Zeitgrenze, und gemeldet wird die Wirkung (docker inspect danach), nicht
+ * der Rueckgabewert. Rueckgabe array(ok, satz, art) mit art ok | fehler |
+ * hinweis ('hinweis': fremder Container, bewusst nichts getan).
+ */
+function sp_ct_schalten($dienst, $was)
+{
+    $f = sp_ct_finden($dienst);
+    if ($f['fehler'] !== '') {
+        return array(0, $f['fehler'], 'fehler');
+    }
+    if (!$f['da']) {
+        return array(0, sprintf(sp_t('CT.NICHT_DA'), sp_container_name($dienst)), 'fehler');
+    }
+    if ($f['eigen'] === '') {
+        return array(0, sprintf(sp_t('CT.NICHT_ANGEFASST'), $f['grund']), 'hinweis');
+    }
+    $befehle = array('start' => array('start'), 'stop' => array('stop', '-t', '20'),
+                     'restart' => array('restart', '-t', '20'), 'entfernen' => array('rm', '-f'));
+    if (!isset($befehle[$was])) {
+        return array(0, sp_t('DIENST.FEHLER_BEFEHL'), 'fehler');
+    }
+    $args = $befehle[$was];
+    $args[] = $f['id_voll'];
+    list($rc, , $err) = sp_docker_ruf($args, SP_CT_ZEIT_SCHALTEN);
+    $nach = sp_ct_finden($dienst);
+    if ($was === 'entfernen') {
+        $wirkt = !$nach['da'] && $nach['fehler'] === '';
+    } elseif ($was === 'stop') {
+        $wirkt = $nach['da'] && !$nach['laeuft'];
+    } else {
+        $wirkt = $nach['da'] && $nach['laeuft'];
+    }
+    if ($wirkt) {
+        return array(1, sprintf(sp_t('CT.GESCHALTET_' . strtoupper($was)), $f['name'], $f['id']), 'ok');
+    }
+    if (sp_ct_zeitablauf($rc)) {
+        return array(0, sprintf(sp_t('CT.ZEITABLAUF'), 'docker ' . $args[0], SP_CT_ZEIT_SCHALTEN), 'fehler');
+    }
+    return array(0, sprintf(sp_t('CT.OHNE_WIRKUNG'), 'docker ' . $args[0], $f['name'], $rc,
+                            sp_ct_kurz($err, 200)), 'fehler');
+}
+
+/**
+ * Die Einzelknoepfe Starten, Anhalten, Neu starten, Entfernen.
+ * Rueckgabe array(ok, satz, art) - siehe sp_ct_schalten(). "Abbild holen"
+ * und "Anlegen" laufen seit 0.11.11 ueber den Hintergrundvorgang und nicht
+ * mehr hier.
+ */
 function sp_container($dienst, $was)
 {
     if (!in_array($dienst, sp_dienste(), true)) {
-        return array(0, 'Unbekannter Dienst.');
+        return array(0, sp_t('DIENST.FEHLER_BEFEHL'), 'fehler');
+    }
+    if (!in_array($was, array('start', 'stop', 'restart', 'entfernen'), true)) {
+        return array(0, sp_t('CT.NUR_HINTERGRUND'), 'fehler');
     }
     $sp_nein = sp_archiv_verweigert();
-    if ($sp_nein !== '') { return array(0, $sp_nein); }
+    if ($sp_nein !== '') { return array(0, $sp_nein, 'fehler'); }
     // Ausgelagerter Dienst: abweisen statt den falschen Rechner anzufassen.
     list($host, $port) = sp_dienst_ziel($dienst);
     if (!sp_ist_lokal($host)) {
-        return array(0, 'Dieser Dienst ist auf ' . $host . ':' . $port
-                      . ' ausgelagert. Container dort verwalten, nicht hier.');
+        return array(0, sprintf(sp_t('CT.P_AUSGELAGERT'), sp_ct_dname($dienst), $host . ':' . $port), 'hinweis');
     }
-    $p = sp_paths();
-    $name = sp_container_name($dienst);
-    $tab = sp_modelle();
-    switch ($was) {
-        case 'holen':
-            $abbild = isset($tab['dienste'][$dienst]['abbild']) ? $tab['dienste'][$dienst]['abbild'] : '';
-            return $abbild === '' ? array(0, 'Kein Abbild bekannt.')
-                                  : sp_docker('pull ' . escapeshellarg($abbild));
-        case 'anlegen':
-            $ordner = $p['datadir'] . '/modelle/' . $dienst;
-            if (!is_dir($ordner)) { @mkdir($ordner, 0775, true); }
-            if (sp_container_zustand($dienst) !== 'fehlt') {
-                return array(0, 'Es gibt bereits einen Container ' . $name
-                              . '. Erst entfernen, dann neu anlegen.');
-            }
-            $befehl = sp_container_befehl($dienst);
-            if ($befehl === '') {
-                return array(0, 'Fuer diesen Dienst ist kein Modell eingestellt.');
-            }
-            return sp_docker($befehl);
-        case 'start':     return sp_docker('start ' . escapeshellarg($name));
-        case 'stop':      return sp_docker('stop ' . escapeshellarg($name));
-        case 'restart':   return sp_docker('restart ' . escapeshellarg($name));
-        case 'entfernen':
-            // Nur der Container, NIE der Modellordner.
-            return sp_docker('rm -f ' . escapeshellarg($name));
+    list($lage, $satz) = sp_docker_lage();
+    if ($lage !== 'ok') {
+        return array(0, $satz, 'fehler');
     }
-    return array(0, 'Unbekannter Containerbefehl.');
+    return sp_ct_schalten($dienst, $was);
 }
 
+/** Die letzten Zeilen des eigenen Containers, ohne Farbcodes. */
 function sp_container_log($dienst, $zeilen = 200)
 {
-    if (in_array($dienst, sp_dienste(), true)) {
-        list($host, $port) = sp_dienst_ziel($dienst);
-        if (!sp_ist_lokal($host)) {
-            return 'Dieser Dienst laeuft auf ' . $host . ':' . $port . '.' . "\n"
-                 . 'Sein Protokoll steht dort - hier gibt es keinen Container dazu.';
+    if (!in_array($dienst, sp_dienste(), true)) {
+        return sp_t('DIENST.FEHLER_BEFEHL');
+    }
+    list($host, $port) = sp_dienst_ziel($dienst);
+    if (!sp_ist_lokal($host)) {
+        return 'Dieser Dienst laeuft auf ' . $host . ':' . $port . '.' . "\n"
+             . 'Sein Protokoll steht dort - hier gibt es keinen Container dazu.';
+    }
+    list($lage, $satz) = sp_docker_lage();
+    if ($lage !== 'ok') {
+        return $satz;
+    }
+    $f = sp_ct_finden($dienst);
+    if ($f['fehler'] !== '') { return $f['fehler']; }
+    if (!$f['da']) { return sprintf(sp_t('CT.NICHT_DA'), sp_container_name($dienst)); }
+    if ($f['eigen'] === '') { return sprintf(sp_t('CT.NICHT_ANGEFASST'), $f['grund']); }
+    list($rc, $out, $err) = sp_docker_ruf(array('logs', '--tail', (string) (int) $zeilen, $f['id_voll']),
+                                          SP_CT_ZEIT_LESEN);
+    if (sp_ct_zeitablauf($rc)) {
+        return sprintf(sp_t('CT.ZEITABLAUF'), 'docker logs', SP_CT_ZEIT_LESEN);
+    }
+    // Programmprotokolle vor dem Auswerten von Farbcodes befreien.
+    return preg_replace('/\x1B\[[0-9;]*[A-Za-z]/', '', trim($out . "\n" . $err));
+}
+
+/**
+ * Der Hintergrundvorgang selbst - gerufen von bin/container_vorgang.php.
+ * Er plant zuerst (docker fragen), dann arbeitet er die Schritte ab und
+ * schreibt vor jedem Schritt Schritt, Dienst, Beginn, PID und Meldung in
+ * die Zustandsdatei; das Plugin-Protokoll nennt jeden Schritt.
+ * Rueckgabe: true, wenn jeder vorgesehene Dienst danach laeuft.
+ */
+function sp_ct_vorgang_ausfuehren($auftrag, $dienst = '')
+{
+    $v = sp_json_lesen(sp_ct_vorgang_datei());
+    $start = isset($v['start']) ? (int) $v['start'] : time();
+    $stand = array('vorgang' => $auftrag, 'dienst' => $dienst, 'zustand' => 'laeuft', 'start' => $start,
+                   'pid' => getmypid(), 'schritt' => 'plan', 'schritt_nr' => 0, 'schritte' => 0,
+                   'meldung' => '');
+    sp_ct_vorgang_schreiben($stand);
+    sp_log('Container ' . $auftrag . ($dienst !== '' ? ' ' . $dienst : '') . ': Vorgang laeuft (PID '
+           . getmypid() . ').');
+    $berichte = array();
+    $ok_d = array();
+    try {
+        list($lage, $lagesatz) = sp_docker_lage();
+        if ($lage !== 'ok') {
+            return sp_ct_vorgang_ende($stand, false, $lagesatz);
+        }
+        $cfg = sp_config();
+        $hw = ($auftrag === 'holen') ? array() : sp_hardware(false);
+        $emp = (isset($hw['empfehlung']) && is_array($hw['empfehlung'])) ? $hw['empfehlung'] : array();
+        $schritte = array();
+        $dienste = ($auftrag === 'einrichten') ? sp_dienste() : array($dienst);
+        foreach ($dienste as $d) {
+            $dn = sp_ct_dname($d);
+            list($host, $port) = sp_dienst_ziel($d, $cfg);
+            if (!sp_ist_lokal($host)) {
+                $berichte[$d] = sprintf(sp_t('CT.P_AUSGELAGERT'), $dn, $host . ':' . $port);
+                continue;
+            }
+            if ($auftrag === 'einrichten' && sp_ct_llm_aus($d, $cfg)) {
+                $berichte[$d] = sprintf(sp_t('CT.P_AUSGESCHALTET'), $dn);
+                continue;
+            }
+            if ($auftrag === 'holen') {
+                $schritte[] = array('holen', $d);
+                $ok_d[$d] = false;
+                continue;
+            }
+            if (!sp_ct_run_liste($d, $cfg, $emp, false)) {
+                $berichte[$d] = sprintf(sp_t('CT.P_KEIN_MODELL'), $dn);
+                continue;
+            }
+            $ok_d[$d] = false;
+            $f = sp_ct_finden($d);
+            if ($f['fehler'] !== '') {
+                $berichte[$d] = $dn . ': ' . $f['fehler'];
+                continue;
+            }
+            if ($f['da']) {
+                if ($f['eigen'] === '') {
+                    $berichte[$d] = sprintf(sp_t('CT.NICHT_ANGEFASST'), $f['grund']);
+                } elseif ($auftrag === 'anlegen') {
+                    $berichte[$d] = sprintf(sp_t('CT.SCHON_DA'), $f['name']);
+                } elseif ($f['laeuft']) {
+                    $berichte[$d] = sprintf(sp_t('CT.LAEUFT_SCHON'), $f['name'], $f['id']);
+                    $ok_d[$d] = true;
+                } else {
+                    $schritte[] = array('starten', $d);
+                }
+                continue;
+            }
+            if (sp_ct_abbild_da(sp_ct_abbild($d)) !== 1) {
+                $schritte[] = array('holen', $d);
+            }
+            $schritte[] = array('anlegen', $d);
+        }
+        $n = count($schritte);
+        $stand['schritte'] = $n;
+        sp_log('Container ' . $auftrag . ': ' . $n . ' Schritte geplant.');
+        $gescheitert = array();
+        foreach ($schritte as $i => $s) {
+            list($art, $d) = $s;
+            if (isset($gescheitert[$d])) {
+                continue;
+            }
+            $stand['schritt_nr'] = $i + 1;
+            $stand['schritt'] = $art;
+            $stand['dienst'] = $d;
+            $stand['schritt_start'] = time();
+            sp_ct_vorgang_schreiben($stand);
+            sp_log(sprintf('Container %s: Schritt %d von %d - %s %s', $auftrag, $i + 1, $n, $art,
+                           sp_container_name($d)));
+            if ($art === 'holen') {
+                list($ok, $satz) = sp_ct_holen($d);
+            } elseif ($art === 'anlegen') {
+                list($ok, $satz) = sp_ct_anlegen($d, $cfg, $emp);
+            } else {
+                $r = sp_ct_schalten($d, 'start');
+                $ok = (bool) $r[0];
+                $satz = $r[1];
+            }
+            $berichte[$d] = $satz;
+            $ok_d[$d] = $ok;
+            if (!$ok) {
+                $gescheitert[$d] = true;
+            }
+            sp_log(sprintf('Container %s: Schritt %d von %d %s - %s', $auftrag, $i + 1, $n,
+                           $ok ? 'erledigt' : 'gescheitert', $satz));
+        }
+        $alle = !in_array(false, $ok_d, true);
+        return sp_ct_vorgang_ende($stand, $alle, implode(' ', $berichte));
+    } catch (Throwable $e) {
+        return sp_ct_vorgang_ende($stand, false, sprintf(sp_t('CT.VORGANG_AUSNAHME'),
+            sp_ct_kurz($e->getMessage(), 200)));
+    }
+}
+
+function sp_ct_vorgang_ende($stand, $ok, $meldung)
+{
+    $stand['zustand'] = $ok ? 'fertig' : 'fehler';
+    $stand['ende'] = time();
+    $stand['meldung'] = (string) $meldung;
+    sp_ct_vorgang_schreiben($stand);
+    sp_log('Container ' . $stand['vorgang'] . ': ' . ($ok ? 'fertig' : 'nicht vollstaendig') . ' - ' . $meldung);
+    return $ok;
+}
+
+/**
+ * Die Deinstallation: nur die EIGENEN Container entfernen (Label oder
+ * Altbestand wie oben), mit Zeitgrenzen. Gerufen von uninstall/uninstall
+ * ueber bin/container_vorgang.php deinstallieren. Rueckgabe array(ok, zeilen)
+ * mit Zeilen fuer das Installationsprotokoll (<OK>/<INFO>/<WARNING>).
+ * Die Modelle liegen im Datenordner und werden hier nicht angefasst.
+ */
+function sp_ct_deinstallieren()
+{
+    $zeilen = array();
+    list($lage, $satz) = sp_docker_lage();
+    if ($lage !== 'ok') {
+        $zeilen[] = '<WARNING> ' . $satz;
+        $zeilen[] = '<WARNING> ' . sprintf(sp_t('CT.U_NICHTS'), sp_paths()['plugin']);
+        return array(false, $zeilen);
+    }
+    $alles = true;
+    $weg = array();
+    foreach (sp_dienste() as $d) {
+        $f = sp_ct_finden($d);
+        if ($f['fehler'] !== '') {
+            $alles = false;
+            $zeilen[] = '<WARNING> ' . $f['name'] . ': ' . $f['fehler'];
+        } elseif (!$f['da']) {
+            $zeilen[] = '<INFO> ' . sprintf(sp_t('CT.U_KEINER'), $f['name']);
+        } elseif ($f['eigen'] === '') {
+            $zeilen[] = '<INFO> ' . sprintf(sp_t('CT.NICHT_ANGEFASST'), $f['grund']);
+        } else {
+            $weg[$f['id_voll']] = $f['name'];
         }
     }
-    list($ok, $aus) = sp_docker('logs --tail ' . (int) $zeilen . ' '
-                                . escapeshellarg(sp_container_name($dienst)));
-    // Programmprotokolle vor dem Auswerten von Farbcodes befreien.
-    return preg_replace('/\x1B\[[0-9;]*[A-Za-z]/', '', (string) $aus);
+    // Dazu jeder Container mit beiden eigenen Labels unter anderem Namen
+    // (von Hand umbenannt) - per Label gesucht, per inspect gegengeprueft.
+    list($rc, $out, ) = sp_docker_ruf(array('ps', '-a', '-q', '--no-trunc', '--filter',
+        'label=' . SP_CT_LABEL_ORDNER . '=' . sp_paths()['plugin']), SP_CT_ZEIT_LESEN);
+    if ($rc !== 0) {
+        $alles = false;
+        $zeilen[] = '<WARNING> ' . sprintf(sp_t('CT.DOCKER_FEHLER'), $rc, 'docker ps');
+    } else {
+        foreach (preg_split('/\s+/', trim($out)) as $id) {
+            if (!preg_match('/^[0-9a-f]{12,64}\z/', $id) || isset($weg[$id])) {
+                continue;
+            }
+            $info = sp_ct_inspect($id);
+            if ($info !== null && sp_ct_label_eigen($info, sp_paths()['plugin'])) {
+                $weg[$id] = ltrim(isset($info['Name']) ? (string) $info['Name'] : $id, '/');
+            }
+        }
+    }
+    foreach ($weg as $id => $name) {
+        list($rc, , $err) = sp_docker_ruf(array('rm', '-f', $id), SP_CT_ZEIT_SCHALTEN);
+        list($rc2, $out2, ) = sp_docker_ruf(array('ps', '-a', '-q', '--no-trunc', '--filter', 'id=' . $id),
+                                            SP_CT_ZEIT_LESEN);
+        if ($rc2 === 0 && trim($out2) === '') {
+            $zeilen[] = '<OK> ' . sprintf(sp_t('CT.U_ENTFERNT'), $name, substr($id, 0, 12));
+        } else {
+            $alles = false;
+            $zeilen[] = '<WARNING> ' . sprintf(sp_t('CT.U_BLEIBT'), $name, substr($id, 0, 12),
+                sp_ct_zeitablauf($rc) ? sprintf(sp_t('CT.ZEITABLAUF'), 'docker rm', SP_CT_ZEIT_SCHALTEN)
+                                      : sp_ct_kurz($err, 160));
+        }
+    }
+    return array($alles, $zeilen);
+}
+
+/* ---------------- Die Ampel ---------------- */
+
+/**
+ * Je Dienst: Abbild da / Container laeuft / Port antwortet (127.0.0.1:Port),
+ * dazu eine Gesamtzeile. Werte 1 ja, 0 nein, -1 nicht feststellbar.
+ * Kostet docker-Aufrufe mit kurzen Grenzen - nur im offenen Reiter Dienste
+ * oder Test rufen, und nicht, solange ein Vorgang laeuft.
+ * $emp === null: die Empfehlung selbst holen (bin/hardware.py).
+ */
+function sp_ct_ampel($cfg = null, $emp = null)
+{
+    if ($cfg === null) { $cfg = sp_config(); }
+    if ($emp === null) {
+        $hw = sp_hardware(false);
+        $emp = (isset($hw['empfehlung']) && is_array($hw['empfehlung'])) ? $hw['empfehlung'] : array();
+    }
+    list($lage, $lagesatz) = sp_docker_lage();
+    $a = array('zeit' => time(), 'lage' => $lage, 'lagesatz' => $lagesatz, 'dienste' => array());
+    foreach (sp_dienste() as $d) {
+        list($host, $port) = sp_dienst_ziel($d, $cfg);
+        $z = array('dienst' => $d, 'host' => $host, 'port' => $port, 'art' => 'lokal',
+                   'modell' => sp_ct_modell($d, $cfg, $emp), 'abbild' => -1, 'container' => 'unbekannt',
+                   'laeuft' => -1, 'antwortet' => -1, 'grund' => '');
+        if (!sp_ist_lokal($host)) {
+            $z['art'] = 'ausgelagert';
+            $z['container'] = '-';
+            $z['antwortet'] = sp_port_offen($host, $port) ? 1 : 0;
+        } elseif (sp_ct_llm_aus($d, $cfg)) {
+            $z['art'] = 'ausgeschaltet';
+            $z['container'] = '-';
+        } elseif (!sp_ct_run_liste($d, $cfg, $emp, false)) {
+            $z['art'] = 'nicht_vorgesehen';
+            $z['container'] = '-';
+        } else {
+            $z['antwortet'] = sp_port_offen('127.0.0.1', $port) ? 1 : 0;
+            if ($lage === 'ok') {
+                $z['abbild'] = sp_ct_abbild_da(sp_ct_abbild($d));
+                $f = sp_ct_finden($d);
+                if ($f['fehler'] !== '') {
+                    $z['grund'] = $f['fehler'];
+                } elseif (!$f['da']) {
+                    $z['container'] = 'fehlt';
+                    $z['laeuft'] = 0;
+                } elseif ($f['eigen'] === '') {
+                    $z['container'] = 'fremd';
+                    $z['laeuft'] = 0;
+                    $z['grund'] = $f['grund'];
+                } else {
+                    $z['container'] = $f['laeuft'] ? 'laeuft' : 'gestoppt';
+                    $z['laeuft'] = $f['laeuft'] ? 1 : 0;
+                }
+            }
+        }
+        $a['dienste'][$d] = $z;
+    }
+    $a['gesamt'] = sp_ct_gesamt($a);
+    return $a;
+}
+
+/**
+ * Die Gesamtzeile der Ampel, in Worten. Rueckgabe array(stand, satz, ausgelagert)
+ * mit stand 1 bereit, 0 es fehlt etwas, -1 nicht feststellbar oder keine
+ * Menge: ohne einen einzigen hier vorgesehenen Dienst gibt es keinen Haken.
+ * Ausgelagerte Dienste stehen getrennt in 'ausgelagert'.
+ */
+function sp_ct_gesamt($a)
+{
+    $lokal = array();
+    $aus = array();
+    $abgeschaltet = array();
+    foreach ($a['dienste'] as $d => $z) {
+        if ($z['art'] === 'ausgeschaltet') {
+            $abgeschaltet[] = sp_ct_dname($d);
+        }
+        if ($z['art'] === 'lokal') {
+            $lokal[$d] = $z;
+        } elseif ($z['art'] === 'ausgelagert') {
+            // Zwei woertliche Aufrufe statt eines Ternaers in sp_t(): die
+            // Pruefwerkzeuge lesen die Aufrufstelle woertlich (vgl. sp_test.php).
+            $aus[] = $z['antwortet'] === 1
+                ? sprintf(sp_t('CT.G_AUS_ANTWORTET'), sp_ct_dname($d), $z['host'] . ':' . $z['port'])
+                : sprintf(sp_t('CT.G_AUS_STUMM'), sp_ct_dname($d), $z['host'] . ':' . $z['port']);
+        }
+    }
+    $aussatz = $aus ? sprintf(sp_t('CT.G_AUSGELAGERT'), implode(', ', $aus)) : '';
+    // Ausgeschaltet ist eine Entscheidung, kein Mangel: getrennt genannt, nie rot.
+    if ($abgeschaltet) {
+        $aussatz = trim($aussatz . ' ' . sprintf(sp_t('CT.G_AUSGESCHALTET'), implode(', ', $abgeschaltet)));
+    }
+    if (!$lokal) {
+        return array(-1, sp_t('CT.G_KEIN_LOKALER'), $aussatz);
+    }
+    $fehlt = array();
+    $offen = 0;
+    foreach ($lokal as $d => $z) {
+        $dn = sp_ct_dname($d);
+        if ($a['lage'] === 'ok') {
+            if ($z['abbild'] === 0) {
+                $fehlt[] = sprintf(sp_t('CT.G_ABBILD_FEHLT'), $dn);
+            }
+            if ($z['container'] === 'fehlt') {
+                $fehlt[] = sprintf(sp_t('CT.G_NICHT_ANGELEGT'), $dn);
+            } elseif ($z['container'] === 'gestoppt') {
+                $fehlt[] = sprintf(sp_t('CT.G_ANGEHALTEN'), $dn);
+            } elseif ($z['container'] === 'fremd') {
+                $fehlt[] = sprintf(sp_t('CT.G_FREMD'), $dn);
+            } elseif ($z['container'] === 'unbekannt') {
+                $offen++;
+                $fehlt[] = sprintf(sp_t('CT.G_UNBEKANNT'), $dn);
+            }
+        }
+        if ($z['antwortet'] !== 1) {
+            $fehlt[] = sprintf(sp_t('CT.G_PORT_STUMM'), $dn, (int) $z['port']);
+        }
+    }
+    if ($a['lage'] !== 'ok') {
+        // Ohne Docker ist nur der Port messbar. Antworten alle, ist das kein
+        // Beleg fuer eigene Container (es koennte ein anderer Dienst sein).
+        if (!$fehlt) {
+            return array(-1, sprintf(sp_t('CT.G_NUR_PORTS'), $a['lagesatz']), $aussatz);
+        }
+        return array(0, sprintf(sp_t('CT.G_FEHLT'),
+                                implode('; ', array_merge(array(rtrim($a['lagesatz'], '.')), $fehlt))), $aussatz);
+    }
+    if (!$fehlt) {
+        $namen = array();
+        foreach (array_keys($lokal) as $d) { $namen[] = sp_ct_dname($d); }
+        return array(1, sprintf(sp_t('CT.G_BEREIT'), implode(', ', $namen)), $aussatz);
+    }
+    return array($offen === count($lokal) ? -1 : 0, sprintf(sp_t('CT.G_FEHLT'), implode('; ', $fehlt)), $aussatz);
 }
 
 /* ---------------- Hardware und Empfehlung ---------------- */
@@ -1958,8 +2892,16 @@ function sp_endpunkt_probe()
             'header' => "User-Agent: LoxBerry-Sprachsteuerung-Selbsttest\r\n")));
         $rumpf = @file_get_contents($url, false, $ctx);
         $code = 0;
-        if (isset($http_response_header) && is_array($http_response_header)) {
-            foreach ($http_response_header as $z) {
+        // PHP 8.5: $http_response_header ist veraltet; der Name steht deshalb
+        // nicht im Quelltext (Verfallsmeldung schon beim Uebersetzen).
+        if (function_exists('http_get_last_response_headers')) {
+            $kz = http_get_last_response_headers();
+        } else {
+            $kn = 'http_response_header';
+            $kz = isset($$kn) ? $$kn : null;
+        }
+        if (is_array($kz)) {
+            foreach ($kz as $z) {
                 if (preg_match('#^HTTP/\S+\s+(\d{3})#', $z, $t)) { $code = (int) $t[1]; }
             }
         }
@@ -2211,8 +3153,16 @@ function sp_lox_struktur_holen($host, $benutzer, $kennwort)
         'follow_location' => 0, 'max_redirects' => 1)));
     $roh = @file_get_contents($url, false, $ctx);
     $code = 0;
-    if (isset($http_response_header) && is_array($http_response_header)) {
-        foreach ($http_response_header as $z) {
+    // PHP 8.5: $http_response_header ist veraltet; der Name steht deshalb
+    // nicht im Quelltext (Verfallsmeldung schon beim Uebersetzen).
+    if (function_exists('http_get_last_response_headers')) {
+        $kz = http_get_last_response_headers();
+    } else {
+        $kn = 'http_response_header';
+        $kz = isset($$kn) ? $$kn : null;
+    }
+    if (is_array($kz)) {
+        foreach ($kz as $z) {
             if (preg_match('#^HTTP/\S+\s+(\d{3})#', $z, $t)) { $code = (int) $t[1]; }
         }
     }

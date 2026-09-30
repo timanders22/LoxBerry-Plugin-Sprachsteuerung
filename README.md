@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.11.10
+Version 0.11.11
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,38 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.11.11
+
+**Die Sprachdienste auf Knopfdruck einrichten.** Bisher gab es im Reiter
+*Dienste* je Dienst sieben Einzelknöpfe, und „Abbild holen“ lief im
+Seitenaufruf: bei mehreren Gigabyte wartete die Seite, bis Apache aufgab, und
+man sah nichts. Jetzt:
+
+* **Ein Knopf „Sprachdienste einrichten“** holt fehlende Abbilder, legt die
+  Container passend zur Hardware-Empfehlung an und startet angehaltene. Er
+  läuft im Hintergrund; die Seite zeigt „Schritt x von y, seit N s“ und lädt
+  sich selbst neu. Ein zweiter Start während des Vorgangs wird abgewiesen, ein
+  abgebrochener Vorgang als solcher erkannt.
+* **Ampel je Dienst:** Abbild da, Container läuft, Port antwortet — und eine
+  Gesamtzeile in Worten, auch im Reiter *Test*.
+* **Das Sprachmodell** wird nur angelegt, wenn es in den Einstellungen
+  eingeschaltet ist; sonst erscheint es grau als „ausgeschaltet“ und kostet
+  keinen Download. Von Hand geht es unter *Einzeln verwalten* weiterhin.
+* **Nur eigene Container:** neu angelegte tragen das Label des Plugins.
+  Angehalten, gestartet, entfernt oder eingerichtet wird nur, was das Label
+  trägt oder als Altbestand genau `sprachsteuerung-<dienst>` heißt und aus dem
+  erwarteten Abbild stammt. Bis 0.11.10 hielt das Plugin einen fremden
+  Container gleichen Namens an und löschte ihn.
+* **Zeitgrenzen an jedem docker-Aufruf.** Hing Docker, hing bisher die Seite;
+  jetzt kommt nach spätestens 10 s eine Meldung.
+* **Deinstallation:** entfernt jetzt die eigenen Container. Bis 0.11.10 liefen
+  sie danach weiter und hielten ihre Ports.
+* **Fehlt Docker,** verweist die Seite auf das Plugin Docker NG und nennt zuerst
+  den Neustart des LoxBerry, den Befehl für die Gruppe erst zuletzt.
+
+Gemessen gegen eine docker-Attrappe unter PHP 7.4, 8.3 und 8.5; an echtem
+Docker und an einem LoxBerry steht die erste Einrichtung noch aus.
 
 ## Neu in 0.11.10
 
@@ -819,14 +851,22 @@ austauschbar.
 | Wortwecker | `rhasspy/wyoming-openwakeword` | 10400 | nur für Mikrofone ohne eigenen |
 | Sprachmodell | `ghcr.io/ggml-org/llama.cpp:server` | 8080 | nein |
 
-Anlegen, starten, stoppen, entfernen und Logdatei ansehen erledigt der Reiter
-*Dienste*. Die Container werden **ohne** `--network=host` angelegt und binden
+Im Reiter *Dienste* richtet **ein Knopf** alles ein: „Sprachdienste
+einrichten“ holt die Abbilder, legt die Container passend zur Hardware an und
+startet sie — im Hintergrund, die Seite zeigt Schritt und Dauer und je Dienst
+eine Ampel (Abbild da / Container läuft / Port antwortet). Das Sprachmodell
+wird nur angelegt, wenn es in den Einstellungen eingeschaltet ist. Anhalten,
+Starten, Entfernen und das Protokoll je Container stehen unter *Einzeln
+verwalten*. Die Container werden **ohne** `--network=host` angelegt und binden
 ihren Port ausdrücklich auf `127.0.0.1` — sie sind damit aus dem Heimnetz nicht
-erreichbar.
+erreichbar. Sie tragen das Label des Plugins; fremde Container fasst das Plugin
+nicht an, auch nicht bei der Deinstallation.
 
-**Docker muss vorhanden sein.** Das Plugin installiert es nicht.
-`postinstall.sh` sagt es, wenn es fehlt, statt später stillschweigend zu
-scheitern.
+**Docker muss vorhanden sein.** Das Plugin installiert es nicht. Am
+einfachsten richtet es das Plugin
+[Docker NG](https://github.com/timanders22/LoxBerry-Plugin-Docker-NG) ein;
+danach einmal den LoxBerry neu starten. Fehlt Docker, sagen `postinstall.sh`
+und der Reiter *Dienste* es, statt später stillschweigend zu scheitern.
 
 ## Welches Modell auf welche Hardware
 
