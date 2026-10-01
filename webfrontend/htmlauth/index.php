@@ -158,7 +158,8 @@ $sp_x = function ($feld) use ($sp_sauber) {
  * X-2: nach einer Beanstandung reisen die Eingaben des EINEN Formulars mit
  * (nur die Felder der Liste, Zeichenketten, gueltiges UTF-8, hoechstens 4096
  * Byte) und die Namen der beanstandeten Felder. NIE mit: Miniserver-Adresse
- * (kann Zugangsdaten tragen), Alexa-Sprechtoken, ESPHome-Schluessel,
+ * (kann Zugangsdaten tragen), Alexa-Sprechtoken, Google-Sprechtoken
+ * (Chromecast 4 Lox NG), ESPHome-Schluessel,
  * Formularmerkmal - sie stehen in keiner Liste. Nach erfolgreichem
  * Speichern zeigt der GET die gespeicherten Werte.
  * Bauart: LoxBerry-Plugin-Abfahrtsassistent-1.6.19 (abf_flash_*, abf_w).
@@ -192,7 +193,8 @@ function sp_eingabe_felder($formular)
                            'kontext_s', 'bestaetigung_s', 'antwortweg', 'tts_mode', 'tts_ip',
                            'tts_port', 'tts_zones', 'tts_volume', 'tts_lang', 'tts_stimme',
                            'cc_praefix', 'cc_ziel', 'alexa_geraet', 'alexa_laut',
-                           'alexa_token_loeschen', 'probe_text'),
+                           'alexa_token_loeschen', 'google_geraet', 'google_laut',
+                           'google_token_loeschen', 'probe_text'),
         'ansagen' => array('tts_template', 'ruhe_ein', 'ruhe_von', 'ruhe_bis', 'ansage_abstand_s',
                            'ansage_je_tag', 'miniserver_url_loeschen', 'wakeword', 'wakeword_frei',
                            'sprache', 'wartezeit', 'verlauf_zeilen'),
@@ -658,6 +660,44 @@ if ($sp_post && isset($_POST['speichern'])) {
     if ($sp_formular === 'dienste' && isset($_POST['tts_mode']) && $sp_sauber('tts_mode') === 'alexang'
         && (!isset($sp_tts['alexa_token']) || !sp_alexa_token_ok((string) $sp_tts['alexa_token']))) {
         $sp_hinweise[] = sp_t('EINST.HINWEIS_ALEXA_OHNE_TOKEN');
+    }
+    /* ---- Ansage-3: Google-Lautsprecher (Chromecast 4 Lox NG) ----
+     * Gleiche Regeln wie Alexa-NG, eigenes Sprechtoken: es reist nie ins
+     * Formular zurueck, leer lassen behaelt es, der Haken loescht es. */
+    $sp_w = $sp_roh('google_geraet');
+    if ($sp_w !== null) {
+        if ($sp_w === false || !sp_alexa_geraet_ok($sp_w)) {
+            $sp_fehler[] = sp_t('EINST.FEHLER_GOOGLE_GERAET');
+            sp_bean('google_geraet');
+        } else {
+            $sp_tts['google_geraet'] = $sp_w;
+        }
+    }
+    $sp_w = $sp_roh('google_laut');
+    if ($sp_w !== null) {
+        if ($sp_w === '') {
+            $sp_tts['google_laut'] = -1;
+        } elseif ($sp_w === false || !preg_match('/^[0-9]{1,3}$/', $sp_w) || (int) $sp_w > 100) {
+            $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_BEREICH'), sp_t('EINST.L_GOOGLE_LAUT'), 0, 100);
+            sp_bean('google_laut');
+        } else {
+            $sp_tts['google_laut'] = (int) $sp_w;
+        }
+    }
+    if ($sp_formular === 'dienste' && isset($_POST['google_token_loeschen'])) {
+        $sp_tts['google_token'] = '';
+    } else {
+        $sp_w = $sp_roh('google_token');
+        if ($sp_w === false || ($sp_w !== null && $sp_w !== '' && !sp_alexa_token_ok($sp_w))) {
+            $sp_fehler[] = sp_t('EINST.FEHLER_GOOGLE_TOKEN');
+            sp_bean('google_token');
+        } elseif ($sp_w !== null && $sp_w !== '') {
+            $sp_tts['google_token'] = $sp_w;
+        }
+    }
+    if ($sp_formular === 'dienste' && isset($_POST['tts_mode']) && $sp_sauber('tts_mode') === 'cc4lox'
+        && (!isset($sp_tts['google_token']) || !sp_alexa_token_ok((string) $sp_tts['google_token']))) {
+        $sp_hinweise[] = sp_t('EINST.HINWEIS_GOOGLE_OHNE_TOKEN');
     }
     /* Ein HINWEIS, keine Sperre - und nur, wenn das Formular kam, das die
      * drei Werte fuehrt. Sonst urteilt er ueber Felder, die gar nicht da
@@ -1515,6 +1555,28 @@ $sp_hidden = function ($tab) use ($sp_fmt) {
   <input data-role="none" type="number" id="alexa_laut" name="alexa_laut" value="<?= sp_e(sp_x2_wert('alexa_laut', (int) $sp_cfg['tts']['alexa_laut'] >= 0 ? (int) $sp_cfg['tts']['alexa_laut'] : '')) ?>" min="0" max="100"<?= sp_x2_mark('alexa_laut') ?>>
   <div class="sm-hilfe"><?= sp_t('EINST.H_ALEXA_LAUT') ?></div>
 </div>
+<h3><?= sp_e(sp_t('EINST.H_GOOGLE')) ?></h3>
+<div class="sm-hilfe"><?= sp_t('EINST.H_GOOGLE_TEXT') ?></div>
+<div class="sm-feld">
+  <label for="google_geraet"><?= sp_e(sp_t('EINST.L_GOOGLE_GERAET')) ?></label>
+  <input data-role="none" type="text" id="google_geraet" name="google_geraet" value="<?= sp_e(sp_x2_wert('google_geraet', $sp_cfg['tts']['google_geraet'])) ?>" placeholder="Küche Box"<?= sp_x2_mark('google_geraet') ?>>
+  <div class="sm-hilfe"><?= sp_t('EINST.H_GOOGLE_GERAET') ?></div>
+</div>
+<div class="sm-feld">
+  <label for="google_token"><?= sp_e(sp_t('EINST.L_GOOGLE_TOKEN')) ?></label>
+<?php /* Ansage-3: wie das Alexa-Token - es reist NIE ins Formular zurueck. */ ?>
+  <input data-role="none" type="password" id="google_token" name="google_token" value="" autocomplete="new-password" placeholder="<?= $sp_cfg['tts']['google_token'] !== '' ? sp_e(sprintf(sp_t('EINST.P_ALEXA_TOKEN_GESETZT'), strlen((string) $sp_cfg['tts']['google_token']))) : sp_e(sp_t('EINST.P_ALEXA_TOKEN_LEER')) ?>"<?= sp_x2_mark('google_token') ?>>
+  <div class="sm-hilfe"><?= sp_t('EINST.H_GOOGLE_TOKEN') ?></div>
+  <label style="display:inline-flex;align-items:center;gap:8px;margin-top:6px;font-weight:400;">
+    <input data-role="none" type="checkbox" name="google_token_loeschen" value="1"<?= sp_x2_haken('google_token_loeschen', false) ? ' checked' : '' ?>>
+    <?= sp_e(sp_t('EINST.L_GOOGLE_TOKEN_LOESCHEN')) ?>
+  </label>
+</div>
+<div class="sm-feld">
+  <label for="google_laut"><?= sp_e(sp_t('EINST.L_GOOGLE_LAUT')) ?></label>
+  <input data-role="none" type="number" id="google_laut" name="google_laut" value="<?= sp_e(sp_x2_wert('google_laut', (int) $sp_cfg['tts']['google_laut'] >= 0 ? (int) $sp_cfg['tts']['google_laut'] : '')) ?>" min="0" max="100"<?= sp_x2_mark('google_laut') ?>>
+  <div class="sm-hilfe"><?= sp_t('EINST.H_GOOGLE_LAUT') ?></div>
+</div>
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sp_e(sp_t('ALLG.SPEICHERN')) ?></button>
 </div>
@@ -2231,6 +2293,12 @@ foreach ($sp_lvor as $sp_k4 => $sp_v4) {
 $sp_x3 = sp_rueckspiel_altwerte();
 if ($sp_x3 !== '') { ?>
 <div class="sm-warnung"><?= sprintf(sp_t('SICHER.WARN_RUECKSPIEL'), sp_e($sp_x3)) ?></div>
+<?php }
+/* Ansage-3, X-3: ein gespeicherter Google-Wert, den dieselbe Pruefung wie
+   das Zurueckspielen abweist - nur die Feldnamen, nie Werte. */
+$sp_x3g = sp_google_gespeichert_falsch();
+if ($sp_x3g) { ?>
+<div class="sm-warnung"><?= sprintf(sp_t('SICHER.WARN_GESPEICHERT'), sp_e(implode(', ', $sp_x3g))) ?></div>
 <?php } ?>
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-lesen"></i> <?= sp_t('LEGENDE.LESEN') ?></span>

@@ -553,6 +553,24 @@ def config() -> dict:
         t["alexa_laut"] = -1
     if not 0 <= t["alexa_laut"] <= 100:
         t["alexa_laut"] = -1
+    # Ansage-3: Google-Lautsprecher ueber Chromecast 4 Lox NG - dieselben
+    # Regeln wie fuer Alexa-NG, eigene Felder und ein EIGENES Sprechtoken.
+    # Gelesen wie $sp_skalar in sp_config() (sp_lib.php): nur Skalare - eine
+    # Liste wird leer, nie zu "['x']"; die Lautstaerke nur als 0-100.
+    def _skalar(w):
+        if isinstance(w, bool):
+            return "1" if w else ""
+        if isinstance(w, float) and w.is_integer():
+            return str(int(w))
+        return str(w) if isinstance(w, (str, int, float)) else ""
+    t["google_geraet"] = _skalar(t.get("google_geraet")).strip()
+    if len(t["google_geraet"]) > 200 or re.search(r"[\x00-\x1f\x7f]", t["google_geraet"]):
+        t["google_geraet"] = ""
+    t["google_token"] = _skalar(t.get("google_token"))
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{8,128}", t["google_token"]):
+        t["google_token"] = ""
+    laut = _skalar(t.get("google_laut"))
+    t["google_laut"] = int(laut) if re.fullmatch(r"[0-9]{1,3}", laut) and int(laut) <= 100 else -1
     for feld, klein, gross in (("port", 1, 65535), ("volume", 1, 100)):
         try:
             t[feld] = max(klein, min(gross, int(t.get(feld) or 0)))
@@ -1747,6 +1765,10 @@ def ansage_vermerken(jetzt=None) -> None:
 #   alexang     Alexa-NG ueber seinen Endpunkt, aktion=sprechen, per POST -
 #               das Sprechtoken steht damit in keiner Adresse und keinem
 #               Zugriffsprotokoll.
+#   cc4lox      Google-Lautsprecher ueber den Sprech-Endpunkt von
+#               Chromecast 4 Lox NG (Ansage-3, ab dessen 1.3.15): gleiche
+#               Schnittstelle wie alexang, eigenes Sprechtoken, Adresse
+#               127.0.0.1:<Webport>/plugins/chromecast-4lox-ng/index.php.
 #
 # "Fehlt das Ziel oder schweigt es, bleibt der bisherige Ausgabeweg" - das
 # sind die Lautsprecher der Sprachgeraete. Ob Chromecast4lox da ist, sagt der
@@ -1760,13 +1782,20 @@ def ansage_vermerken(jetzt=None) -> None:
 # Hand hier, wie schon mqtt_behalten_liste(). Das Kennwort des Brokers steht
 # nur im CONNECT-Paket.
 # ---------------------------------------------------------------------------
-ANSAGE_NEUE_MODI = ("chromecast", "alexang")
+ANSAGE_NEUE_MODI = ("chromecast", "alexang", "cc4lox")
 ANSAGE_NAMEN = {"musicserver": "Loxone Music Server", "ms4h": "MusicServer4Home",
                 "custom": "eigene Vorlage", "audioserver": "Loxone Audioserver (Text)",
-                "chromecast": "Chromecast4lox", "alexang": "Alexa-NG"}
+                "chromecast": "Chromecast4lox", "alexang": "Alexa-NG",
+                "cc4lox": "Google-Lautsprecher (Chromecast 4 Lox NG)"}
 CC_SAMMELZIEL = ("alle", "all", "*")
 CC_WARTEN_S = 10.0
 ALEXANG_ADRESSE = "http://127.0.0.1/plugins/alexang/index.php"
+# Ansage-3: angenommen wird dort nur von 127.0.0.1/::1 (sonst 403
+# NUR_LOKAL) - deshalb nie die LAN-Adresse; der Port ist der des
+# LoxBerry-Webservers (webport()).
+GOOGLE_PFAD = "/plugins/chromecast-4lox-ng/index.php"
+GOOGLE_NAME = "Chromecast 4 Lox NG"
+GOOGLE_ZEIT_S = 10.0
 DATEI_AUSGABE = PDATA / "ausgabe.json"
 
 
@@ -2086,12 +2115,48 @@ def alexa_token_ok(token) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9_\-]{8,128}", str(token or "")))
 
 
-def _alexa_rufen(felder: dict, zeit: float = 15.0) -> tuple:
-    """POST an Alexa-NG. (http-Code oder 0, erste Antwortzeile, Fehlertext)."""
+class _KeineUmleitung(urllib.request.HTTPRedirectHandler):
+    """Ansage-3: einer Umleitung wird nicht gefolgt (wie CURLOPT_FOLLOWLOCATION
+    false) - eine 3xx-Antwort kommt als HTTPError mit ihrem Code zurueck."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def webport() -> int:
+    """Port des LoxBerry-Webservers: general.json -> Webserver -> Port
+    (Schluessel auch WEBSERVER), sonst 80 - wie abfahrt_webport()."""
+    gen = json_lesen(LBHOME / "config" / "system" / "general.json")
+    for abschnitt in ("Webserver", "WEBSERVER"):
+        teil = gen.get(abschnitt)
+        if not isinstance(teil, dict):
+            continue
+        try:
+            port = int(str(teil.get("Port") or "").strip())
+        except ValueError:
+            continue
+        if 0 < port <= 65535:
+            return port
+    return 80
+
+
+def google_adresse() -> str:
+    return "http://127.0.0.1:%d%s" % (webport(), GOOGLE_PFAD)
+
+
+def _alexa_rufen(felder: dict, zeit: float = 15.0, adresse: str = "", streng: bool = False) -> tuple:
+    """POST an Alexa-NG. (http-Code oder 0, erste Antwortzeile, Fehlertext).
+
+    Ansage-3: mit 'adresse' an einen anderen Sprech-Endpunkt derselben
+    Schnittstelle (Chromecast 4 Lox NG). 'streng' (nur dort): ohne Proxy,
+    ohne Umleitung, und ein Token in der Antwortzeile wird vorsorglich
+    ersetzt. Ohne beide laeuft der Alexa-Weg genau wie bisher."""
     daten = urllib.parse.urlencode(felder).encode("utf-8")
-    anfrage = urllib.request.Request(ALEXANG_ADRESSE, data=daten, method="POST")
+    anfrage = urllib.request.Request(adresse or ALEXANG_ADRESSE, data=daten, method="POST")
+    oeffnen = urllib.request.urlopen
+    if streng:
+        oeffnen = urllib.request.build_opener(urllib.request.ProxyHandler({}), _KeineUmleitung).open
     try:
-        with urllib.request.urlopen(anfrage, timeout=zeit) as antwort:
+        with oeffnen(anfrage, timeout=zeit) as antwort:
             code, roh = int(antwort.status), antwort.read(600)
     except urllib.error.HTTPError as err:
         code = int(err.code)
@@ -2102,7 +2167,11 @@ def _alexa_rufen(felder: dict, zeit: float = 15.0) -> tuple:
     except (urllib.error.URLError, OSError, ValueError) as err:
         return 0, "", fehlertext(err)
     zeilen = roh.decode("utf-8", "replace").strip().splitlines()
-    return code, (zeilen[0].strip() if zeilen else ""), ""
+    zeile = zeilen[0].strip() if zeilen else ""
+    token = str(felder.get("token") or "")
+    if streng and token:
+        zeile = zeile.replace(token, "***")
+    return code, zeile, ""
 
 
 def alexa_ansagen(cfg: dict, tts: dict, text: str) -> dict:
@@ -2154,6 +2223,112 @@ def alexa_lage(tts: dict) -> tuple:
     if zeile.startswith("SELFTEST;"):
         return False, "Alexa-NG weist das Sprechtoken ab (HTTP %d %s)." % (code, zeile[:80])
     return False, "Alexa-NG ist nicht installiert oder antwortet nicht wie erwartet (HTTP %d)." % code
+
+
+# ---------------------------------------------------------------------------
+# Ansage-3: Google-Lautsprecher ueber Chromecast 4 Lox NG (ab Werk nicht
+# gewaehlt). Schnittstelle wie Alexa-NG; gesendet ist eine Ansage NUR bei
+# HTTP 200 und Zeilenanfang SPRECHEN;OK=1 - das schliesst UNVERAENDERT (gleicher
+# Text binnen 30 s) und TEXT_NULL ein, wie bei Alexa-NG. OK=1 heisst "dort
+# eingereiht", nicht "gesprochen". Kein eigener Wiederholversuch: binnen 30 s
+# waere er UNVERAENDERT, und bei UNKLAR=1 kann die Ansage schon laufen.
+# Faellt der Weg aus, sprechen die Lautsprecher der Sprachgeraete
+# (satelliten_sprechen()) - wie bei Alexa-NG.
+# ---------------------------------------------------------------------------
+GOOGLE_GRUENDE = {
+    "TOKEN": "das Sprechtoken passt nicht zu dem in Chromecast 4 Lox NG",
+    "KEIN_TOKEN_EINGERICHTET": "in Chromecast 4 Lox NG ist kein Sprechtoken eingerichtet",
+    "NUR_LOKAL": "der Aufruf kam nicht von diesem LoxBerry",
+    "SPRECHEN_AUS": "die Sprachausgabe fuer andere Plugins ist in Chromecast 4 Lox NG aus",
+    "TTS_MODUS": "Chromecast 4 Lox NG steht auf dem Ansagemodus audioserver",
+    "STUNDENGRENZE": "Stundengrenze der Ansagen in Chromecast 4 Lox NG erreicht",
+    "DIENST_LAEUFT_NICHT": "der Dienst von Chromecast 4 Lox NG laeuft nicht",
+    "DIENST_ANTWORTET_NICHT": "der Dienst von Chromecast 4 Lox NG nahm die Ansage nicht an",
+    "GERAETE_OFFLINE": "kein Ziel-Lautsprecher verbunden",
+    "GERAET_UNBEKANNT": "Chromecast 4 Lox NG kennt dieses Geraet nicht",
+    "GRUPPE_UNBEKANNT": "Chromecast 4 Lox NG kennt diese Gruppe nicht",
+    "KEINE_GERAETE": "in Chromecast 4 Lox NG ist kein Lautsprecher eingetragen",
+}
+
+
+def _google_grund(zeile: str) -> str:
+    m = re.search(r"(?:^|;)GRUND=([^;]*)", str(zeile or ""))
+    return m.group(1).strip() if m else ""
+
+
+def google_bewerten(code: int, zeile: str, fehler: str, art: str = "SPRECHEN") -> dict:
+    """Antwort des Endpunkts -> Ergebnis. Die Meldung nennt HTTP-Code und
+    Antwortzeile (mit GRUND) - nie Token oder Ansagetext."""
+    # Die Zeile landet in Protokoll, Benachrichtigung und der Antwort im
+    # Reiter Test (dort ungefiltert) - deshalb ohne Zeichen fuer HTML.
+    zeile = re.sub(r"[<>&\"']", "?", str(zeile or ""))
+    grund = _google_grund(zeile)
+    if code == 200 and (zeile == art + ";OK=1" or zeile.startswith(art + ";OK=1;")):
+        return {"ok": 1, "grund": "google", "meldung": "gesendet - HTTP 200 %s" % zeile[:160]}
+    if code == 0:
+        return {"ok": 0, "grund": "google_fehlt",
+                "meldung": "%s antwortet nicht (%s)." % (GOOGLE_NAME, fehler)}
+    if code == 404 and not grund:
+        return {"ok": 0, "grund": "google_fehlt",
+                "meldung": "%s fehlt oder ist zu alt (ab 1.3.15) - HTTP 404 ohne GRUND." % GOOGLE_NAME}
+    if not grund:
+        return {"ok": 0, "grund": "google_unerwartet",
+                "meldung": "%s antwortet nicht wie erwartet (HTTP %d, ohne GRUND)." % (GOOGLE_NAME, code)}
+    hinweis = GOOGLE_GRUENDE.get(grund, "")
+    return {"ok": 0, "grund": "google_fehler",
+            "meldung": "%s: HTTP %d %s%s" % (GOOGLE_NAME, code, zeile[:160],
+                                             (" - " + hinweis) if hinweis else "")}
+
+
+def google_ansagen(cfg: dict, tts: dict, text: str) -> dict:
+    """Die Ansage an Chromecast 4 Lox NG geben (POST, Token nur im Koerper)."""
+    token = str(tts.get("google_token") or "")
+    if not alexa_token_ok(token):
+        return {"ok": 0, "grund": "google_einstellung",
+                "meldung": "%s: es ist kein Sprechtoken eingetragen (Reiter Einstellungen)." % GOOGLE_NAME}
+    text = str(text or "").strip()
+    if text == "":
+        return {"ok": 0, "grund": "leer", "meldung": "Ansage ohne Text."}
+    felder = {"aktion": "sprechen", "token": token, "text": text}
+    geraet = str(tts.get("google_geraet") or "").strip()
+    if geraet:
+        felder["geraet"] = geraet
+    try:
+        laut = int(tts.get("google_laut"))
+    except (TypeError, ValueError):
+        laut = -1
+    if 0 <= laut <= 100:
+        felder["laut"] = str(laut)
+    adresse = google_adresse()
+    # Der Mitschnitt nennt Adresse und Laenge - nie Token oder Text.
+    mitschnitt(cfg, "GOOGLE>", "%s aktion=sprechen geraet=%s laut=%s text=%d Zeichen (POST, Token verborgen)"
+               % (adresse, geraet or "(Standard)", felder.get("laut", "-"), len(text)))
+    code, zeile, fehler = _alexa_rufen(felder, GOOGLE_ZEIT_S, adresse, True)
+    mitschnitt(cfg, "GOOGLE<", "HTTP %d %s" % (code, zeile[:200] or fehler))
+    return google_bewerten(code, zeile, fehler)
+
+
+def google_lage(tts: dict) -> tuple:
+    """Fuer Selbsttest und Reiter Test: selftest=1 prueft nur das Token, loest
+    nichts aus. SPRECHEN=0/DIENST=0 machen die Zeile rot - mit ihnen kaeme
+    keine Ansage an."""
+    token = str(tts.get("google_token") or "")
+    if not alexa_token_ok(token):
+        return False, "%s: es ist kein Sprechtoken eingetragen." % GOOGLE_NAME
+    code, zeile, fehler = _alexa_rufen({"selftest": "1", "token": token}, GOOGLE_ZEIT_S,
+                                       google_adresse(), True)
+    if code == 200 and zeile.startswith("SELFTEST;OK=1"):
+        felder = zeile.split(";")
+        aus = []
+        if "SPRECHEN=0" in felder:
+            aus.append(GOOGLE_GRUENDE["SPRECHEN_AUS"])
+        if "DIENST=0" in felder:
+            aus.append(GOOGLE_GRUENDE["DIENST_LAEUFT_NICHT"])
+        if aus:
+            return False, "%s: das Sprechtoken passt, aber %s (%s)." % (GOOGLE_NAME, " und ".join(aus), zeile[:80])
+        return True, "%s antwortet, das Sprechtoken passt (%s)." % (GOOGLE_NAME, zeile[:80])
+    erg = google_bewerten(code, zeile, fehler, "SELFTEST")
+    return False, str(erg.get("meldung") or "")
 
 
 def ausgabe_vermerken(modus: str, erg: dict) -> None:
@@ -2278,6 +2453,8 @@ def loxone_ansagen(cfg: dict, text: str, zonen: str = "") -> dict:
         # Lautsprecher bzw. das eingestellte Alexa-Geraet.
         if modus == "chromecast":
             erg = cc_ansagen(tts, text)
+        elif modus == "cc4lox":
+            erg = google_ansagen(cfg, tts, text)
         else:
             erg = alexa_ansagen(cfg, tts, text)
         ausgabe_vermerken(modus, erg)
@@ -3712,7 +3889,10 @@ async def ansage_ausgeben(cfg: dict, text: str, zonen: str = "",
         else:
             erg = loxone_ansagen(cfg, text, zonen)
         extern = erg
-        if erg.get("ok"):
+        if erg.get("ok") and modus == "cc4lox":
+            # Ansage-3: mit der Antwortzeile (gesendet = dort eingereiht, nicht gesprochen).
+            wege.append("%s: %s" % (ANSAGE_NAMEN[modus], str(erg.get("meldung") or "")[:200]))
+        elif erg.get("ok"):
             wege.append(ANSAGE_NAMEN.get(modus, "Loxone-Audioausgabe")
                         if modus in ANSAGE_NEUE_MODI else "Loxone-Audioausgabe")
         elif erg.get("grund") != "aus":
@@ -3838,8 +4018,12 @@ async def warteschlange(cfg: dict, holen_v) -> None:
                                             str(b.get("mikrofon") or ""),
                                             bool(b.get("dringend")))
                 if erg.get("ok"):
-                    antwort_schreiben(kennung, 1,
-                                      "Angesagt ueber: " + ", ".join(erg["wege"]),
+                    meldung = "Angesagt ueber: " + ", ".join(erg["wege"])
+                    if str((cfg.get("tts") or {}).get("mode") or "") == "cc4lox" and erg.get("fehler"):
+                        # Ansage-3: die Antwortzeile von Chromecast 4 Lox NG gehoert
+                        # dazu, auch wenn der bisherige Weg eingesprungen ist.
+                        meldung += " - Google-Lautsprecher nicht angekommen: " + "; ".join(erg["fehler"])
+                    antwort_schreiben(kennung, 1, meldung,
                                       {"wege": erg["wege"], "fehler": erg["fehler"]})
                 else:
                     antwort_schreiben(kennung, 0,
@@ -4349,7 +4533,10 @@ def selbsttest() -> int:
                       % (" - auch beim Antwortweg 'nur Loxone'" if weg == "loxone" else ""))
     elif weg in ("loxone", "beide") and modus in ANSAGE_NEUE_MODI:
         tts = cfg.get("tts") or {}
-        ok, satz = cc_lage(tts) if modus == "chromecast" else alexa_lage(tts)
+        if modus == "cc4lox":
+            ok, satz = google_lage(tts)
+        else:
+            ok, satz = cc_lage(tts) if modus == "chromecast" else alexa_lage(tts)
         if ok:
             zeilen.append("[OK]   Zusaetzliche Ansage: " + satz)
         else:

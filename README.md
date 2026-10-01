@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.11.12
+Version 0.11.13
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,15 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.11.13
+
+Ansage-3: Ausgabe über Google-Lautsprecher. Gemessen an einer Attrappe und am echten Endpunkt von Chromecast 4 Lox NG 1.3.15 (Lautsprecher-Attrappe) unter PHP 7.4 und 8.5; Alexa NG und alle übrigen Ausgabearten messen vorher = nachher gleich. Nicht am Gerät, nicht an echten Lautsprechern.
+
+* **Neue Ausgabeart „Google-Lautsprecher (Chromecast 4 Lox NG)“**, ab Werk nicht gewählt; braucht Chromecast 4 Lox NG ab 1.3.15 mit eingeschalteter „Sprachausgabe für andere Plugins“. Eigenes Sprechtoken (getrennt vom Alexa-NG-Token), Gerät (leer = Standardgerät) und Lautstärke (leer = Ansagelautstärke).
+* Als gesendet gilt nur `HTTP 200` mit `SPRECHEN;OK=1`. Nimmt das Chromecast-Plugin die Ansage nicht an, sprechen wie bisher die Lautsprecher der Sprachgeräte – nie ein anderer Google-Lautsprecher; Protokoll, Benachrichtigung und Reiter Test nennen HTTP-Code und GRUND.
+* Die Testansage im Reiter Test nennt die Antwortzeile von Chromecast 4 Lox NG, auch wenn der bisherige Weg einspringt.
+* Das Sprechtoken wird wie ein Kennwort behandelt: nie in Adresse, Protokoll oder „Einstellungen sichern“; eine Sicherung mit Google-Sprechtoken wird abgewiesen. „Einstellungen sichern“ warnt, wenn ein gespeicherter Google-Wert ungültig ist.
 
 ## Neu in 0.11.12
 
@@ -1002,6 +1011,7 @@ Im Reiter *Einstellungen* wählt **Art der Audioausgabe** ein weiteres Gerät,
 | Originaler Loxone Audioserver | nur der Text im MQTT-Thema `<präfix>/ansage`; die Ausgabe baut man in Loxone Config (Textgenerator am TTS-Eingang) | – |
 | Chromecast4lox | MQTT `<cc-präfix>/<lautsprecher>/cmd/tts`, QoS 1, nicht zurückbehalten, Nutzlast = Text | Themenpräfix (ab Werk `chromecast4lox`), Ziel-Lautsprecher oder `alle`; die Lautstärke stellt Chromecast4lox ein |
 | Alexa-NG (eigenes Plugin) | `POST http://127.0.0.1/plugins/alexang/index.php`, `aktion=sprechen` | Gerät (leer = Standardgerät), Sprechtoken, Lautstärke (leer = unverändert) |
+| Google-Lautsprecher (Chromecast 4 Lox NG) | `POST http://127.0.0.1:<Webport>/plugins/chromecast-4lox-ng/index.php`, `aktion=sprechen` (ab Chromecast 4 Lox NG 1.3.15) | Gerät (leer = Standardgerät), eigenes Sprechtoken, Lautstärke (leer = Ansagelautstärke) |
 | Eigene Vorlage | URL mit `{ip} {port} {zones} {vol} {lang} {text}` – darüber auch eine vorhandene Alexa-Brücke (Home Assistant, Node-RED) | Vorlage |
 
 **Fällt das Ziel aus, bleibt der bisherige Weg.** Chromecast4lox gilt als da,
@@ -1024,6 +1034,36 @@ Amazon-Anmeldecookies.
 
 Wer vor dieser Fassung eine Ausgabe eingerichtet hatte, behält sie: ein
 gespeicherter Block ohne Angabe der Art gilt weiter als Music Server.
+
+### Google-Lautsprecher über Chromecast 4 Lox NG (ab Werk nicht gewählt)
+
+Die Ansage geht per POST an den Sprech-Endpunkt des Chromecast-Plugins auf
+demselben LoxBerry (`127.0.0.1` und der Port des LoxBerry-Webservers; der
+Endpunkt nimmt nur Aufrufe von diesem LoxBerry an). Das Sprechtoken steht nur
+im Körper der Anfrage, nie in einer Adresse, im Protokoll (dort nur die
+Länge des Textes), in der Sicherung oder in einer Benachrichtigung.
+
+- **Einrichten im Chromecast-Plugin** (Reiter *Einstellungen*, Abschnitt
+  *Sprachausgabe für andere Plugins*): Haken setzen, Sprechtoken festlegen,
+  wahlweise ein Standardgerät. Ruhezeit, Lautstärke-Obergrenze und Gong von
+  dort gelten auch für diese Ansagen.
+- **Hier:** *Art der Audioausgabe* = Google-Lautsprecher, dazu Gerät (leer =
+  Standardgerät; Namen wie in dessen Geräteliste, Kommaliste, `gruppe:<Name>`
+  oder `alle`), das Sprechtoken (ein anderes als das von Alexa-NG) und
+  wahlweise eine Lautstärke nur für die Ansage.
+- **Als gesendet gilt** eine Ansage nur bei HTTP 200 und `SPRECHEN;OK=1` –
+  das heißt „dort eingereiht“, nicht „gesprochen“. Gleicher Text binnen 30 s
+  (`UNVERAENDERT`) gilt als gesendet; wiederholt wird nichts.
+- **Bei Ausfall** (Plugin fehlt oder ist älter als 1.3.15, Token falsch,
+  Sprachausgabe dort aus, Dienst läuft nicht, kein Lautsprecher verbunden,
+  Gerät unbekannt, Stundengrenze) sprechen die Lautsprecher der Sprachgeräte
+  wie bisher. Auf einen anderen Google-Lautsprecher wird nie ausgewichen.
+  Protokoll, Benachrichtigung und der Reiter *Test* nennen HTTP-Code und
+  `GRUND`. Die Zeile *Zusätzliche Ansage* im Reiter *Test* prüft mit
+  `selftest=1` nur das Token und löst nichts aus.
+- Anders als *Chromecast4lox (über MQTT)* braucht dieser Weg keinen Broker
+  und trägt eine Lautstärke je Ansage; beide Wege sprechen mit demselben
+  Plugin.
 
 ## Aufbau
 
@@ -1080,7 +1120,9 @@ liefert 3.11.
   stillschweigend zurechtgebogen.
 - Die Container-Ports hören nur auf `127.0.0.1`.
 - Die Sicherungsdatei enthält **weder Token noch Miniserver-Adresse noch
-  Mikrofon-Schlüssel noch das Sprechtoken für Alexa-NG**.
+  Mikrofon-Schlüssel noch die Sprechtoken für Alexa-NG und Chromecast 4 Lox
+  NG**. Eine Sicherung, die ein Sprechtoken für Chromecast 4 Lox NG trägt,
+  wird abgewiesen.
 
 ## Was ungeprüft bleibt
 
@@ -1114,6 +1156,9 @@ steht weiterhin kein Mikrofon und kein Container.
   Prüfbroker mit dem Dienst von Chromecast4lox und einer Attrappe von
   Alexa-NG, nicht an echten Lautsprechern und nicht an einem echten
   Alexa-Gerät.
+* **Die Ansage über Google-Lautsprecher (Chromecast 4 Lox NG).** Gemessen
+  gegen eine Attrappe des Endpunkts und gegen dessen echten Endpunkt mit dem
+  Dienst gegen eine Lautsprecher-Attrappe, nicht an echten Lautsprechern.
 
 **Seit 0.11.5 nicht mehr auf dieser Liste:** `retain` am laufenden
 MQTT-Gateway. Am Gerät gemessen am 13.09.2026 — der UDP-Eingang nimmt das

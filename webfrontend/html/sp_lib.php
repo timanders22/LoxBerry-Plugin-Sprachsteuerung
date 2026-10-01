@@ -417,6 +417,15 @@ function sp_config($erzeugen = true)
     if (!sp_alexa_token_ok($tts['alexa_token'])) { $tts['alexa_token'] = ''; }
     $sp_laut = $sp_skalar('alexa_laut');
     $tts['alexa_laut'] = preg_match('/^[0-9]{1,3}$/', $sp_laut) && (int) $sp_laut <= 100 ? (int) $sp_laut : -1;
+    // Ansage-3: Google-Lautsprecher (Chromecast 4 Lox NG) - dieselben Regeln,
+    // eigene Felder und ein EIGENES Sprechtoken. Dieselbe Regel in config()
+    // (bin/sprachsteuerung_dienst.py).
+    $tts['google_geraet'] = trim($sp_skalar('google_geraet'));
+    if (!sp_alexa_geraet_ok($tts['google_geraet'])) { $tts['google_geraet'] = ''; }
+    $tts['google_token'] = $sp_skalar('google_token');
+    if (!sp_alexa_token_ok($tts['google_token'])) { $tts['google_token'] = ''; }
+    $sp_laut = $sp_skalar('google_laut');
+    $tts['google_laut'] = preg_match('/^[0-9]{1,3}$/', $sp_laut) && (int) $sp_laut <= 100 ? (int) $sp_laut : -1;
     $cfg['tts'] = $tts;
 
     $ruhe = is_array(isset($cfg['ruhe']) ? $cfg['ruhe'] : null)
@@ -1485,12 +1494,14 @@ function sp_sicherung_bauen($pruefen = true)
     // Und das Sprechtoken fuer Alexa-NG (Ansage-1) - es wird wie ein
     // Kennwort behandelt.
     unset($cfg['tts']['alexa_token']);
+    // Ansage-3: ebenso das Sprechtoken fuer Chromecast 4 Lox NG.
+    unset($cfg['tts']['google_token']);
     $sp_sich = array(
         'art'      => 'sprachsteuerung-sicherung',
         'fassung'  => 1,
         'erzeugt'  => date('c'),
-        'hinweis'  => 'Aktionstoken, Miniserver-Adresse, Mikrofon-Schluessel und das '
-                    . 'Alexa-Sprechtoken sind absichtlich NICHT enthalten.',
+        'hinweis'  => 'Aktionstoken, Miniserver-Adresse, Mikrofon-Schluessel und die '
+                    . 'Sprechtoken fuer Alexa-NG und Chromecast 4 Lox NG sind absichtlich NICHT enthalten.',
         'config'   => $cfg,
         'saetze'   => sp_saetze(),
     );
@@ -1498,8 +1509,19 @@ function sp_sicherung_bauen($pruefen = true)
      * der Kopf - nur der Grund, nie Werte. Geliefert wird sie trotzdem. */
     if ($pruefen) {
         $sp_grund = sp_rueckspiel_altwerte();
+        $sp_warn = array();
         if ($sp_grund !== '') {
-            $sp_sich = array('_warnung' => sprintf(sp_t('SICHER.WARN_KOPF'), $sp_grund)) + $sp_sich;
+            $sp_warn[] = sprintf(sp_t('SICHER.WARN_KOPF'), $sp_grund);
+        }
+        // Ansage-3, X-3: ein gespeicherter Google-Wert, den dieselbe Pruefung
+        // wie beim Zurueckspielen abweist (sp_google_felder_falsch()) - in der
+        // Sicherung steht dafuer der geltende Wert (leer bzw. -1).
+        $sp_gf = sp_google_gespeichert_falsch();
+        if ($sp_gf) {
+            $sp_warn[] = sprintf(sp_t('SICHER.WARN_GESPEICHERT'), implode(', ', $sp_gf));
+        }
+        if ($sp_warn) {
+            $sp_sich = array('_warnung' => implode(' / ', $sp_warn)) + $sp_sich;
         }
     }
     return json_encode($sp_sich, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -1561,6 +1583,15 @@ function sp_sicherung_lesen($roh, $nur_pruefen = false)
             && !(is_int($t['alexa_laut']) && $t['alexa_laut'] >= -1 && $t['alexa_laut'] <= 100)) {
             $falsch[] = 'tts.alexa_laut';
         }
+        // Ansage-3: eine Sicherung traegt nie ein Sprechtoken fuer Chromecast
+        // 4 Lox NG - eine mit Token wird abgewiesen, nicht still uebergangen.
+        // Kein Text (Liste, Zahl - Klasse 12): unten als unbrauchbarer Wert.
+        if (array_key_exists('google_token', $t) && is_string($t['google_token']) && $t['google_token'] !== '') {
+            return array(0, 'Die Sicherung traegt ein Sprechtoken fuer Chromecast 4 Lox NG '
+                          . '(tts.google_token) - eine Sicherung dieses Plugins traegt nie eines. '
+                          . 'Es wurde nichts eingespielt.');
+        }
+        $falsch = array_merge($falsch, sp_google_felder_falsch($t, true));
         if ($falsch) {
             return array(0, 'Die Sicherung traegt unbrauchbare Werte (' . implode(', ', $falsch)
                           . '). Es wurde nichts eingespielt.');
@@ -1584,6 +1615,8 @@ function sp_sicherung_lesen($roh, $nur_pruefen = false)
         $neu['tts'] = $alt['tts'];
     }
     $neu['tts']['alexa_token'] = $alt['tts']['alexa_token'];
+    // Ansage-3: ebenso das Sprechtoken fuer Chromecast 4 Lox NG.
+    $neu['tts']['google_token'] = $alt['tts']['google_token'];
     if (isset($alt['satelliten']) && is_array($alt['satelliten'])
         && isset($neu['satelliten']) && is_array($neu['satelliten'])) {
         foreach ($neu['satelliten'] as $i => $s) {
@@ -1614,6 +1647,65 @@ function sp_sicherung_lesen($roh, $nur_pruefen = false)
  * gleiche Muster.
  * ================================================================== */
 define('SP_ALEXANG_ADRESSE', 'http://127.0.0.1/plugins/alexang/index.php');
+
+/* Ansage-3 (01.10.2026): Google-Lautsprecher ueber den Sprech-Endpunkt von
+ * Chromecast 4 Lox NG (ab 1.3.15), ab Werk nicht gewaehlt. Gleiche
+ * Schnittstelle wie Alexa-NG (GOOGLE_SPRECHEN_SCHNITTSTELLE.md); angenommen
+ * wird dort nur von 127.0.0.1 - deshalb nie die LAN-Adresse, und der Port ist
+ * der des LoxBerry-Webservers. */
+define('SP_GOOGLE_PFAD', '/plugins/chromecast-4lox-ng/index.php');
+
+/** Port des LoxBerry-Webservers: general.json -> Webserver -> Port (auch WEBSERVER), sonst 80. */
+function sp_webport()
+{
+    $p = sp_paths();
+    if ($p['home'] === '') { return 80; }
+    $g = sp_json_lesen($p['home'] . '/config/system/general.json');
+    foreach (array('Webserver', 'WEBSERVER') as $ab) {
+        if (isset($g[$ab]['Port']) && is_scalar($g[$ab]['Port'])
+            && (int) $g[$ab]['Port'] > 0 && (int) $g[$ab]['Port'] <= 65535) {
+            return (int) $g[$ab]['Port'];
+        }
+    }
+    return 80;
+}
+
+function sp_google_adresse()
+{
+    return 'http://127.0.0.1:' . sp_webport() . SP_GOOGLE_PFAD;
+}
+
+/**
+ * Ansage-3: die Google-Felder eines tts-Blocks pruefen - dieselbe Pruefung
+ * fuer das Zurueckspielen ($aus_sicherung: das Token darf nur fehlen oder ''
+ * sein) und fuer die gespeicherte Datei (X-3: das Token muss leer oder
+ * gueltig sein). Rueckgabe: Liste der beanstandeten Felder.
+ */
+function sp_google_felder_falsch(array $t, $aus_sicherung)
+{
+    $falsch = array();
+    if (array_key_exists('google_geraet', $t) && !sp_alexa_geraet_ok($t['google_geraet'])) {
+        $falsch[] = 'tts.google_geraet';
+    }
+    if (array_key_exists('google_laut', $t)
+        && !(is_int($t['google_laut']) && $t['google_laut'] >= -1 && $t['google_laut'] <= 100)) {
+        $falsch[] = 'tts.google_laut';
+    }
+    if (array_key_exists('google_token', $t)) {
+        $w = $t['google_token'];
+        $ok = $aus_sicherung ? $w === '' : (is_string($w) && ($w === '' || sp_alexa_token_ok($w)));
+        if (!$ok) { $falsch[] = 'tts.google_token'; }
+    }
+    return $falsch;
+}
+
+/** X-3: beanstandete Google-Werte in der GESPEICHERTEN Datei (roh, vor sp_config()). */
+function sp_google_gespeichert_falsch()
+{
+    $roh = sp_json_lesen(sp_paths()['config']);
+    if (!isset($roh['tts']) || !is_array($roh['tts'])) { return array(); }
+    return sp_google_felder_falsch($roh['tts'], false);
+}
 
 function sp_cc_praefix_ok($p)
 {
@@ -1786,21 +1878,35 @@ function sp_mqtt_retained_lesen(array $filter, $sekunden = 2.0)
  * der Antwort sagt alles (SELFTEST;OK=1;... bzw. SPRECHEN;OK=...).
  * Rueckgabe: array(erste Zeile oder '', Fehlertext).
  */
-function sp_alexa_rufen(array $felder, $sekunden = 5)
+function sp_alexa_rufen(array $felder, $sekunden = 5, $adresse = '', $streng = false)
 {
-    $ctx = stream_context_create(array('http' => array(
+    /* Ansage-3: mit $adresse an einen anderen Sprech-Endpunkt derselben
+     * Schnittstelle (Chromecast 4 Lox NG). $streng (nur dort): keiner
+     * Umleitung folgen, ein Token in der Antwortzeile vorsorglich ersetzen.
+     * Ohne beide laeuft der Alexa-Weg genau wie bisher. */
+    $ziel = $adresse !== '' ? $adresse : SP_ALEXANG_ADRESSE;
+    $http = array(
         'method'        => 'POST',
         'header'        => "Content-Type: application/x-www-form-urlencoded\r\n",
         'content'       => http_build_query($felder),
         'timeout'       => (float) $sekunden,
         'ignore_errors' => true,
-    )));
-    $roh = @file_get_contents(SP_ALEXANG_ADRESSE, false, $ctx, 0, 600);
+    );
+    if ($streng) {
+        $http['follow_location'] = 0;
+        $http['max_redirects'] = 0;
+    }
+    $ctx = stream_context_create(array('http' => $http));
+    $roh = @file_get_contents($ziel, false, $ctx, 0, 600);
     if ($roh === false) {
-        return array('', 'keine Antwort von ' . SP_ALEXANG_ADRESSE);
+        return array('', 'keine Antwort von ' . $ziel);
     }
     $z = preg_split('/\r?\n/', trim((string) $roh));
-    return array(trim((string) $z[0]), '');
+    $zeile = trim((string) $z[0]);
+    if ($streng && isset($felder['token']) && is_string($felder['token']) && $felder['token'] !== '') {
+        $zeile = str_replace($felder['token'], '***', $zeile);
+    }
+    return array($zeile, '');
 }
 
 /**
@@ -1816,7 +1922,7 @@ function sp_ansage_lage($cfg = null)
     if ($modus === 'aus') {
         return array(-1, sp_t('TEST.A_ANSAGE_AUS'));
     }
-    if (!in_array($modus, array('chromecast', 'alexang'), true)) {
+    if (!in_array($modus, array('chromecast', 'alexang', 'cc4lox'), true)) {
         return null;
     }
     if ($weg === 'satellit') {
@@ -1857,6 +1963,33 @@ function sp_ansage_lage($cfg = null)
         }
         $stand = 1;
         $text = sprintf(sp_t('TEST.A_CC_OK'), sp_e($p), sp_e($ziel), sp_e($liste));
+    } elseif ($modus === 'cc4lox') {
+        /* Ansage-3: selftest=1 prueft nur das Token und loest nichts aus. Die
+         * Zeile laeuft nur bei offenem Reiter Test (sp_pruefungen()). */
+        if (!sp_alexa_token_ok((string) $tts['google_token'])) {
+            return array(0, sp_t('TEST.A_GOOGLE_TOKEN') . $rueck);
+        }
+        list($zeile, $fehler) = sp_alexa_rufen(array('selftest' => '1', 'token' => (string) $tts['google_token']),
+                                               10, sp_google_adresse(), true);
+        if (strpos($zeile, 'SELFTEST;OK=1') === 0) {
+            $f = explode(';', $zeile);
+            $aber = array();
+            if (in_array('SPRECHEN=0', $f, true)) { $aber[] = sp_t('TEST.A_GOOGLE_SPRECHEN_AUS'); }
+            if (in_array('DIENST=0', $f, true)) { $aber[] = sp_t('TEST.A_GOOGLE_DIENST_AUS'); }
+            if ($aber) {
+                return array(0, sprintf(sp_t('TEST.A_GOOGLE_OK_ABER'), implode(' ', $aber)) . $rueck);
+            }
+            $stand = 1;
+            $text = sp_t('TEST.A_GOOGLE_OK');
+        } elseif (strpos($zeile, 'SELFTEST;') === 0
+                  && preg_match('/;GRUND=(TOKEN|KEIN_TOKEN_EINGERICHTET)(;|$)/', $zeile)) {
+            return array(0, sprintf(sp_t('TEST.A_GOOGLE_ABGEWIESEN'), sp_e(substr($zeile, 0, 80))) . $rueck);
+        } elseif (preg_match('/(^|;)GRUND=/', $zeile)) {
+            return array(0, sprintf(sp_t('TEST.A_GOOGLE_ANTWORT'), sp_e(substr($zeile, 0, 80))) . $rueck);
+        } else {
+            return array(0, sprintf(sp_t('TEST.A_GOOGLE_FEHLT'),
+                                    sp_e($fehler !== '' ? $fehler : sp_t('TEST.A_GOOGLE_OHNE_GRUND'))) . $rueck);
+        }
     } else {
         if (!sp_alexa_token_ok((string) $tts['alexa_token'])) {
             return array(0, sp_t('TEST.A_ALEXA_TOKEN') . $rueck);
