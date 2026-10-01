@@ -169,6 +169,42 @@ STARTLOG="$PLOG/start.log"
 SKRIPT="$PBIN/sprachsteuerung_dienst.py"
 PY="$PBIN/venv/bin/python3"
 
+# Startsperre (Verbesserungsbau Welle 3, 01.10.2026).
+#
+# Am Geraet liefen seit dem Systemstart am 28.09.2026 ZWEI Dienste. Beim
+# Booten sprang die Uhr (fake-hwclock, dann NTP), cron holte die verpassten
+# Minuten nach und startete cron.01min zweimal in derselben Sekunde. Beide
+# Waechter fanden "laeuft nicht" und starteten je einen Dienst - zwischen
+# Nachsehen und Starten lag nichts, was den zweiten haette aufhalten koennen.
+#
+# Gesperrt wird auf dieses Skript selbst (flock auf Deskriptor 8), mit
+# Warten bis 15 s: der zweite Aufrufer wartet, bis der erste seinen Start
+# samt Nachsehen hinter sich hat, und fragt DANACH, ob schon einer laeuft.
+# readlink -f, weil LoxBerry das Skript auch ueber einen Verweis unter
+# system/daemons/plugins/ aufruft - gesperrt wird immer dieselbe Datei.
+# Ein zweites "exec 8<" im selben Lauf wuerde den Deskriptor neu oeffnen
+# und die Sperre dabei freigeben - daher der Merker SP_SPERRE_GEHALTEN (der
+# Waechter und restart sperren und rufen dann starten()).
+# Der Dienst erbt den Deskriptor NICHT (8<&- beim Start): sonst hielte er
+# die Sperre, solange er laeuft, und jeder spaetere Start wartete 15 s und
+# gaebe dann auf (so gemessen an der Einspeisebremse 0.9.26, dort mit einer
+# Sperre im PHP-Dienst, die sich an Kindprozesse vererbte).
+# Ohne flock (kein util-linux) bleibt es beim Verhalten bis 0.11.12.
+# Bauart: Bewaesserung 0.9.35 (startsperre_nehmen), Chromecast4lox 1.3.13.
+SP_SPERRE_GEHALTEN=0
+startsperre_nehmen() {
+    [ "$SP_SPERRE_GEHALTEN" = "1" ] && return 0
+    command -v flock >/dev/null 2>&1 || return 0
+    SP_SPERRDATEI=$(readlink -f "$0" 2>/dev/null)
+    [ -n "$SP_SPERRDATEI" ] && [ -r "$SP_SPERRDATEI" ] || return 0
+    exec 8<"$SP_SPERRDATEI"
+    if flock -w 15 8; then
+        SP_SPERRE_GEHALTEN=1
+        return 0
+    fi
+    return 1
+}
+
 # Angelegt wird erst dort, wo wirklich geschrieben wird - beim Start und im
 # Waechter -, nicht bei jedem Aufruf. Bis 0.11.8 stand hier ein unbedingtes
 # 'mkdir -p "$PDATA" "$PLOG"' (siehe oben, F6a, F8a, F9a, F12a).
@@ -225,6 +261,10 @@ sperre_gilt() {
 }
 
 starten() {
+    if ! startsperre_nehmen; then
+        echo "Ein anderer Start dieses Plugins laeuft seit ueber 15 Sekunden - jetzt wird nichts gestartet."
+        return 0
+    fi
     if laeuft; then
         echo "laeuft bereits (PID $(cat "$PID"))"
         return 0
@@ -260,7 +300,8 @@ starten() {
         tail -c 16384 "$STARTLOG" > "$STARTLOG.neu" 2>/dev/null \
             && mv "$STARTLOG.neu" "$STARTLOG"
     fi
-    nohup "$PY" "$SKRIPT" >> "$STARTLOG" 2>&1 &
+    # 8<&-: der Dienst erbt die Startsperre nicht (siehe startsperre_nehmen).
+    nohup "$PY" "$SKRIPT" >> "$STARTLOG" 2>&1 8<&- &
     echo $! > "$PID"
     sleep 1
     if laeuft; then
@@ -303,7 +344,15 @@ anhalten() {
 case "$1" in
     start)   starten ;;
     stop)    anhalten ;;
-    restart) anhalten; sleep 1; starten ;;
+    restart)
+        # Anhalten und Starten unter EINER Sperre: sonst koennte ein
+        # Waechter zwischen beiden einen Dienst starten und restart
+        # danach einen zweiten.
+        if ! startsperre_nehmen; then
+            echo "Ein anderer Start dieses Plugins laeuft seit ueber 15 Sekunden - jetzt wird nichts neu gestartet."
+            exit 0
+        fi
+        anhalten; sleep 1; starten ;;
     status)
         if laeuft; then
             echo "laeuft $(cat "$PID")"
@@ -315,6 +364,13 @@ case "$1" in
     waechter)
         # Nur neu starten, wenn der Dienst laufen SOLL. Ein bewusst
         # angehaltener Dienst bleibt angehalten.
+        #
+        # Die ganze Frage "laeuft er? sonst starten" steht unter der
+        # Startsperre. Zwei Waechter derselben Sekunde laufen damit
+        # nacheinander, und der zweite findet den Dienst des ersten.
+        # Bekommt ein Waechter die Sperre in 15 s nicht, tut er nichts -
+        # der naechste kommt in einer Minute.
+        startsperre_nehmen || exit 0
         #
         # Die Marke wird HIER noch einmal geprueft, obwohl starten() sie
         # ebenfalls prueft: sonst schriebe der Waechter waehrend jeder

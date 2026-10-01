@@ -383,6 +383,13 @@ function sp_config($erzeugen = true)
     // sprachsteuerung_dienst.py); beide Seiten muessen gleich rechnen.
     $tts = is_array(isset($cfg['tts']) ? $cfg['tts'] : null)
          ? array_merge($vor['tts'], $cfg['tts']) : $vor['tts'];
+    // Ansage-1: ab Werk "aus". Ein gespeicherter Block OHNE Modus stammt von
+    // vor dieser Fassung, als "musicserver" die Vorgabe war - er behaelt sie,
+    // sonst schaltete das Update eine eingerichtete Ansage ab. Dieselbe Regel
+    // in config() (bin/sprachsteuerung_dienst.py).
+    if (is_array(isset($cfg['tts']) ? $cfg['tts'] : null) && !array_key_exists('mode', $cfg['tts'])) {
+        $tts['mode'] = 'musicserver';
+    }
     if (!in_array($tts['mode'], sp_auswahl('tts_mode'), true)) {
         $tts['mode'] = 'musicserver';
     }
@@ -393,6 +400,23 @@ function sp_config($erzeugen = true)
     $tts['lang'] = preg_replace('/[^a-z]/', '', strtolower((string) $tts['lang'])) ?: 'de';
     $tts['template'] = trim((string) $tts['template']);
     $tts['stimme'] = trim((string) (isset($tts['stimme']) ? $tts['stimme'] : ''));
+    $sp_skalar = function ($k) use ($tts) {
+        return (isset($tts[$k]) && is_scalar($tts[$k])) ? (string) $tts[$k] : '';
+    };
+    $tts['cc_praefix'] = trim($sp_skalar('cc_praefix'), '/');
+    if (!sp_cc_praefix_ok($tts['cc_praefix'])) {
+        $tts['cc_praefix'] = (string) $vor['tts']['cc_praefix'];
+    }
+    // Ein unbrauchbares Ziel wird NICHT zu "alle" - sonst spraeche das ganze
+    // Haus, weil ein Name nicht stimmt. Leer heisst: kein Ziel, Rueckfall.
+    $tts['cc_ziel'] = $sp_skalar('cc_ziel');
+    if (!sp_cc_ziel_ok($tts['cc_ziel'])) { $tts['cc_ziel'] = ''; }
+    $tts['alexa_geraet'] = trim($sp_skalar('alexa_geraet'));
+    if (!sp_alexa_geraet_ok($tts['alexa_geraet'])) { $tts['alexa_geraet'] = ''; }
+    $tts['alexa_token'] = $sp_skalar('alexa_token');
+    if (!sp_alexa_token_ok($tts['alexa_token'])) { $tts['alexa_token'] = ''; }
+    $sp_laut = $sp_skalar('alexa_laut');
+    $tts['alexa_laut'] = preg_match('/^[0-9]{1,3}$/', $sp_laut) && (int) $sp_laut <= 100 ? (int) $sp_laut : -1;
     $cfg['tts'] = $tts;
 
     $ruhe = is_array(isset($cfg['ruhe']) ? $cfg['ruhe'] : null)
@@ -1446,7 +1470,7 @@ function sp_vorlage_pruefen(&$geprueft = null, &$gesamt = null)
  * stecken Zugangsdaten, und eine Sicherungsdatei liegt am Ende im Download-
  * Ordner eines Rechners, der nicht der LoxBerry ist.
  * ================================================================== */
-function sp_sicherung_bauen()
+function sp_sicherung_bauen($pruefen = true)
 {
     $cfg = sp_config();
     foreach (array('aktionstoken', 'miniserver_url') as $geheim) {
@@ -1458,15 +1482,39 @@ function sp_sicherung_bauen()
             if (is_array($s)) { unset($cfg['satelliten'][$i]['schluessel']); }
         }
     }
-    return json_encode(array(
+    // Und das Sprechtoken fuer Alexa-NG (Ansage-1) - es wird wie ein
+    // Kennwort behandelt.
+    unset($cfg['tts']['alexa_token']);
+    $sp_sich = array(
         'art'      => 'sprachsteuerung-sicherung',
         'fassung'  => 1,
         'erzeugt'  => date('c'),
-        'hinweis'  => 'Aktionstoken, Miniserver-Adresse und Mikrofon-Schluessel '
-                    . 'sind absichtlich NICHT enthalten.',
+        'hinweis'  => 'Aktionstoken, Miniserver-Adresse, Mikrofon-Schluessel und das '
+                    . 'Alexa-Sprechtoken sind absichtlich NICHT enthalten.',
         'config'   => $cfg,
         'saetze'   => sp_saetze(),
-    ), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    );
+    /* X-3: wuerde das eigene Zurueckspielen diese Datei abweisen, sagt es
+     * der Kopf - nur der Grund, nie Werte. Geliefert wird sie trotzdem. */
+    if ($pruefen) {
+        $sp_grund = sp_rueckspiel_altwerte();
+        if ($sp_grund !== '') {
+            $sp_sich = array('_warnung' => sprintf(sp_t('SICHER.WARN_KOPF'), $sp_grund)) + $sp_sich;
+        }
+    }
+    return json_encode($sp_sich, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+}
+
+/**
+ * X-3: Wuerde die EIGENE Sicherung beim Zurueckspielen abgewiesen? Gebaut
+ * wird genau die Datei, die "Sicherung herunterladen" liefert, und durch
+ * dieselbe Pruefung geschickt (sp_sicherung_lesen(..., true) - schreibt
+ * nichts). Rueckgabe: der Grund, leer heisst "wuerde angenommen".
+ */
+function sp_rueckspiel_altwerte()
+{
+    list($ok, $meldung) = sp_sicherung_lesen(sp_sicherung_bauen(false), true);
+    return $ok ? '' : (string) $meldung;
 }
 
 /**
@@ -1475,7 +1523,7 @@ function sp_sicherung_bauen()
  * Geprueft wird die FORM, und abgewiesen wird benannt - nicht
  * zurechtgebogen. Rueckgabe: array(ok, Meldung).
  */
-function sp_sicherung_lesen($roh)
+function sp_sicherung_lesen($roh, $nur_pruefen = false)
 {
     $roh = (string) $roh;
     if (strlen($roh) > 2 * 1024 * 1024) {
@@ -1499,6 +1547,29 @@ function sp_sicherung_lesen($roh)
         || !isset($d['saetze']['ziele']) || !is_array($d['saetze']['ziele'])) {
         return array(0, 'Die Satzdatei in der Sicherung hat keine Listen regeln und ziele.');
     }
+    // Ansage-1: die neuen Felder werden geprueft wie im Formular - eine
+    // Sicherung mit einem unbrauchbaren Wert wird benannt abgewiesen, nicht
+    // zurechtgebogen (Klasse 10). Ein leeres Ziel ist erlaubt: so steht es in
+    // der eigenen Sicherung, wenn kein brauchbares gespeichert war.
+    if (isset($d['config']['tts']) && is_array($d['config']['tts'])) {
+        $t = $d['config']['tts'];
+        $falsch = array();
+        if (array_key_exists('cc_praefix', $t) && !sp_cc_praefix_ok($t['cc_praefix'])) { $falsch[] = 'tts.cc_praefix'; }
+        if (array_key_exists('cc_ziel', $t) && $t['cc_ziel'] !== '' && !sp_cc_ziel_ok($t['cc_ziel'])) { $falsch[] = 'tts.cc_ziel'; }
+        if (array_key_exists('alexa_geraet', $t) && !sp_alexa_geraet_ok($t['alexa_geraet'])) { $falsch[] = 'tts.alexa_geraet'; }
+        if (array_key_exists('alexa_laut', $t)
+            && !(is_int($t['alexa_laut']) && $t['alexa_laut'] >= -1 && $t['alexa_laut'] <= 100)) {
+            $falsch[] = 'tts.alexa_laut';
+        }
+        if ($falsch) {
+            return array(0, 'Die Sicherung traegt unbrauchbare Werte (' . implode(', ', $falsch)
+                          . '). Es wurde nichts eingespielt.');
+        }
+    }
+    // X-3: bis hierher geprueft, nichts geschrieben.
+    if ($nur_pruefen) {
+        return array(1, '');
+    }
     // Das laufende Token und die Miniserver-Adresse BLEIBEN - sie stehen
     // nicht in der Sicherung, und ein Einspielen darf die Adressen im
     // Miniserver nicht ungueltig machen.
@@ -1506,6 +1577,13 @@ function sp_sicherung_lesen($roh)
     $neu = array_merge($alt, $d['config']);
     $neu['aktionstoken'] = $alt['aktionstoken'];
     $neu['miniserver_url'] = $alt['miniserver_url'];
+    // Das Alexa-Sprechtoken steht nicht in der Sicherung (Ansage-1) und
+    // bleibt. Ist der tts-Block der Sicherung kein Block, gilt der alte
+    // ganz - sonst ginge das Token mit ihm verloren.
+    if (!isset($neu['tts']) || !is_array($neu['tts'])) {
+        $neu['tts'] = $alt['tts'];
+    }
+    $neu['tts']['alexa_token'] = $alt['tts']['alexa_token'];
     if (isset($alt['satelliten']) && is_array($alt['satelliten'])
         && isset($neu['satelliten']) && is_array($neu['satelliten'])) {
         foreach ($neu['satelliten'] as $i => $s) {
@@ -1525,6 +1603,283 @@ function sp_sicherung_lesen($roh)
     return array(1, sprintf('Sicherung eingespielt: %d Regeln, %d Ziele. '
                           . 'Token und Miniserver-Adresse sind unveraendert geblieben.',
                             count($d['saetze']['regeln']), count($d['saetze']['ziele'])));
+}
+
+/* ================= Zusaetzliche Ansage (Ansage-1, ab Werk aus) =================
+ *
+ * Chromecast4lox ueber MQTT und Alexa-NG ueber seinen Endpunkt. Der Dienst
+ * spricht mit beiden (bin/sprachsteuerung_dienst.py, cc_ansagen() und
+ * alexa_ansagen()); die Oberflaeche prueft nur, ob sie da sind - fuer den
+ * Reiter Test. Dieselben Pruefregeln wie im Dienst: ein Feld, zwei Sprachen,
+ * gleiche Muster.
+ * ================================================================== */
+define('SP_ALEXANG_ADRESSE', 'http://127.0.0.1/plugins/alexang/index.php');
+
+function sp_cc_praefix_ok($p)
+{
+    return is_string($p) && (bool) preg_match('#^[A-Za-z0-9_\-]+(/[A-Za-z0-9_\-]+){0,3}$#', $p);
+}
+
+/** 1 bis 60 Zeichen, gueltiges UTF-8, ohne Steuerzeichen, / + # und Rand-Leerraum. */
+function sp_cc_ziel_ok($z)
+{
+    return is_string($z) && (bool) preg_match('/^.{1,60}$/us', $z)
+        && !preg_match('#[\x00-\x1F\x7F/+\#]#', $z) && trim($z) === $z;
+}
+
+function sp_alexa_token_ok($t)
+{
+    return is_string($t) && (bool) preg_match('/^[A-Za-z0-9_\-]{8,128}$/', $t);
+}
+
+/** Leer (= Standardgeraet von Alexa-NG) oder bis 200 Zeichen ohne Steuerzeichen. */
+function sp_alexa_geraet_ok($g)
+{
+    return is_string($g) && ($g === ''
+        || ((bool) preg_match('/^.{1,200}$/us', $g) && !preg_match('/[\x00-\x1F\x7F]/', $g)));
+}
+
+/** Geraetename -> Themenebene wie thema_saeubern() in Chromecast4lox. */
+function sp_cc_thema($name)
+{
+    $name = (string) $name;
+    if (in_array(strtolower($name), array('alle', 'all', '*'), true)) {
+        return strtolower($name);
+    }
+    $name = strtr($name, array("\xC3\xA4" => 'ae', "\xC3\xB6" => 'oe', "\xC3\xBC" => 'ue',
+                               "\xC3\x84" => 'Ae', "\xC3\x96" => 'Oe', "\xC3\x9C" => 'Ue',
+                               "\xC3\x9F" => 'ss'));
+    if (class_exists('Normalizer', false)) {
+        $n = Normalizer::normalize($name, Normalizer::FORM_KD);
+        if (is_string($n)) {
+            $name = preg_replace('/\p{Mn}+/u', '', $n);
+        }
+    }
+    $name = trim((string) preg_replace('/[^A-Za-z0-9_-]+/', '_', (string) $name), '_');
+    return $name !== '' ? $name : 'geraet';
+}
+
+/**
+ * Zurueckbehaltene Werte am Broker lesen: MQTT 3.1.1 von Hand, eine
+ * Verbindung, abonnieren, einsammeln, abmelden. Das Kennwort steht nur im
+ * CONNECT-Paket und in keiner Meldung.
+ * Rueckgabe: array(ok, Fehlertext, array(thema => wert)).
+ */
+function sp_mqtt_retained_lesen(array $filter, $sekunden = 2.0)
+{
+    $m = sp_mqtt_zustand();
+    $host = trim((string) $m['broker']);
+    if ($host === '' || $host === 'localhost') { $host = '127.0.0.1'; }
+    $port = (int) $m['brokerport'];
+    if ($port < 1 || $port > 65535) {
+        return array(false, 'in der general.json steht kein Brokerport', array());
+    }
+    $fp = @fsockopen($host, $port, $errno, $errstr, 3);
+    if (!$fp) {
+        return array(false, 'keine Verbindung zum Broker ' . $host . ':' . $port
+                            . ' (' . ($errstr !== '' ? $errstr : 'Fehler ' . $errno) . ')', array());
+    }
+    $zk = function ($s) { return pack('n', strlen($s)) . $s; };
+    $laenge = function ($n) {
+        $o = '';
+        do {
+            $b = $n % 128;
+            $n = intdiv($n, 128);
+            if ($n) { $b |= 128; }
+            $o .= chr($b);
+        } while ($n);
+        return $o;
+    };
+    $puffer = '';
+    $fuellen = function ($n, $bis) use ($fp, &$puffer) {
+        while (strlen($puffer) < $n) {
+            $rest = $bis - microtime(true);
+            if ($rest <= 0) { return false; }
+            stream_set_timeout($fp, (int) floor($rest), (int) (($rest - floor($rest)) * 1000000));
+            $d = @fread($fp, 4096);
+            if ($d === false || $d === '') {
+                $meta = stream_get_meta_data($fp);
+                if (!empty($meta['timed_out']) || feof($fp)) { return false; }
+                continue;
+            }
+            $puffer .= $d;
+        }
+        return true;
+    };
+    $paket = function ($bis) use ($fuellen, &$puffer) {
+        if (!$fuellen(2, $bis)) { return null; }
+        $i = 1; $n = 0; $mult = 1;
+        while (true) {
+            if (!$fuellen($i + 1, $bis)) { return null; }
+            $b = ord($puffer[$i]);
+            $n += ($b & 127) * $mult;
+            $mult *= 128;
+            $i++;
+            if (!($b & 128) || $i > 4) { break; }
+        }
+        if (!$fuellen($i + $n, $bis)) { return null; }
+        $k = ord($puffer[0]);
+        $rumpf = (string) substr($puffer, $i, $n);
+        $puffer = (string) substr($puffer, $i + $n);
+        return array($k, $rumpf);
+    };
+    $flags = 0x02;
+    $nutz = $zk('spui' . getmypid());
+    if ((string) $m['user'] !== '') {
+        $flags |= 0x80;
+        $nutz .= $zk((string) $m['user']);
+        if ((string) $m['pw'] !== '') {
+            $flags |= 0x40;
+            $nutz .= $zk((string) $m['pw']);
+        }
+    }
+    $kopf = $zk('MQTT') . chr(4) . chr($flags) . pack('n', 10);
+    $werte = array();
+    $fehler = '';
+    if (@fwrite($fp, chr(0x10) . $laenge(strlen($kopf) + strlen($nutz)) . $kopf . $nutz) === false) {
+        $fehler = 'der Broker nimmt nichts an';
+    } else {
+        $p = $paket(microtime(true) + 3.0);
+        if ($p === null || ($p[0] >> 4) !== 2 || strlen($p[1]) < 2) {
+            $fehler = 'der Broker hat die Anmeldung nicht beantwortet';
+        } elseif (ord($p[1][1]) !== 0) {
+            $fehler = 'der Broker weist die Anmeldung ab (CONNACK ' . ord($p[1][1]) . ')';
+        } else {
+            $sub = pack('n', 1);
+            foreach ($filter as $f) { $sub .= $zk((string) $f) . chr(0); }
+            @fwrite($fp, chr(0x82) . $laenge(strlen($sub)) . $sub);
+            $ende = microtime(true) + (float) $sekunden;
+            $bestaetigt = false;
+            while (true) {
+                $bis = $bestaetigt ? min($ende, microtime(true) + 0.6) : $ende;
+                $p = $paket($bis);
+                if ($p === null) { break; }
+                $art = $p[0] >> 4;
+                if ($art === 9) {
+                    $rc = substr($p[1], 2);
+                    if (strlen($rc) !== count($filter) || preg_match('/[\x80-\xFF]/', $rc)) {
+                        $fehler = 'der Broker hat das Abonnement abgewiesen';
+                        break;
+                    }
+                    $bestaetigt = true;
+                } elseif ($art === 3 && strlen($p[1]) >= 2 && ($p[0] & 1)) {
+                    $tl = unpack('n', substr($p[1], 0, 2));
+                    $tl = (int) $tl[1];
+                    $thema = (string) substr($p[1], 2, $tl);
+                    $versatz = 2 + $tl + ((($p[0] >> 1) & 3) ? 2 : 0);
+                    $werte[$thema] = (string) substr($p[1], $versatz);
+                }
+            }
+            if ($fehler === '' && !$bestaetigt) {
+                $fehler = 'der Broker hat das Abonnement nicht bestaetigt';
+            }
+            @fwrite($fp, chr(0xE0) . chr(0));
+        }
+    }
+    fclose($fp);
+    return array($fehler === '', $fehler, $werte);
+}
+
+/**
+ * POST an Alexa-NG - das Token steht so in keiner Adresse und keinem
+ * Zugriffsprotokoll. Ohne $http_response_header (PHP 8.5): die erste Zeile
+ * der Antwort sagt alles (SELFTEST;OK=1;... bzw. SPRECHEN;OK=...).
+ * Rueckgabe: array(erste Zeile oder '', Fehlertext).
+ */
+function sp_alexa_rufen(array $felder, $sekunden = 5)
+{
+    $ctx = stream_context_create(array('http' => array(
+        'method'        => 'POST',
+        'header'        => "Content-Type: application/x-www-form-urlencoded\r\n",
+        'content'       => http_build_query($felder),
+        'timeout'       => (float) $sekunden,
+        'ignore_errors' => true,
+    )));
+    $roh = @file_get_contents(SP_ALEXANG_ADRESSE, false, $ctx, 0, 600);
+    if ($roh === false) {
+        return array('', 'keine Antwort von ' . SP_ALEXANG_ADRESSE);
+    }
+    $z = preg_split('/\r?\n/', trim((string) $roh));
+    return array(trim((string) $z[0]), '');
+}
+
+/**
+ * Die Zeile "Zusaetzliche Ansage" im Reiter Test: array(Stand, Antwort) oder
+ * null (die vier Loxone-Wege prueft der Selbsttest des Dienstes).
+ */
+function sp_ansage_lage($cfg = null)
+{
+    if ($cfg === null) { $cfg = sp_config(); }
+    $tts = $cfg['tts'];
+    $modus = (string) $tts['mode'];
+    $weg = (string) $cfg['antwortweg'];
+    if ($modus === 'aus') {
+        return array(-1, sp_t('TEST.A_ANSAGE_AUS'));
+    }
+    if (!in_array($modus, array('chromecast', 'alexang'), true)) {
+        return null;
+    }
+    if ($weg === 'satellit') {
+        return array(-1, sp_t('TEST.A_ANSAGE_SATELLIT'));
+    }
+    $rueck = ' ' . sp_t('TEST.A_RUECKFALL');
+    if ($modus === 'chromecast') {
+        $p = (string) $tts['cc_praefix'];
+        $ziel = (string) $tts['cc_ziel'];
+        if ($ziel === '') {
+            return array(0, sp_t('TEST.A_CC_EINSTELLUNG') . $rueck);
+        }
+        list($ok, $fehler, $werte) = sp_mqtt_retained_lesen(array($p . '/server/online', $p . '/+/type'));
+        if (!$ok) {
+            return array(0, sprintf(sp_t('TEST.A_CC_BROKER'), sp_e($fehler)) . $rueck);
+        }
+        $online = isset($werte[$p . '/server/online']) ? $werte[$p . '/server/online'] : '';
+        $geraete = array();
+        foreach ($werte as $thema => $w) {
+            $rest = substr($thema, strlen($p) + 1);
+            if (strpos($thema, $p . '/') === 0 && substr($rest, -5) === '/type'
+                && strpos(substr($rest, 0, -5), '/') === false && substr($rest, 0, -5) !== '') {
+                $geraete[] = substr($rest, 0, -5);
+            }
+        }
+        sort($geraete);
+        $liste = $geraete ? implode(', ', $geraete) : '-';
+        if ($online !== '1') {
+            return array(0, sprintf(sp_t('TEST.A_CC_FEHLT'), sp_e($p), sp_e($online === '' ? '-' : $online)) . $rueck);
+        }
+        $gesucht = strtolower(sp_cc_thema($ziel));
+        $bekannt = in_array($gesucht, array('alle', 'all', '*'), true);
+        foreach ($geraete as $g) {
+            if (strtolower($g) === $gesucht) { $bekannt = true; }
+        }
+        if (!$bekannt) {
+            return array(0, sprintf(sp_t('TEST.A_CC_GERAET'), sp_e($ziel), sp_e($liste)) . $rueck);
+        }
+        $stand = 1;
+        $text = sprintf(sp_t('TEST.A_CC_OK'), sp_e($p), sp_e($ziel), sp_e($liste));
+    } else {
+        if (!sp_alexa_token_ok((string) $tts['alexa_token'])) {
+            return array(0, sp_t('TEST.A_ALEXA_TOKEN') . $rueck);
+        }
+        list($zeile, $fehler) = sp_alexa_rufen(array('selftest' => '1', 'token' => (string) $tts['alexa_token']), 5);
+        if (strpos($zeile, 'SELFTEST;OK=1') === 0) {
+            $stand = 1;
+            $text = sp_t('TEST.A_ALEXA_OK');
+        } elseif (strpos($zeile, 'SELFTEST;') === 0) {
+            return array(0, sprintf(sp_t('TEST.A_ALEXA_ABGEWIESEN'), sp_e(substr($zeile, 0, 80))) . $rueck);
+        } else {
+            return array(0, sprintf(sp_t('TEST.A_ALEXA_FEHLT'), sp_e($fehler !== '' ? $fehler : substr($zeile, 0, 80))) . $rueck);
+        }
+    }
+    $letzte = sp_json_lesen(sp_paths()['datadir'] . '/ausgabe.json');
+    if (isset($letzte['modus']) && $letzte['modus'] === $modus) {
+        $alter = max(0, time() - (int) (isset($letzte['ts']) ? $letzte['ts'] : 0));
+        $text .= '<br>' . (!empty($letzte['ok'])
+            ? sprintf(sp_t('TEST.A_LETZTE_OK'), $alter)
+            : sprintf(sp_t('TEST.A_LETZTE_FEHL'), $alter,
+                      sp_e((string) (isset($letzte['meldung']) ? $letzte['meldung'] : ''))));
+    }
+    return array($stand, $text);
 }
 
 /** Der Verlauf als CSV - fuer die Frage, was regelmaessig NICHT verstanden wird. */

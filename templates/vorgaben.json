@@ -39,9 +39,11 @@
 
     "antwort_sprechen": 1,
     "antwortweg": "beide",
-    "tts": { "mode": "musicserver", "ip": "", "port": 7091,
+    "tts": { "mode": "aus", "ip": "", "port": 7091,
              "zones": "1", "volume": 8, "lang": "de", "template": "",
-             "stimme": "" },
+             "stimme": "",
+             "cc_praefix": "chromecast4lox", "cc_ziel": "alle",
+             "alexa_geraet": "", "alexa_token": "", "alexa_laut": -1 },
 
     "mqtt_ein": 1,
     "mqtt_topic": "sprachsteuerung",
@@ -80,7 +82,8 @@
 
   "auswahl": {
     "antwortweg": ["satellit", "loxone", "beide"],
-    "tts_mode":   ["musicserver", "ms4h", "audioserver", "custom"]
+    "tts_mode":   ["aus", "musicserver", "ms4h", "audioserver",
+                   "chromecast", "alexang", "custom"]
   },
 
   "_hinweis_retain": [

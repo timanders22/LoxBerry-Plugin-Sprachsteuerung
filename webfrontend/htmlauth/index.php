@@ -132,6 +132,192 @@ $sp_freitext = function ($wert) {
         preg_replace('/[\x00-\x1F\x7F]/u', ' ', (string) $wert)));
 };
 
+/*
+ * Nr. 19: Wert eines Feldes, das KEIN Freitext ist - null, wenn es nicht
+ * mitgeschickt wurde; false, wenn es keine Zeichenkette ist oder der Filter
+ * oben es veraendert haette (Anfuehrungs- oder Steuerzeichen). Bis 0.11.12
+ * wurde es still gesaeubert und gespeichert. Leerraum am Rand faellt still.
+ */
+$sp_x = function ($feld) use ($sp_sauber) {
+    if (!isset($_POST[$feld])) { return null; }
+    if (!is_string($_POST[$feld])) { return false; }
+    $roh = trim($_POST[$feld]);
+    return $roh === $sp_sauber($feld) ? $roh : false;
+};
+
+/* ================= PRG und X-2 (Entscheidungen Nr. 16 und 19) =================
+ *
+ * Bis 0.11.12 wurde die Seite unmittelbar nach dem POST gezeigt: ein
+ * Neuladen schickte das Formular noch einmal ab (Regeln/04, "Jeder
+ * POST-Handler endet mit einer Umleitung"). Jetzt endet jede POST-Anfrage an
+ * EINER Stelle (vor "Laden") mit 303; das Ergebnis reist als Einmalmeldung:
+ * data/plugins/<ordner>/einmalmeldung.json, 0600, hoechstens 120 s alt, nur
+ * beim GET gelesen und dabei geloescht - beim POST hat sie nichts zu suchen,
+ * sonst verhinderte ein alter Fehlertext das naechste Speichern.
+ *
+ * X-2: nach einer Beanstandung reisen die Eingaben des EINEN Formulars mit
+ * (nur die Felder der Liste, Zeichenketten, gueltiges UTF-8, hoechstens 4096
+ * Byte) und die Namen der beanstandeten Felder. NIE mit: Miniserver-Adresse
+ * (kann Zugangsdaten tragen), Alexa-Sprechtoken, ESPHome-Schluessel,
+ * Formularmerkmal - sie stehen in keiner Liste. Nach erfolgreichem
+ * Speichern zeigt der GET die gespeicherten Werte.
+ * Bauart: LoxBerry-Plugin-Abfahrtsassistent-1.6.19 (abf_flash_*, abf_w).
+ * ================================================================== */
+function sp_flash_datei()
+{
+    return sp_paths()['datadir'] . '/einmalmeldung.json';
+}
+function sp_flash_schreiben(array $inhalt)
+{
+    $inhalt['zeit'] = time();
+    return sp_json_schreiben(sp_flash_datei(), $inhalt, 0600);
+}
+function sp_flash_lesen()
+{
+    $f = sp_flash_datei();
+    if (!is_file($f)) { return array(); }
+    $d = json_decode((string) @file_get_contents($f), true);
+    @unlink($f);
+    if (!is_array($d) || !isset($d['zeit']) || time() - (int) $d['zeit'] > 120
+        || (int) $d['zeit'] > time() + 5) {
+        return array();
+    }
+    return $d;
+}
+function sp_eingabe_felder($formular)
+{
+    $liste = array(
+        'dienste' => array('whisper_host', 'whisper_port', 'piper_host', 'piper_port', 'wake_host',
+                           'wake_port', 'llm_host', 'llm_port', 'llm_ein', 'antwort_sprechen',
+                           'kontext_s', 'bestaetigung_s', 'antwortweg', 'tts_mode', 'tts_ip',
+                           'tts_port', 'tts_zones', 'tts_volume', 'tts_lang', 'tts_stimme',
+                           'cc_praefix', 'cc_ziel', 'alexa_geraet', 'alexa_laut',
+                           'alexa_token_loeschen', 'probe_text'),
+        'ansagen' => array('tts_template', 'ruhe_ein', 'ruhe_von', 'ruhe_bis', 'ansage_abstand_s',
+                           'ansage_je_tag', 'miniserver_url_loeschen', 'wakeword', 'wakeword_frei',
+                           'sprache', 'wartezeit', 'verlauf_zeilen'),
+        'mqtt'    => array('mqtt_ein', 'mqtt_topic', 'herzschlag_s'),
+        'modelle' => array('whisper_modell', 'whisper_modell_frei', 'piper_stimme', 'piper_stimme_frei',
+                           'llm_modell', 'llm_modell_frei'),
+        'mikros'  => array('m_name', 'm_art', 'm_host', 'm_port', 'm_raum', 'm_zone'),
+    );
+    return isset($liste[$formular]) ? $liste[$formular] : array();
+}
+/* Ein einzelner Wert, der mitreisen darf. */
+function sp_eingabe_tauglich($w)
+{
+    return is_string($w) && strlen($w) <= 4096 && preg_match('//u', $w) === 1;
+}
+/* Ein Feld beanstanden (bei Tabellenzeilen mit Index); ohne Argument die Liste. */
+function sp_bean($feld = null, $idx = null)
+{
+    static $liste = array();
+    if ($feld !== null) {
+        $n = (string) $feld . ($idx !== null ? '[' . (int) $idx . ']' : '');
+        if (!in_array($n, $liste, true)) { $liste[] = $n; }
+    }
+    return $liste;
+}
+/* Die Eingaben eines Formulars aus $_POST - nur die Felder der Liste. */
+function sp_eingaben_sammeln($formular)
+{
+    $werte = array();
+    foreach (sp_eingabe_felder($formular) as $f) {
+        if (!isset($_POST[$f])) { continue; }
+        $w = $_POST[$f];
+        if (is_array($w)) {
+            $zeilen = array();
+            foreach ($w as $k => $v) {
+                if (count($zeilen) >= 8 || !preg_match('/^\d{1,2}\z/', (string) $k)) { continue; }
+                if (sp_eingabe_tauglich($v)) { $zeilen[(string) (int) $k] = $v; }
+            }
+            $werte[$f] = $zeilen;
+        } elseif (sp_eingabe_tauglich($w)) {
+            $werte[$f] = $w;
+        }
+    }
+    return array('formular' => $formular, 'werte' => $werte, 'falsch' => sp_bean());
+}
+/* Beim GET: die Eingaben aus der Einmalmeldung pruefen und ablegen. */
+function sp_eingaben($setzen = null)
+{
+    static $e = null;
+    if ($setzen !== null) {
+        $e = null;
+        if (is_array($setzen) && isset($setzen['formular'], $setzen['werte'], $setzen['falsch'])
+            && is_string($setzen['formular']) && is_array($setzen['werte']) && is_array($setzen['falsch'])) {
+            $erlaubt = sp_eingabe_felder($setzen['formular']);
+            $werte = array();
+            foreach ($setzen['werte'] as $f => $w) {
+                if (!in_array((string) $f, $erlaubt, true)) { continue; }
+                if (is_array($w)) {
+                    $werte[$f] = array();
+                    foreach ($w as $k => $v) { if (sp_eingabe_tauglich($v)) { $werte[$f][(string) $k] = $v; } }
+                } elseif (sp_eingabe_tauglich($w)) {
+                    $werte[$f] = $w;
+                }
+            }
+            $falsch = array();
+            foreach ($setzen['falsch'] as $n) {
+                if (is_string($n) && preg_match('/^[a-z_]+(\[\d{1,2}\])?\z/', $n)) { $falsch[] = $n; }
+            }
+            if ($erlaubt) { $e = array('formular' => $setzen['formular'], 'werte' => $werte, 'falsch' => $falsch); }
+        }
+    }
+    return $e;
+}
+/* Gilt fuer dieses Feld eine Eingabe? Nur, wenn es zum beanstandeten Formular gehoert. */
+function sp_x2_aktiv($feld)
+{
+    $e = sp_eingaben();
+    return $e !== null && in_array($feld, sp_eingabe_felder($e['formular']), true);
+}
+/* Wert eines Feldes: die Eingabe, sonst der gespeicherte Wert. */
+function sp_x2_wert($feld, $gespeichert, $idx = null)
+{
+    if (sp_x2_aktiv($feld)) {
+        $e = sp_eingaben();
+        $w = isset($e['werte'][$feld]) ? $e['werte'][$feld] : null;
+        if ($idx !== null) { $w = (is_array($w) && isset($w[(string) (int) $idx])) ? $w[(string) (int) $idx] : null; }
+        if (is_string($w)) { return $w; }
+    }
+    return (string) $gespeichert;
+}
+/* Haken: nach einer Beanstandung so, wie er abgeschickt wurde. */
+function sp_x2_haken($feld, $gespeichert)
+{
+    if (!sp_x2_aktiv($feld)) { return (bool) $gespeichert; }
+    $e = sp_eingaben();
+    return isset($e['werte'][$feld]);
+}
+/* Markierung eines beanstandeten Felds (Attribute, schon maskiert). */
+function sp_x2_mark($feld, $idx = null)
+{
+    $e = sp_eingaben();
+    $n = (string) $feld . ($idx !== null ? '[' . (int) $idx . ']' : '');
+    return ($e !== null && in_array($n, $e['falsch'], true)) ? ' class="sm-beanstandet" aria-invalid="true"' : '';
+}
+
+/* Beim GET: das Ergebnis der vorigen Anfrage. */
+$sp_formular_x2 = '';
+if ((isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') !== 'POST') {
+    $sp_fl = sp_flash_lesen();
+    foreach ((isset($sp_fl['meldungen']) && is_array($sp_fl['meldungen']) ? $sp_fl['meldungen'] : array()) as $sp_z) {
+        if (is_string($sp_z)) { $sp_meldungen[] = $sp_z; }
+    }
+    foreach ((isset($sp_fl['fehler']) && is_array($sp_fl['fehler']) ? $sp_fl['fehler'] : array()) as $sp_z) {
+        if (is_string($sp_z)) { $sp_fehler[] = $sp_z; }
+    }
+    foreach ((isset($sp_fl['hinweise']) && is_array($sp_fl['hinweise']) ? $sp_fl['hinweise'] : array()) as $sp_z) {
+        if (is_string($sp_z)) { $sp_hinweise[] = $sp_z; }
+    }
+    if (isset($sp_fl['ausgabe']) && is_string($sp_fl['ausgabe'])) { $sp_ausgabe = $sp_fl['ausgabe']; }
+    if (isset($sp_fl['tab']) && is_string($sp_fl['tab']) && preg_match($sp_muster, $sp_fl['tab'])) {
+        $sp_tab = $sp_fl['tab'];
+    }
+    sp_eingaben(isset($sp_fl['eingaben']) ? $sp_fl['eingaben'] : array());
+}
+
 /* ---------------- Vorlagen und Ausfuhren herunterladen ---------------- */
 if ($sp_post && isset($_POST['vorlage'])) {
     $sp_was = (string) $_POST['vorlage'];
@@ -182,18 +368,21 @@ if ($sp_post && isset($_POST['sicherung_einspielen'])) {
 if ($sp_post && isset($_POST['mqtt_save'])) {
     $sp_cfg = sp_config();
     $sp_cfg['mqtt_ein'] = isset($_POST['mqtt_ein']) ? 1 : 0;
-    $sp_topic = $sp_sauber('mqtt_topic');
-    if ($sp_topic === '' || !preg_match('#^[A-Za-z0-9_/\-]{1,64}$#', $sp_topic)) {
+    $sp_topic = $sp_x('mqtt_topic');
+    if (!is_string($sp_topic) || $sp_topic === '' || !preg_match('#^[A-Za-z0-9_/\-]{1,64}$#', $sp_topic)) {
         $sp_fehler[] = sp_t('EINST.FEHLER_TOPIC');
+        sp_bean('mqtt_topic');
     } else {
         $sp_cfg['mqtt_topic'] = trim($sp_topic, '/');
     }
-    $sp_takt = $sp_sauber('herzschlag_s');
-    if (!preg_match('/^[0-9]+$/', $sp_takt) || (int) $sp_takt < 0 || (int) $sp_takt > 3600) {
+    $sp_takt = $sp_x('herzschlag_s');
+    if (!is_string($sp_takt) || !preg_match('/^[0-9]+$/', $sp_takt) || (int) $sp_takt < 0 || (int) $sp_takt > 3600) {
         $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_BEREICH'), sp_t('MQTT.L_HERZSCHLAG'), 0, 3600);
+        sp_bean('herzschlag_s');
     } else {
         $sp_cfg['herzschlag_s'] = (int) $sp_takt;
     }
+    if ($sp_fehler) { $sp_formular_x2 = 'mqtt'; }
     if (!$sp_fehler) {
         if (sp_config_speichern($sp_cfg)) { $sp_meldungen[] = sp_t('EINST.GESPEICHERT'); }
         else { $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_SPEICHERN'), $sp_p['config']); }
@@ -211,17 +400,24 @@ if ($sp_post && isset($_POST['speichern'])) {
     $sp_formular = isset($_POST['formular']) ? (string) $_POST['formular'] : '';
     foreach (array('whisper', 'piper', 'wake', 'llm') as $sp_d) {
         if (isset($_POST[$sp_d . '_host'])) {
-            $host = $sp_sauber($sp_d . '_host');
-            if ($host !== '' && !preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-:_]{0,80}$/', $host)) {
+            // Nr. 19: ein leeres Feld behielt bis 0.11.12 still den alten
+            // Rechnernamen - jetzt ist es eine Beanstandung.
+            $host = $sp_x($sp_d . '_host');
+            if ($host === '') {
+                $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_LEER'), sp_t('EINST.L_' . strtoupper($sp_d)));
+                sp_bean($sp_d . '_host');
+            } elseif (!is_string($host) || !preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-:_]{0,80}$/', $host)) {
                 $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_HOST'), sp_t('EINST.L_' . strtoupper($sp_d)));
-            } elseif ($host !== '') {
+                sp_bean($sp_d . '_host');
+            } else {
                 $sp_cfg[$sp_d . '_host'] = $host;
             }
         }
         if (isset($_POST[$sp_d . '_port'])) {
-            $port = $sp_sauber($sp_d . '_port');
-            if (!preg_match('/^[0-9]+$/', $port) || (int) $port < 1 || (int) $port > 65535) {
+            $port = $sp_x($sp_d . '_port');
+            if (!is_string($port) || !preg_match('/^[0-9]+$/', $port) || (int) $port < 1 || (int) $port > 65535) {
                 $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_PORT'), sp_t('EINST.L_' . strtoupper($sp_d)));
+                sp_bean($sp_d . '_port');
             } else {
                 $sp_cfg[$sp_d . '_port'] = (int) $port;
             }
@@ -235,33 +431,47 @@ if ($sp_post && isset($_POST['speichern'])) {
     foreach (array('wartezeit', 'verlauf_zeilen', 'ansage_abstand_s', 'ansage_je_tag',
                    'kontext_s', 'bestaetigung_s') as $f) {
         if (!isset($sp_gr[$f]) || !isset($_POST[$f])) { continue; }
-        $w = $sp_sauber($f);
-        if (!preg_match('/^[0-9]+$/', $w)) {
+        $w = $sp_x($f);
+        if (!is_string($w) || !preg_match('/^[0-9]+$/', $w)) {
             $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_ZAHL'), sp_t('EINST.L_' . strtoupper($f)));
+            sp_bean($f);
         } elseif ((int) $w < (int) $sp_gr[$f][0] || (int) $w > (int) $sp_gr[$f][1]) {
             $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_BEREICH'),
                                    sp_t('EINST.L_' . strtoupper($f)),
                                    (int) $sp_gr[$f][0], (int) $sp_gr[$f][1]);
+            sp_bean($f);
         } else {
             $sp_cfg[$f] = (int) $w;
         }
     }
     if (isset($_POST['sprache'])) {
-        $sp_spr = $sp_sauber('sprache');
-        if (!preg_match('/^[a-z]{2}$/', $sp_spr)) {
+        $sp_spr = $sp_x('sprache');
+        if (!is_string($sp_spr) || !preg_match('/^[a-z]{2}$/', $sp_spr)) {
             $sp_fehler[] = sp_t('EINST.FEHLER_SPRACHE');
+            sp_bean('sprache');
         } else {
             $sp_cfg['sprache'] = $sp_spr;
         }
     }
-    $sp_ww = $sp_sauber('wakeword');
-    if ($sp_ww === '' && isset($_POST['wakeword_frei'])) {
-        $sp_ww = $sp_sauber('wakeword_frei');
-    }
-    if ($sp_ww !== '' && !preg_match('/^[a-z0-9_\-]{1,40}$/', $sp_ww)) {
-        $sp_fehler[] = sp_t('EINST.FEHLER_WAKEWORD');
-    } elseif ($sp_ww !== '') {
-        $sp_cfg['wakeword'] = $sp_ww;
+    /* Nr. 19: "eigener Wert" mit leerem Feld behielt bis 0.11.12 still das
+     * alte Weckwort - jetzt eine Beanstandung. */
+    if (isset($_POST['wakeword'])) {
+        $sp_ww = $sp_x('wakeword');
+        $sp_wwfeld = 'wakeword';
+        if ($sp_ww === '' && isset($_POST['wakeword_frei'])) {
+            $sp_ww = $sp_x('wakeword_frei');
+            $sp_wwfeld = 'wakeword_frei';
+        }
+        if ($sp_ww === '') {
+            $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_LEER'), sp_t('EINST.L_WAKEWORD'));
+            sp_bean('wakeword');
+            sp_bean('wakeword_frei');
+        } elseif (!is_string($sp_ww) || !preg_match('/^[a-z0-9_\-]{1,40}$/', $sp_ww)) {
+            $sp_fehler[] = sp_t('EINST.FEHLER_WAKEWORD');
+            sp_bean($sp_wwfeld);
+        } else {
+            $sp_cfg['wakeword'] = $sp_ww;
+        }
     }
     /* Die Miniserver-Adresse kann Zugangsdaten enthalten - deshalb NICHT
      * filtern, nur auf die Form pruefen. Und ein LEERES Feld loescht sie
@@ -274,6 +484,7 @@ if ($sp_post && isset($_POST['speichern'])) {
     } elseif ($sp_url !== '' && $sp_url !== sp_url_maskiert((string) $sp_cfg['miniserver_url'])) {
         if (!sp_url_ok($sp_url)) {
             $sp_fehler[] = sp_t('EINST.FEHLER_URL');
+            sp_bean('miniserver_url');
         } else {
             $sp_cfg['miniserver_url'] = $sp_url;
         }
@@ -289,42 +500,50 @@ if ($sp_post && isset($_POST['speichern'])) {
 
     /* ---- Rueckweg nach Loxone ---- */
     if (isset($_POST['antwortweg'])) {
-        $sp_weg = $sp_sauber('antwortweg');
-        if (!in_array($sp_weg, sp_auswahl('antwortweg'), true)) {
+        $sp_weg = $sp_x('antwortweg');
+        if (!is_string($sp_weg) || !in_array($sp_weg, sp_auswahl('antwortweg'), true)) {
             $sp_fehler[] = sp_t('EINST.FEHLER_ANTWORTWEG');
+            sp_bean('antwortweg');
         } else {
             $sp_cfg['antwortweg'] = $sp_weg;
         }
     }
     $sp_tts = is_array(isset($sp_cfg['tts']) ? $sp_cfg['tts'] : null) ? $sp_cfg['tts'] : array();
     if (isset($_POST['tts_mode'])) {
-        $sp_modus = $sp_sauber('tts_mode');
-        if (!in_array($sp_modus, sp_auswahl('tts_mode'), true)) {
+        $sp_modus = $sp_x('tts_mode');
+        if (!is_string($sp_modus) || !in_array($sp_modus, sp_auswahl('tts_mode'), true)) {
             $sp_fehler[] = sp_t('EINST.FEHLER_TTS_MODUS');
+            sp_bean('tts_mode');
         } else {
             $sp_tts['mode'] = $sp_modus;
         }
     }
     if (isset($_POST['tts_ip'])) {
-        $sp_tts_ip = $sp_sauber('tts_ip');
-        if ($sp_tts_ip !== '' && !preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-:_]{0,80}$/', $sp_tts_ip)) {
+        $sp_tts_ip = $sp_x('tts_ip');
+        if (!is_string($sp_tts_ip)
+            || ($sp_tts_ip !== '' && !preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-:_]{0,80}$/', $sp_tts_ip))) {
             $sp_fehler[] = sp_t('EINST.FEHLER_TTS_IP');
+            sp_bean('tts_ip');
         } else {
             $sp_tts['ip'] = $sp_tts_ip;
         }
     }
     if (isset($_POST['tts_port'])) {
-        $sp_tts_port = $sp_sauber('tts_port');
-        if (!preg_match('/^[0-9]+$/', $sp_tts_port) || (int) $sp_tts_port < 1 || (int) $sp_tts_port > 65535) {
+        $sp_tts_port = $sp_x('tts_port');
+        if (!is_string($sp_tts_port) || !preg_match('/^[0-9]+$/', $sp_tts_port)
+            || (int) $sp_tts_port < 1 || (int) $sp_tts_port > 65535) {
             $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_PORT'), sp_t('EINST.L_TTS_PORT'));
+            sp_bean('tts_port');
         } else {
             $sp_tts['port'] = (int) $sp_tts_port;
         }
     }
     if (isset($_POST['tts_volume'])) {
-        $sp_tts_laut = $sp_sauber('tts_volume');
-        if (!preg_match('/^[0-9]+$/', $sp_tts_laut) || (int) $sp_tts_laut < 1 || (int) $sp_tts_laut > 100) {
+        $sp_tts_laut = $sp_x('tts_volume');
+        if (!is_string($sp_tts_laut) || !preg_match('/^[0-9]+$/', $sp_tts_laut)
+            || (int) $sp_tts_laut < 1 || (int) $sp_tts_laut > 100) {
             $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_BEREICH'), sp_t('EINST.L_TTS_VOLUME'), 1, 100);
+            sp_bean('tts_volume');
         } else {
             $sp_tts['volume'] = (int) $sp_tts_laut;
         }
@@ -333,25 +552,36 @@ if ($sp_post && isset($_POST['speichern'])) {
      * gebogen, den niemand gewaehlt hat: bis 0.10.1 wurde aus einer leeren
      * Zonenangabe still '1' und aus einer leeren Sprache still 'de'. */
     if (isset($_POST['tts_zones'])) {
-        $sp_tts_zonen = $sp_sauber('tts_zones');
-        if ($sp_tts_zonen !== '' && !preg_match('/^[0-9~,\s]{1,80}$/', $sp_tts_zonen)) {
+        $sp_tts_zonen = $sp_x('tts_zones');
+        if ($sp_tts_zonen === '') {
+            // Nr. 19: bis 0.11.12 behielt ein leeres Feld still die alten Zonen.
+            $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_LEER'), sp_t('EINST.L_TTS_ZONES'));
+            sp_bean('tts_zones');
+        } elseif (!is_string($sp_tts_zonen) || !preg_match('/^[0-9~,\s]{1,80}$/', $sp_tts_zonen)) {
             $sp_fehler[] = sp_t('EINST.FEHLER_TTS_ZONEN');
-        } elseif ($sp_tts_zonen !== '') {
+            sp_bean('tts_zones');
+        } else {
             $sp_tts['zones'] = $sp_tts_zonen;
         }
     }
     if (isset($_POST['tts_lang'])) {
-        $sp_tts_spr = $sp_sauber('tts_lang');
-        if ($sp_tts_spr !== '' && !preg_match('/^[a-z]{2,5}$/', $sp_tts_spr)) {
+        $sp_tts_spr = $sp_x('tts_lang');
+        if ($sp_tts_spr === '') {
+            $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_LEER'), sp_t('EINST.L_TTS_LANG'));
+            sp_bean('tts_lang');
+        } elseif (!is_string($sp_tts_spr) || !preg_match('/^[a-z]{2,5}$/', $sp_tts_spr)) {
             $sp_fehler[] = sp_t('EINST.FEHLER_SPRACHE');
-        } elseif ($sp_tts_spr !== '') {
+            sp_bean('tts_lang');
+        } else {
             $sp_tts['lang'] = $sp_tts_spr;
         }
     }
     if (isset($_POST['tts_stimme'])) {
-        $sp_tts_stimme = $sp_sauber('tts_stimme');
-        if ($sp_tts_stimme !== '' && !preg_match('/^[A-Za-z0-9_.\-]{0,60}$/', $sp_tts_stimme)) {
+        $sp_tts_stimme = $sp_x('tts_stimme');
+        if (!is_string($sp_tts_stimme)
+            || ($sp_tts_stimme !== '' && !preg_match('/^[A-Za-z0-9_.\-]{0,60}$/', $sp_tts_stimme))) {
             $sp_fehler[] = sprintf(sp_t('DIENST.FEHLER_MODELL'), sp_t('EINST.L_TTS_STIMME'));
+            sp_bean('tts_stimme');
         } else {
             $sp_tts['stimme'] = $sp_tts_stimme;
         }
@@ -359,21 +589,86 @@ if ($sp_post && isset($_POST['speichern'])) {
     // Die Vorlage traegt Platzhalter in geschweiften Klammern und darf
     // deshalb NICHT durch den Filter oben laufen.
     if (isset($_POST['tts_template'])) {
-        $sp_tts_vorl = trim((string) $_POST['tts_template']);
-        if ($sp_tts_vorl !== '' && !sp_url_ok($sp_tts_vorl)) {
+        $sp_tts_vorl = is_string($_POST['tts_template']) ? trim($_POST['tts_template']) : false;
+        if ($sp_tts_vorl === false || ($sp_tts_vorl !== '' && !sp_url_ok($sp_tts_vorl))) {
             $sp_fehler[] = sp_t('EINST.FEHLER_TTS_VORLAGE');
+            sp_bean('tts_template');
         } else {
             $sp_tts['template'] = $sp_tts_vorl;
         }
     }
+    /* ---- Zusaetzliche Ansage: Chromecast4lox und Alexa-NG (Ansage-1) ----
+     * Abgewiesen wird benannt, nicht zurechtgebogen; ein Feld, das keine
+     * Zeichenkette ist (name[]), ist eine Beanstandung. Das Sprechtoken
+     * reist nie ins Formular zurueck: leer lassen behaelt es, der Haken
+     * loescht es (nur im Formular, das ihn traegt). */
+    $sp_roh = function ($feld) {
+        if (!isset($_POST[$feld])) { return null; }
+        return is_string($_POST[$feld]) ? trim($_POST[$feld]) : false;
+    };
+    $sp_w = $sp_roh('cc_praefix');
+    if ($sp_w !== null) {
+        if ($sp_w === false || !sp_cc_praefix_ok(trim($sp_w, '/'))) {
+            $sp_fehler[] = sp_t('EINST.FEHLER_CC_PRAEFIX');
+            sp_bean('cc_praefix');
+        } else {
+            $sp_tts['cc_praefix'] = trim($sp_w, '/');
+        }
+    }
+    $sp_w = $sp_roh('cc_ziel');
+    if ($sp_w !== null) {
+        if ($sp_w === false || !sp_cc_ziel_ok($sp_w)) {
+            $sp_fehler[] = sp_t('EINST.FEHLER_CC_ZIEL');
+            sp_bean('cc_ziel');
+        } else {
+            $sp_tts['cc_ziel'] = $sp_w;
+        }
+    }
+    $sp_w = $sp_roh('alexa_geraet');
+    if ($sp_w !== null) {
+        if ($sp_w === false || !sp_alexa_geraet_ok($sp_w)) {
+            $sp_fehler[] = sp_t('EINST.FEHLER_ALEXA_GERAET');
+            sp_bean('alexa_geraet');
+        } else {
+            $sp_tts['alexa_geraet'] = $sp_w;
+        }
+    }
+    $sp_w = $sp_roh('alexa_laut');
+    if ($sp_w !== null) {
+        if ($sp_w === '') {
+            $sp_tts['alexa_laut'] = -1;
+        } elseif ($sp_w === false || !preg_match('/^[0-9]{1,3}$/', $sp_w) || (int) $sp_w > 100) {
+            $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_BEREICH'), sp_t('EINST.L_ALEXA_LAUT'), 0, 100);
+            sp_bean('alexa_laut');
+        } else {
+            $sp_tts['alexa_laut'] = (int) $sp_w;
+        }
+    }
+    if ($sp_formular === 'dienste' && isset($_POST['alexa_token_loeschen'])) {
+        $sp_tts['alexa_token'] = '';
+    } else {
+        $sp_w = $sp_roh('alexa_token');
+        if ($sp_w === false || ($sp_w !== null && $sp_w !== '' && !sp_alexa_token_ok($sp_w))) {
+            $sp_fehler[] = sp_t('EINST.FEHLER_ALEXA_TOKEN');
+            sp_bean('alexa_token');
+        } elseif ($sp_w !== null && $sp_w !== '') {
+            $sp_tts['alexa_token'] = $sp_w;
+        }
+    }
+    if ($sp_formular === 'dienste' && isset($_POST['tts_mode']) && $sp_sauber('tts_mode') === 'alexang'
+        && (!isset($sp_tts['alexa_token']) || !sp_alexa_token_ok((string) $sp_tts['alexa_token']))) {
+        $sp_hinweise[] = sp_t('EINST.HINWEIS_ALEXA_OHNE_TOKEN');
+    }
     /* Ein HINWEIS, keine Sperre - und nur, wenn das Formular kam, das die
      * drei Werte fuehrt. Sonst urteilt er ueber Felder, die gar nicht da
      * waren. Der Satz stimmt trotzdem: ohne Adresse geht keine Ansage
-     * ueber Loxone hinaus. */
+     * ueber Loxone hinaus. Seit Ansage-1 nur fuer die drei Wege, die eine
+     * Adresse brauchen ("aus", Audioserver, Chromecast4lox und Alexa-NG
+     * brauchen keine). */
     if ($sp_formular === 'dienste'
         && isset($_POST['antwortweg'], $_POST['tts_mode'], $_POST['tts_ip'])
         && $sp_sauber('antwortweg') !== 'satellit'
-        && $sp_sauber('tts_mode') !== 'audioserver'
+        && in_array($sp_sauber('tts_mode'), array('musicserver', 'ms4h', 'custom'), true)
         && $sp_sauber('tts_ip') === '') {
         $sp_hinweise[] = sp_t('EINST.FEHLER_TTS_FEHLT');
     }
@@ -387,10 +682,14 @@ if ($sp_post && isset($_POST['speichern'])) {
     }
     foreach (array('von', 'bis') as $sp_f) {
         if (!isset($_POST['ruhe_' . $sp_f])) { continue; }
-        $sp_w = $sp_sauber('ruhe_' . $sp_f);
-        if ($sp_w !== '' && !preg_match('/^\d{1,2}:\d{2}$/', $sp_w)) {
+        $sp_w = $sp_x('ruhe_' . $sp_f);
+        if ($sp_w === '') {
+            $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_LEER'), sp_t('EINST.L_RUHE_' . strtoupper($sp_f)));
+            sp_bean('ruhe_' . $sp_f);
+        } elseif (!is_string($sp_w) || !preg_match('/^\d{1,2}:\d{2}$/', $sp_w)) {
             $sp_fehler[] = sp_t('EINST.FEHLER_RUHEZEIT');
-        } elseif ($sp_w !== '') {
+            sp_bean('ruhe_' . $sp_f);
+        } else {
             $sp_ruhe[$sp_f] = $sp_w;
         }
     }
@@ -410,6 +709,9 @@ if ($sp_post && isset($_POST['speichern'])) {
             $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_SPEICHERN'), $sp_p['config']);
         }
     }
+    if ($sp_fehler && in_array($sp_formular, array('dienste', 'ansagen'), true)) {
+        $sp_formular_x2 = $sp_formular;
+    }
     $sp_tab = 'tab-settings';
 }
 
@@ -419,20 +721,28 @@ if ($sp_post && isset($_POST['modelle_speichern'])) {
     foreach (array('whisper_modell' => '/^[A-Za-z0-9_.\/\-]{0,80}$/',
                    'piper_stimme'   => '/^[A-Za-z0-9_.\-]{0,60}$/',
                    'llm_modell'     => '/^[A-Za-z0-9_.\/\-:]{0,120}$/') as $feld => $muster) {
-        $w = $sp_sauber($feld);
+        $w = $sp_x($feld);
         // Auswahlliste oder Freitext - der Freitext gewinnt, wenn er gefuellt ist.
-        $frei = $sp_sauber($feld . '_frei');
-        if ($frei !== '') { $w = $frei; }
-        if ($w !== '' && !preg_match($muster, $w)) {
+        $frei = $sp_x($feld . '_frei');
+        $sp_mf = $feld;
+        if (is_string($frei) && $frei !== '') { $w = $frei; $sp_mf = $feld . '_frei'; }
+        if ($w === false || $frei === false) {
+            $sp_mf = $w === false ? $feld : $feld . '_frei';
+            $w = false;
+        }
+        if ($w === false || ((string) $w !== '' && !preg_match($muster, (string) $w))) {
             $sp_fehler[] = sprintf(sp_t('DIENST.FEHLER_MODELL'), sp_t('DIENST.L_' . strtoupper($feld)));
+            sp_bean($sp_mf);
             continue;
         }
+        $w = (string) $w;
         $sp_cfg[$feld] = $w;
     }
     if (!$sp_fehler) {
         if (sp_config_speichern($sp_cfg)) { $sp_meldungen[] = sp_t('DIENST.GESPEICHERT'); }
         else { $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_SPEICHERN'), $sp_p['config']); }
     }
+    if ($sp_fehler) { $sp_formular_x2 = 'modelle'; }
     $sp_tab = 'tab-services';
 }
 
@@ -447,28 +757,46 @@ if ($sp_post && isset($_POST['mikros_speichern'])) {
             return isset($a[$i]) ? trim(preg_replace('/[\x00-\x1F\x7F"\']/', '', (string) $a[$i])) : '';
         };
         $host = $hol('m_host');
+        // Nr. 19: was der Filter still veraendert haette, ist eine Beanstandung.
+        $sp_roh_z = function ($feld) use ($i) {
+            $a = isset($_POST[$feld]) && is_array($_POST[$feld]) ? $_POST[$feld] : array();
+            return isset($a[$i]) && is_string($a[$i]) ? trim($a[$i]) : '';
+        };
+        $sp_zeichen_falsch = array();
+        foreach (array('m_host', 'm_port', 'm_zone') as $sp_mfeld) {
+            if ($hol($sp_mfeld) !== $sp_roh_z($sp_mfeld)) { $sp_zeichen_falsch[] = $sp_mfeld; }
+        }
         // Die Bezeichnung ist Freitext - Anfuehrungszeichen bleiben stehen.
         $a_name = isset($_POST['m_name']) ? (array) $_POST['m_name'] : array();
         $name = $sp_freitext(isset($a_name[$i]) ? $a_name[$i] : '');
         if ($host === '' && $name === '') { continue; }
         $art = $hol('m_art') === 'esphome' ? 'esphome' : 'wyoming';
+        if ($sp_zeichen_falsch) {
+            $sp_fehler[] = sprintf(sp_t('MIKRO.FEHLER_ZEICHEN'), $i + 1);
+            foreach ($sp_zeichen_falsch as $sp_mfeld) { sp_bean($sp_mfeld, $i); }
+            continue;
+        }
         if ($host === '') {
             $sp_fehler[] = sprintf(sp_t('MIKRO.FEHLER_HOST_FEHLT'), $i + 1);
+            sp_bean('m_host', $i);
             continue;
         }
         if (!preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-:_]{0,80}$/', $host)) {
             $sp_fehler[] = sprintf(sp_t('MIKRO.FEHLER_HOST'), $i + 1);
+            sp_bean('m_host', $i);
             continue;
         }
         $port = $hol('m_port');
         if ($port === '') { $port = $art === 'esphome' ? '6053' : '10700'; }
         if (!preg_match('/^[0-9]+$/', $port) || (int) $port < 1 || (int) $port > 65535) {
             $sp_fehler[] = sprintf(sp_t('MIKRO.FEHLER_PORT'), $i + 1);
+            sp_bean('m_port', $i);
             continue;
         }
         $zone = $hol('m_zone');
         if ($zone !== '' && !preg_match('/^[0-9~,]{1,40}$/', $zone)) {
             $sp_fehler[] = sprintf(sp_t('MIKRO.FEHLER_ZONE'), $i + 1);
+            sp_bean('m_zone', $i);
             continue;
         }
         $eintrag = array('art' => $art, 'name' => $name !== '' ? $name : $host,
@@ -487,6 +815,7 @@ if ($sp_post && isset($_POST['mikros_speichern'])) {
         if (sp_config_speichern($sp_cfg)) { $sp_meldungen[] = sp_t('MIKRO.GESPEICHERT'); }
         else { $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_SPEICHERN'), $sp_p['config']); }
     }
+    if ($sp_fehler) { $sp_formular_x2 = 'mikros'; }
     $sp_tab = 'tab-mics';
 }
 
@@ -790,6 +1119,27 @@ if ($sp_post && isset($_POST['selbsttest'])) {
     $sp_tab = 'tab-test';
 }
 
+/* ---------------- PRG: jede POST-Anfrage endet hier mit 303 ----------------
+ * Downloads (Vorlage, Sicherung, CSV, Probe) und die Container-Knoepfe mit
+ * eigener Umleitung sind vorher schon mit exit ausgestiegen. */
+if ((isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') === 'POST') {
+    if (preg_match('//u', $sp_ausgabe) !== 1) {
+        $sp_ausgabe = (string) preg_replace('/[\x80-\xFF]/', '?', $sp_ausgabe);
+    }
+    $sp_fl = array('tab' => $sp_tab, 'meldungen' => $sp_meldungen, 'fehler' => $sp_fehler,
+                   'hinweise' => $sp_hinweise,
+                   'ausgabe' => strlen($sp_ausgabe) > 262144 ? substr($sp_ausgabe, -262144) : $sp_ausgabe);
+    if ($sp_fehler && $sp_formular_x2 !== '') {
+        $sp_fl['eingaben'] = sp_eingaben_sammeln($sp_formular_x2);
+        $sp_fl['fehler'][] = sp_t('EINST.NICHTS_GESPEICHERT');
+    }
+    if (!sp_flash_schreiben($sp_fl)) {
+        sp_log('Die Einmalmeldung liess sich nicht schreiben: ' . sp_flash_datei());
+    }
+    header('Location: index.php?form=' . rawurlencode((string) preg_replace('/^tab-/', '', $sp_tab)), true, 303);
+    exit;
+}
+
 /* ---------------- Laden ---------------- */
 $sp_cfg = sp_config();
 $sp_token = sp_token();
@@ -916,6 +1266,9 @@ if ($sp_rahmen) {
     padding: 10px 12px; margin: 12px 0; font-size: 0.9em; }
 .sm-an  { color: #1a7f1a; font-weight: 700; }
 .sm-aus { color: #b00000; font-weight: 700; }
+/* X-2: ein beanstandetes Feld nach der Umleitung - eigene Zutat, nicht Teil der Hausvorlage. */
+.sm-wrap .sm-beanstandet { border: 2px solid #c62828 !important; background: #fff5f5 !important; }
+.sm-wrap input[type=checkbox].sm-beanstandet { outline: 2px solid #c62828; outline-offset: 2px; }
 .sm-log { background: #1e1e1e; color: #d4d4d4; font-family: Consolas, "Courier New", monospace;
     font-size: 0.82em; padding: 12px; border-radius: 8px; max-height: 480px; overflow: auto;
     white-space: pre-wrap; }
@@ -1051,8 +1404,8 @@ $sp_hidden = function ($tab) use ($sp_fmt) {
 <tr><th><?= sp_e(sp_t('EINST.T_DIENST')) ?></th><th><?= sp_e(sp_t('EINST.T_ADRESSE')) ?></th><th><?= sp_e(sp_t('EINST.T_PORT')) ?></th></tr>
 <?php foreach (array('whisper', 'piper', 'wake', 'llm') as $sp_d) { ?>
 <tr><td><?= sp_e(sp_t('EINST.L_' . strtoupper($sp_d))) ?></td>
-    <td><input data-role="none" type="text" name="<?= $sp_d ?>_host" value="<?= sp_e($sp_cfg[$sp_d . '_host']) ?>" size="16"></td>
-    <td><input data-role="none" type="text" name="<?= $sp_d ?>_port" value="<?= (int) $sp_cfg[$sp_d . '_port'] ?>" size="6"></td></tr>
+    <td><input data-role="none" type="text" name="<?= $sp_d ?>_host" value="<?= sp_e(sp_x2_wert($sp_d . '_host', $sp_cfg[$sp_d . '_host'])) ?>" size="16"<?= sp_x2_mark($sp_d . '_host') ?>></td>
+    <td><input data-role="none" type="text" name="<?= $sp_d ?>_port" value="<?= sp_e(sp_x2_wert($sp_d . '_port', (int) $sp_cfg[$sp_d . '_port'])) ?>" size="6"<?= sp_x2_mark($sp_d . '_port') ?>></td></tr>
 <?php } ?>
 </table>
 </div>
@@ -1061,25 +1414,25 @@ $sp_hidden = function ($tab) use ($sp_fmt) {
 <div class="sm-hinweis"><?= sp_t('EINST.VERSTEHEN_ERKLAERUNG') ?></div>
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;">
-    <input data-role="none" type="checkbox" name="llm_ein" value="1" <?= !empty($sp_cfg['llm_ein']) ? 'checked' : '' ?>>
+    <input data-role="none" type="checkbox" name="llm_ein" value="1" <?= sp_x2_haken('llm_ein', !empty($sp_cfg['llm_ein'])) ? 'checked' : '' ?>>
     <?= sp_e(sp_t('EINST.L_LLM_EIN')) ?>
   </label>
   <div class="sm-hilfe"><?= sp_t('EINST.H_LLM_EIN') ?></div>
 </div>
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;">
-    <input data-role="none" type="checkbox" name="antwort_sprechen" value="1" <?= !empty($sp_cfg['antwort_sprechen']) ? 'checked' : '' ?>>
+    <input data-role="none" type="checkbox" name="antwort_sprechen" value="1" <?= sp_x2_haken('antwort_sprechen', !empty($sp_cfg['antwort_sprechen'])) ? 'checked' : '' ?>>
     <?= sp_e(sp_t('EINST.L_ANTWORT')) ?>
   </label>
 </div>
 <div class="sm-feld">
   <label for="kontext_s"><?= sp_e(sp_t('EINST.L_KONTEXT_S')) ?></label>
-  <input data-role="none" type="number" id="kontext_s" name="kontext_s" value="<?= (int) $sp_cfg['kontext_s'] ?>" min="0" max="300">
+  <input data-role="none" type="number" id="kontext_s" name="kontext_s" value="<?= sp_e(sp_x2_wert('kontext_s', (int) $sp_cfg['kontext_s'])) ?>" min="0" max="300"<?= sp_x2_mark('kontext_s') ?>>
   <div class="sm-hilfe"><?= sp_t('EINST.H_KONTEXT_S') ?></div>
 </div>
 <div class="sm-feld">
   <label for="bestaetigung_s"><?= sp_e(sp_t('EINST.L_BESTAETIGUNG_S')) ?></label>
-  <input data-role="none" type="number" id="bestaetigung_s" name="bestaetigung_s" value="<?= (int) $sp_cfg['bestaetigung_s'] ?>" min="0" max="120">
+  <input data-role="none" type="number" id="bestaetigung_s" name="bestaetigung_s" value="<?= sp_e(sp_x2_wert('bestaetigung_s', (int) $sp_cfg['bestaetigung_s'])) ?>" min="0" max="120"<?= sp_x2_mark('bestaetigung_s') ?>>
   <div class="sm-hilfe"><?= sp_t('EINST.H_BESTAETIGUNG_S') ?></div>
 </div>
 
@@ -1087,54 +1440,91 @@ $sp_hidden = function ($tab) use ($sp_fmt) {
 <div class="sm-hinweis"><?= sp_t('EINST.H_ANTWORTWEG_TEXT') ?></div>
 <div class="sm-feld">
   <label for="antwortweg"><?= sp_e(sp_t('EINST.L_ANTWORTWEG')) ?></label>
-  <select data-role="none" id="antwortweg" name="antwortweg">
+  <select data-role="none" id="antwortweg" name="antwortweg"<?= sp_x2_mark('antwortweg') ?>>
 <?php foreach (sp_auswahl('antwortweg') as $sp_w) { ?>
-    <option value="<?= sp_e($sp_w) ?>"<?= $sp_cfg['antwortweg'] === $sp_w ? ' selected' : '' ?>><?= sp_e(sp_t('EINST.WEG_' . strtoupper($sp_w))) ?></option>
+    <option value="<?= sp_e($sp_w) ?>"<?= sp_x2_wert('antwortweg', $sp_cfg['antwortweg']) === $sp_w ? ' selected' : '' ?>><?= sp_e(sp_t('EINST.WEG_' . strtoupper($sp_w))) ?></option>
 <?php } ?>
   </select>
   <div class="sm-hilfe"><?= sp_t('EINST.H_ANTWORTWEG_FELD') ?></div>
 </div>
 <div class="sm-feld">
   <label for="tts_mode"><?= sp_e(sp_t('EINST.L_TTS_MODE')) ?></label>
-  <select data-role="none" id="tts_mode" name="tts_mode">
+  <select data-role="none" id="tts_mode" name="tts_mode"<?= sp_x2_mark('tts_mode') ?>>
 <?php foreach (sp_auswahl('tts_mode') as $sp_m) { ?>
-    <option value="<?= sp_e($sp_m) ?>"<?= $sp_cfg['tts']['mode'] === $sp_m ? ' selected' : '' ?>><?= sp_e(sp_t('EINST.TTS_' . strtoupper($sp_m))) ?></option>
+    <option value="<?= sp_e($sp_m) ?>"<?= sp_x2_wert('tts_mode', $sp_cfg['tts']['mode']) === $sp_m ? ' selected' : '' ?>><?= sp_e(sp_t('EINST.TTS_' . strtoupper($sp_m))) ?></option>
 <?php } ?>
   </select>
   <div class="sm-hilfe"><?= sp_t('EINST.H_TTS_MODE') ?></div>
 </div>
 <div class="sm-feld">
   <label for="tts_ip"><?= sp_e(sp_t('EINST.L_TTS_IP')) ?></label>
-  <input data-role="none" type="text" id="tts_ip" name="tts_ip" value="<?= sp_e($sp_cfg['tts']['ip']) ?>" placeholder="192.168.1.20">
+  <input data-role="none" type="text" id="tts_ip" name="tts_ip" value="<?= sp_e(sp_x2_wert('tts_ip', $sp_cfg['tts']['ip'])) ?>" placeholder="192.168.1.20"<?= sp_x2_mark('tts_ip') ?>>
 </div>
 <div class="sm-feld">
   <label for="tts_port"><?= sp_e(sp_t('EINST.L_TTS_PORT')) ?></label>
-  <input data-role="none" type="number" id="tts_port" name="tts_port" value="<?= (int) $sp_cfg['tts']['port'] ?>" min="1" max="65535">
+  <input data-role="none" type="number" id="tts_port" name="tts_port" value="<?= sp_e(sp_x2_wert('tts_port', (int) $sp_cfg['tts']['port'])) ?>" min="1" max="65535"<?= sp_x2_mark('tts_port') ?>>
 </div>
 <div class="sm-feld">
   <label for="tts_zones"><?= sp_e(sp_t('EINST.L_TTS_ZONES')) ?></label>
-  <input data-role="none" type="text" id="tts_zones" name="tts_zones" value="<?= sp_e($sp_cfg['tts']['zones']) ?>" placeholder="2,4">
+  <input data-role="none" type="text" id="tts_zones" name="tts_zones" value="<?= sp_e(sp_x2_wert('tts_zones', $sp_cfg['tts']['zones'])) ?>" placeholder="2,4"<?= sp_x2_mark('tts_zones') ?>>
   <div class="sm-hilfe"><?= sp_t('EINST.H_TTS_ZONES') ?></div>
 </div>
 <div class="sm-feld">
   <label for="tts_volume"><?= sp_e(sp_t('EINST.L_TTS_VOLUME')) ?></label>
-  <input data-role="none" type="number" id="tts_volume" name="tts_volume" value="<?= (int) $sp_cfg['tts']['volume'] ?>" min="1" max="100">
+  <input data-role="none" type="number" id="tts_volume" name="tts_volume" value="<?= sp_e(sp_x2_wert('tts_volume', (int) $sp_cfg['tts']['volume'])) ?>" min="1" max="100"<?= sp_x2_mark('tts_volume') ?>>
 </div>
 <div class="sm-feld">
   <label for="tts_lang"><?= sp_e(sp_t('EINST.L_TTS_LANG')) ?></label>
-  <input data-role="none" type="text" id="tts_lang" name="tts_lang" value="<?= sp_e($sp_cfg['tts']['lang']) ?>" maxlength="5">
+  <input data-role="none" type="text" id="tts_lang" name="tts_lang" value="<?= sp_e(sp_x2_wert('tts_lang', $sp_cfg['tts']['lang'])) ?>" maxlength="5"<?= sp_x2_mark('tts_lang') ?>>
 </div>
 <div class="sm-feld">
   <label for="tts_stimme"><?= sp_e(sp_t('EINST.L_TTS_STIMME')) ?></label>
-  <input data-role="none" type="text" id="tts_stimme" name="tts_stimme" value="<?= sp_e($sp_cfg['tts']['stimme']) ?>" placeholder="<?= sp_e($sp_cfg['piper_stimme']) ?>">
+  <input data-role="none" type="text" id="tts_stimme" name="tts_stimme" value="<?= sp_e(sp_x2_wert('tts_stimme', $sp_cfg['tts']['stimme'])) ?>" placeholder="<?= sp_e($sp_cfg['piper_stimme']) ?>"<?= sp_x2_mark('tts_stimme') ?>>
   <div class="sm-hilfe"><?= sp_t('EINST.H_TTS_STIMME') ?></div>
+</div>
+<h3><?= sp_e(sp_t('EINST.H_ZUSATZ')) ?></h3>
+<div class="sm-hilfe"><?= sp_t('EINST.H_ZUSATZ_TEXT') ?></div>
+<div class="sm-feld">
+  <label for="cc_praefix"><?= sp_e(sp_t('EINST.L_CC_PRAEFIX')) ?></label>
+  <input data-role="none" type="text" id="cc_praefix" name="cc_praefix" value="<?= sp_e(sp_x2_wert('cc_praefix', $sp_cfg['tts']['cc_praefix'])) ?>" placeholder="chromecast4lox"<?= sp_x2_mark('cc_praefix') ?>>
+  <div class="sm-hilfe"><?= sp_t('EINST.H_CC_PRAEFIX') ?></div>
+</div>
+<div class="sm-feld">
+  <label for="cc_ziel"><?= sp_e(sp_t('EINST.L_CC_ZIEL')) ?></label>
+  <input data-role="none" type="text" id="cc_ziel" name="cc_ziel" value="<?= sp_e(sp_x2_wert('cc_ziel', $sp_cfg['tts']['cc_ziel'])) ?>" placeholder="alle"<?= sp_x2_mark('cc_ziel') ?>>
+  <div class="sm-hilfe"><?= sp_t('EINST.H_CC_ZIEL') ?></div>
+</div>
+<div class="sm-feld">
+  <label for="alexa_geraet"><?= sp_e(sp_t('EINST.L_ALEXA_GERAET')) ?></label>
+  <input data-role="none" type="text" id="alexa_geraet" name="alexa_geraet" value="<?= sp_e(sp_x2_wert('alexa_geraet', $sp_cfg['tts']['alexa_geraet'])) ?>" placeholder="kueche"<?= sp_x2_mark('alexa_geraet') ?>>
+  <div class="sm-hilfe"><?= sp_t('EINST.H_ALEXA_GERAET') ?></div>
+</div>
+<div class="sm-feld">
+  <label for="alexa_token"><?= sp_e(sp_t('EINST.L_ALEXA_TOKEN')) ?></label>
+<?php /* Das Token reist NIE ins Formular zurueck (wie ein Kennwort):
+   angezeigt wird nur, ob eins gespeichert ist und wie lang es ist. */ ?>
+  <input data-role="none" type="password" id="alexa_token" name="alexa_token" value="" autocomplete="new-password" placeholder="<?= $sp_cfg['tts']['alexa_token'] !== '' ? sp_e(sprintf(sp_t('EINST.P_ALEXA_TOKEN_GESETZT'), strlen((string) $sp_cfg['tts']['alexa_token']))) : sp_e(sp_t('EINST.P_ALEXA_TOKEN_LEER')) ?>"<?= sp_x2_mark('alexa_token') ?>>
+  <div class="sm-hilfe"><?= sp_t('EINST.H_ALEXA_TOKEN') ?></div>
+  <label style="display:inline-flex;align-items:center;gap:8px;margin-top:6px;font-weight:400;">
+    <input data-role="none" type="checkbox" name="alexa_token_loeschen" value="1"<?= sp_x2_haken('alexa_token_loeschen', false) ? ' checked' : '' ?>>
+    <?= sp_e(sp_t('EINST.L_ALEXA_TOKEN_LOESCHEN')) ?>
+  </label>
+</div>
+<div class="sm-feld">
+  <label for="alexa_laut"><?= sp_e(sp_t('EINST.L_ALEXA_LAUT')) ?></label>
+  <input data-role="none" type="number" id="alexa_laut" name="alexa_laut" value="<?= sp_e(sp_x2_wert('alexa_laut', (int) $sp_cfg['tts']['alexa_laut'] >= 0 ? (int) $sp_cfg['tts']['alexa_laut'] : '')) ?>" min="0" max="100"<?= sp_x2_mark('alexa_laut') ?>>
+  <div class="sm-hilfe"><?= sp_t('EINST.H_ALEXA_LAUT') ?></div>
+</div>
+<div class="sm-knopfreihe">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sp_e(sp_t('ALLG.SPEICHERN')) ?></button>
 </div>
 <div class="sm-feld">
   <label for="probe_text"><?= sp_e(sp_t('EINST.L_PROBE_TEXT')) ?></label>
-  <input data-role="none" type="text" id="probe_text" name="probe_text" value="Die Sprachsteuerung ist bereit.">
+  <input data-role="none" type="text" id="probe_text" name="probe_text" value="<?= sp_e(sp_x2_wert('probe_text', 'Die Sprachsteuerung ist bereit.')) ?>">
   <div class="sm-hilfe"><?= sp_t('EINST.H_PROBE') ?></div>
 </div>
 <div class="sm-legende">
+<span><i class="sm-punkt sm-b-aktion"></i> <?= sp_t('LEGENDE.AKTION') ?></span>
 <span><i class="sm-punkt sm-b-technik"></i> <?= sp_t('LEGENDE.TECHNIK') ?></span>
 </div>
 <div class="sm-knopfreihe">
@@ -1155,7 +1545,7 @@ $sp_hidden = function ($tab) use ($sp_fmt) {
 <input data-role="none" type="hidden" name="formular" value="ansagen">
 <div class="sm-feld">
   <label for="tts_template"><?= sp_e(sp_t('EINST.L_TTS_TEMPLATE')) ?></label>
-  <input data-role="none" type="text" id="tts_template" name="tts_template" value="<?= sp_e($sp_cfg['tts']['template']) ?>" placeholder="http://{ip}:{port}/tts?text={text}&amp;zone={zones}&amp;vol={vol}">
+  <input data-role="none" type="text" id="tts_template" name="tts_template" value="<?= sp_e(sp_x2_wert('tts_template', $sp_cfg['tts']['template'])) ?>"<?= sp_x2_mark('tts_template') ?> placeholder="http://{ip}:{port}/tts?text={text}&amp;zone={zones}&amp;vol={vol}">
   <div class="sm-hilfe"><?= sp_t('EINST.H_TTS_TEMPLATE') ?></div>
 </div>
 
@@ -1163,67 +1553,68 @@ $sp_hidden = function ($tab) use ($sp_fmt) {
 <div class="sm-warnung"><?= sp_t('EINST.H_RUHE_TEXT') ?></div>
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;">
-    <input data-role="none" type="checkbox" name="ruhe_ein" value="1" <?= !empty($sp_cfg['ruhe']['ein']) ? 'checked' : '' ?>>
+    <input data-role="none" type="checkbox" name="ruhe_ein" value="1" <?= sp_x2_haken('ruhe_ein', !empty($sp_cfg['ruhe']['ein'])) ? 'checked' : '' ?>>
     <?= sp_e(sp_t('EINST.L_RUHE_EIN')) ?>
   </label>
 </div>
 <div class="sm-feld">
   <label for="ruhe_von"><?= sp_e(sp_t('EINST.L_RUHE_VON')) ?></label>
-  <input data-role="none" type="text" id="ruhe_von" name="ruhe_von" value="<?= sp_e($sp_cfg['ruhe']['von']) ?>" size="6" placeholder="22:00">
+  <input data-role="none" type="text" id="ruhe_von" name="ruhe_von" value="<?= sp_e(sp_x2_wert('ruhe_von', $sp_cfg['ruhe']['von'])) ?>" size="6" placeholder="22:00"<?= sp_x2_mark('ruhe_von') ?>>
 </div>
 <div class="sm-feld">
   <label for="ruhe_bis"><?= sp_e(sp_t('EINST.L_RUHE_BIS')) ?></label>
-  <input data-role="none" type="text" id="ruhe_bis" name="ruhe_bis" value="<?= sp_e($sp_cfg['ruhe']['bis']) ?>" size="6" placeholder="07:00">
+  <input data-role="none" type="text" id="ruhe_bis" name="ruhe_bis" value="<?= sp_e(sp_x2_wert('ruhe_bis', $sp_cfg['ruhe']['bis'])) ?>" size="6" placeholder="07:00"<?= sp_x2_mark('ruhe_bis') ?>>
 </div>
 <div class="sm-feld">
   <label for="ansage_abstand_s"><?= sp_e(sp_t('EINST.L_ANSAGE_ABSTAND_S')) ?></label>
-  <input data-role="none" type="number" id="ansage_abstand_s" name="ansage_abstand_s" value="<?= (int) $sp_cfg['ansage_abstand_s'] ?>" min="0" max="3600">
+  <input data-role="none" type="number" id="ansage_abstand_s" name="ansage_abstand_s" value="<?= sp_e(sp_x2_wert('ansage_abstand_s', (int) $sp_cfg['ansage_abstand_s'])) ?>" min="0" max="3600"<?= sp_x2_mark('ansage_abstand_s') ?>>
   <div class="sm-hilfe"><?= sp_t('EINST.H_ANSAGE_ABSTAND_S') ?></div>
 </div>
 <div class="sm-feld">
   <label for="ansage_je_tag"><?= sp_e(sp_t('EINST.L_ANSAGE_JE_TAG')) ?></label>
-  <input data-role="none" type="number" id="ansage_je_tag" name="ansage_je_tag" value="<?= (int) $sp_cfg['ansage_je_tag'] ?>" min="0" max="500">
+  <input data-role="none" type="number" id="ansage_je_tag" name="ansage_je_tag" value="<?= sp_e(sp_x2_wert('ansage_je_tag', (int) $sp_cfg['ansage_je_tag'])) ?>" min="0" max="500"<?= sp_x2_mark('ansage_je_tag') ?>>
   <div class="sm-hilfe"><?= sp_t('EINST.H_ANSAGE_JE_TAG') ?></div>
 </div>
 
 <h2><?= sp_e(sp_t('EINST.H_LOXONE')) ?></h2>
 <div class="sm-feld">
   <label for="miniserver_url"><?= sp_e(sp_t('EINST.L_URL')) ?></label>
-  <input data-role="none" type="text" id="miniserver_url" name="miniserver_url" value="<?= sp_e(sp_url_maskiert((string) $sp_cfg['miniserver_url'])) ?>">
+  <input data-role="none" type="text" id="miniserver_url" name="miniserver_url" value="<?= sp_e(sp_url_maskiert((string) $sp_cfg['miniserver_url'])) ?>"<?= sp_x2_mark('miniserver_url') ?>>
   <div class="sm-hilfe"><?= sp_t('EINST.H_URL') ?></div>
   <label style="display:inline-flex;align-items:center;gap:8px;margin-top:6px;font-weight:400;">
-    <input data-role="none" type="checkbox" name="miniserver_url_loeschen" value="1">
+    <input data-role="none" type="checkbox" name="miniserver_url_loeschen" value="1"<?= sp_x2_haken('miniserver_url_loeschen', false) ? ' checked' : '' ?>>
     <?= sp_e(sp_t('EINST.L_URL_LOESCHEN')) ?>
   </label>
 </div>
 <div class="sm-feld">
   <label for="wakeword"><?= sp_e(sp_t('EINST.L_WAKEWORD')) ?></label>
-  <select data-role="none" id="wakeword" name="wakeword">
+  <select data-role="none" id="wakeword" name="wakeword"<?= sp_x2_mark('wakeword') ?>>
 <?php
 $sp_ww_liste = sp_wakewords();
 if (!in_array((string) $sp_cfg['wakeword'], $sp_ww_liste, true) && $sp_cfg['wakeword'] !== '') {
     $sp_ww_liste[] = (string) $sp_cfg['wakeword'];
 }
+$sp_ww_ist = sp_x2_wert('wakeword', $sp_cfg['wakeword']);
 foreach ($sp_ww_liste as $sp_w) { ?>
-    <option value="<?= sp_e($sp_w) ?>"<?= (string) $sp_cfg['wakeword'] === $sp_w ? ' selected' : '' ?>><?= sp_e($sp_w) ?></option>
+    <option value="<?= sp_e($sp_w) ?>"<?= $sp_ww_ist === $sp_w ? ' selected' : '' ?>><?= sp_e($sp_w) ?></option>
 <?php } ?>
-    <option value=""><?= sp_e(sp_t('ALLG.EIGENER_WERT')) ?></option>
+    <option value=""<?= $sp_ww_ist === '' ? ' selected' : '' ?>><?= sp_e(sp_t('ALLG.EIGENER_WERT')) ?></option>
   </select>
-  <input data-role="none" type="text" name="wakeword_frei" value="" placeholder="<?= sp_e(sp_t('ALLG.EIGENER_WERT_H')) ?>" style="margin-top:6px;">
+  <input data-role="none" type="text" name="wakeword_frei" value="<?= sp_e(sp_x2_wert('wakeword_frei', '')) ?>" placeholder="<?= sp_e(sp_t('ALLG.EIGENER_WERT_H')) ?>" style="margin-top:6px;"<?= sp_x2_mark('wakeword_frei') ?>>
   <div class="sm-hilfe"><?= sp_t('EINST.H_WAKEWORD') ?></div>
 </div>
 <div class="sm-feld">
   <label for="sprache"><?= sp_e(sp_t('EINST.L_SPRACHE')) ?></label>
-  <input data-role="none" type="text" id="sprache" name="sprache" value="<?= sp_e($sp_cfg['sprache']) ?>" maxlength="2">
+  <input data-role="none" type="text" id="sprache" name="sprache" value="<?= sp_e(sp_x2_wert('sprache', $sp_cfg['sprache'])) ?>" maxlength="2"<?= sp_x2_mark('sprache') ?>>
 </div>
 <div class="sm-feld">
   <label for="wartezeit"><?= sp_e(sp_t('EINST.L_WARTEZEIT')) ?></label>
-  <input data-role="none" type="number" id="wartezeit" name="wartezeit" value="<?= (int) $sp_cfg['wartezeit'] ?>" min="1" max="12">
+  <input data-role="none" type="number" id="wartezeit" name="wartezeit" value="<?= sp_e(sp_x2_wert('wartezeit', (int) $sp_cfg['wartezeit'])) ?>" min="1" max="12"<?= sp_x2_mark('wartezeit') ?>>
   <div class="sm-hilfe"><?= sp_t('EINST.H_WARTEZEIT') ?></div>
 </div>
 <div class="sm-feld">
   <label for="verlauf_zeilen"><?= sp_e(sp_t('EINST.L_VERLAUF_ZEILEN')) ?></label>
-  <input data-role="none" type="number" id="verlauf_zeilen" name="verlauf_zeilen" value="<?= (int) $sp_cfg['verlauf_zeilen'] ?>" min="5" max="500">
+  <input data-role="none" type="number" id="verlauf_zeilen" name="verlauf_zeilen" value="<?= sp_e(sp_x2_wert('verlauf_zeilen', (int) $sp_cfg['verlauf_zeilen'])) ?>" min="5" max="500"<?= sp_x2_mark('verlauf_zeilen') ?>>
 </div>
 
 <div class="sm-knopfreihe">
@@ -1309,17 +1700,17 @@ foreach ($sp_themen as $sp_th => $sp_sch) {
 <input data-role="none" type="hidden" name="mqtt_save" value="1">
 <div class="sm-feld">
   <label style="display:inline-flex;align-items:center;gap:8px;">
-    <input data-role="none" type="checkbox" name="mqtt_ein" value="1" <?= !empty($sp_cfg['mqtt_ein']) ? 'checked' : '' ?>>
+    <input data-role="none" type="checkbox" name="mqtt_ein" value="1" <?= sp_x2_haken('mqtt_ein', !empty($sp_cfg['mqtt_ein'])) ? 'checked' : '' ?>>
     <?= sp_e(sp_t('EINST.L_MQTT_EIN')) ?>
   </label>
 </div>
 <div class="sm-feld">
   <label for="mqtt_topic"><?= sp_e(sp_t('EINST.L_MQTT_TOPIC')) ?></label>
-  <input data-role="none" type="text" id="mqtt_topic" name="mqtt_topic" value="<?= sp_e($sp_cfg['mqtt_topic']) ?>" placeholder="sprache">
+  <input data-role="none" type="text" id="mqtt_topic" name="mqtt_topic" value="<?= sp_e(sp_x2_wert('mqtt_topic', $sp_cfg['mqtt_topic'])) ?>" placeholder="sprache"<?= sp_x2_mark('mqtt_topic') ?>>
 </div>
 <div class="sm-feld">
   <label for="herzschlag_s"><?= sp_e(sp_t('MQTT.L_HERZSCHLAG')) ?></label>
-  <input data-role="none" type="number" id="herzschlag_s" name="herzschlag_s" value="<?= (int) $sp_cfg['herzschlag_s'] ?>" min="0" max="3600">
+  <input data-role="none" type="number" id="herzschlag_s" name="herzschlag_s" value="<?= sp_e(sp_x2_wert('herzschlag_s', (int) $sp_cfg['herzschlag_s'])) ?>" min="0" max="3600"<?= sp_x2_mark('herzschlag_s') ?>>
   <div class="sm-hilfe"><?= sp_t('MQTT.H_HERZSCHLAG') ?></div>
 </div>
 
@@ -1392,11 +1783,11 @@ foreach ($sp_modellfelder as $sp_feld => $sp_info) {
         }
     }
     $sp_werte = array_values(array_unique($sp_werte));
-    $sp_ist = (string) $sp_cfg[$sp_feld];
+    $sp_ist = sp_x2_wert($sp_feld, (string) $sp_cfg[$sp_feld]);
 ?>
 <div class="sm-feld">
   <label for="<?= $sp_feld ?>"><?= sp_e(sp_t($sp_info[0])) ?></label>
-  <select data-role="none" id="<?= $sp_feld ?>" name="<?= $sp_feld ?>">
+  <select data-role="none" id="<?= $sp_feld ?>" name="<?= $sp_feld ?>"<?= sp_x2_mark($sp_feld) ?>>
     <option value=""><?= sp_e(sp_t('DIENST.VORSCHLAG_NEHMEN')) ?></option>
 <?php   foreach ($sp_werte as $sp_w) { ?>
     <option value="<?= sp_e($sp_w) ?>"<?= $sp_ist === $sp_w ? ' selected' : '' ?>><?= sp_e($sp_w) ?></option>
@@ -1405,7 +1796,7 @@ foreach ($sp_modellfelder as $sp_feld => $sp_info) {
     <option value="<?= sp_e($sp_ist) ?>" selected><?= sp_e($sp_ist) ?></option>
 <?php   } ?>
   </select>
-  <input data-role="none" type="text" name="<?= $sp_feld ?>_frei" value="" placeholder="<?= sp_e(sp_t('ALLG.EIGENER_WERT_H')) ?>" style="margin-top:6px;">
+  <input data-role="none" type="text" name="<?= $sp_feld ?>_frei" value="<?= sp_e(sp_x2_wert($sp_feld . '_frei', '')) ?>" placeholder="<?= sp_e(sp_t('ALLG.EIGENER_WERT_H')) ?>" style="margin-top:6px;"<?= sp_x2_mark($sp_feld . '_frei') ?>>
 </div>
 <?php } ?>
 <div class="sm-hilfe"><?= sp_t('DIENST.H_LLM_MODELL') ?></div>
@@ -1645,15 +2036,16 @@ for ($sp_i = 0; $sp_i < 8; $sp_i++) {
     $sp_zust = isset($sp_sats[$sp_name]['zustand']) ? $sp_sats[$sp_name]['zustand'] : '';
 ?>
 <tr><td><?= $sp_i + 1 ?></td>
-<td><input data-role="none" type="text" name="m_name[]" value="<?= sp_e($sp_name) ?>" size="12"></td>
+<td><input data-role="none" type="text" name="m_name[]" value="<?= sp_e(sp_x2_wert('m_name', $sp_name, $sp_i)) ?>" size="12"<?= sp_x2_mark('m_name', $sp_i) ?>></td>
+<?php $sp_art_ist = sp_x2_wert('m_art', $sp_v('art') === 'esphome' ? 'esphome' : 'wyoming', $sp_i); ?>
 <td><select data-role="none" name="m_art[]">
-    <option value="wyoming"<?= $sp_v('art') !== 'esphome' ? ' selected' : '' ?>>Wyoming</option>
-    <option value="esphome"<?= $sp_v('art') === 'esphome' ? ' selected' : '' ?>>ESPHome</option>
+    <option value="wyoming"<?= $sp_art_ist !== 'esphome' ? ' selected' : '' ?>>Wyoming</option>
+    <option value="esphome"<?= $sp_art_ist === 'esphome' ? ' selected' : '' ?>>ESPHome</option>
 </select></td>
-<td><input data-role="none" type="text" name="m_host[]" value="<?= sp_e($sp_v('host')) ?>" size="14" placeholder="<?= $sp_i === 0 ? '192.168.1.60' : '' ?>"></td>
-<td><input data-role="none" type="text" name="m_port[]" value="<?= sp_e($sp_v('port')) ?>" size="5"></td>
-<td><input data-role="none" type="text" name="m_raum[]" value="<?= sp_e($sp_v('raum')) ?>" size="12" placeholder="<?= $sp_i === 0 ? 'wohnzimmer' : '' ?>"></td>
-<td><input data-role="none" type="text" name="m_zone[]" value="<?= sp_e($sp_v('zone')) ?>" size="5"></td>
+<td><input data-role="none" type="text" name="m_host[]" value="<?= sp_e(sp_x2_wert('m_host', $sp_v('host'), $sp_i)) ?>" size="14" placeholder="<?= $sp_i === 0 ? '192.168.1.60' : '' ?>"<?= sp_x2_mark('m_host', $sp_i) ?>></td>
+<td><input data-role="none" type="text" name="m_port[]" value="<?= sp_e(sp_x2_wert('m_port', $sp_v('port'), $sp_i)) ?>" size="5"<?= sp_x2_mark('m_port', $sp_i) ?>></td>
+<td><input data-role="none" type="text" name="m_raum[]" value="<?= sp_e(sp_x2_wert('m_raum', $sp_v('raum'), $sp_i)) ?>" size="12" placeholder="<?= $sp_i === 0 ? 'wohnzimmer' : '' ?>"<?= sp_x2_mark('m_raum', $sp_i) ?>></td>
+<td><input data-role="none" type="text" name="m_zone[]" value="<?= sp_e(sp_x2_wert('m_zone', $sp_v('zone'), $sp_i)) ?>" size="5"<?= sp_x2_mark('m_zone', $sp_i) ?>></td>
 <td><input data-role="none" type="password" name="m_schluessel[]" value=""
     placeholder="<?= $sp_v('schluessel') !== '' ? sp_e(sp_t('MIKRO.SCHLUESSEL_DA')) : sp_e(sp_t('MIKRO.SCHLUESSEL_LEER')) ?>" size="12"></td>
 <td class="<?= $sp_zust === 'getrennt' || $sp_zust === '' ? 'sm-aus' : 'sm-an' ?>"><?= $sp_zust !== '' ? sp_e($sp_zust) : '&mdash;' ?></td></tr>
@@ -1834,6 +2226,12 @@ foreach ($sp_lvor as $sp_k4 => $sp_v4) {
 
 <h2><?= sp_e(sp_t('SICHER.H_TITEL')) ?></h2>
 <div class="sm-hinweis"><?= sp_t('SICHER.ERKLAERUNG') ?></div>
+<?php /* X-3: wuerde die eigene Sicherung beim Zurueckspielen abgewiesen?
+   Dieselbe Pruefung wie das Zurueckspielen; nur der Grund, nie Werte. */
+$sp_x3 = sp_rueckspiel_altwerte();
+if ($sp_x3 !== '') { ?>
+<div class="sm-warnung"><?= sprintf(sp_t('SICHER.WARN_RUECKSPIEL'), sp_e($sp_x3)) ?></div>
+<?php } ?>
 <div class="sm-legende">
 <span><i class="sm-punkt sm-b-lesen"></i> <?= sp_t('LEGENDE.LESEN') ?></span>
 <span><i class="sm-punkt sm-b-aktion"></i> <?= sp_t('LEGENDE.AKTION') ?></span>

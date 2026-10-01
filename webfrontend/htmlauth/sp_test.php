@@ -158,6 +158,13 @@ function sp_pruefungen()
         $zeilen[] = sp_pruefzeile($ruhe ? -1 : 1, sp_t('TEST.F_RUHE'), $antwort);
     }
 
+    // Zusaetzliche Ansage (Ansage-1): ist das Ziel da? Faellt es aus,
+    // bleibt der bisherige Weg - die Zeile sagt es.
+    $sp_al = sp_ansage_lage($cfg);
+    if ($sp_al !== null) {
+        $zeilen[] = sp_pruefzeile($sp_al[0], sp_t('TEST.F_ANSAGE'), $sp_al[1]);
+    }
+
     // Vorgaben, Zweitschrift, Suchmuster, Vorlage, Oberflaeche
     list($st, $tx) = sp_vorgaben_probe();
     $zeilen[] = sp_pruefzeile($st, sp_t('TEST.F_VORGABEN'), $tx);

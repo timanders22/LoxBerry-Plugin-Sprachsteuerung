@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.11.11
+Version 0.11.12
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,26 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.11.12
+
+Verbesserungen aus dem Durchgang (Verbesserungsliste
+`Pruefung-Durchgang-2026-09-29/VERBESSERUNGEN_OFFEN.md`, Entscheidungen 16 und 19). Gemessen an
+Attrappen (Broker, Chromecast4lox, Alexa-NG, Music Server) unter PHP 7.4, 8.3 und
+8.5; nicht am Gerät.
+
+* **Startsperre:** Zwei gleichzeitige Starts (etwa wenn Cron nach einem Uhrsprung
+  Minuten nachholt) ergeben nur noch einen Dienst.
+* **Neu, ab Werk aus: Ansagen zusätzlich über ein anderes Gerät** – Loxone Music
+  Server, MusicServer4Home, Original-Audioserver (Text für Loxone), Chromecast4lox
+  (über MQTT), Alexa-NG oder eine eigene URL-Vorlage. Fällt das Ziel aus, spricht
+  der Lautsprecher des Sprachgeräts, und eine Benachrichtigung nennt den Grund.
+* **Einstellungen mit Umleitung nach dem Speichern (PRG):** Nach einer
+  Beanstandung stehen die eingetippten Werte markiert wieder im Formular;
+  gespeichert wird nichts, auch leere Pflichtfelder werden beanstandet statt still
+  den alten Wert zu behalten.
+* „Einstellungen sichern“ warnt, wenn das Zurückspielen die Datei abweisen würde;
+  die Sicherung enthält das Sprechtoken von Alexa-NG nicht.
 
 ## Neu in 0.11.11
 
@@ -968,6 +988,43 @@ Ein virtueller Ausgang kann die Anlage etwas ansagen lassen
 gesprochen (`aktion=satz`), oder die Ansagen stilllegen (`aktion=ruhe`). Die
 Vorlage im Reiter *Einbindung in Loxone* baut den Ausgang fertig.
 
+## Ansagen zusätzlich über ein anderes Gerät (ab Werk aus)
+
+Die Antwort spricht der Lautsprecher des Sprachgeräts, das gefragt wurde.
+Im Reiter *Einstellungen* wählt **Art der Audioausgabe** ein weiteres Gerät,
+über das Antworten und Ansagen (`aktion=sprechen`) zusätzlich laufen:
+
+| Auswahl | Weg | Einstellung |
+|---|---|---|
+| aus (ab Werk) | nur die Lautsprecher der Sprachgeräte | – |
+| Loxone Music Server (klassisch) | `http://<ip>:7091/audio/grouped/tts/<zonen>/<text>` | Adresse, Port, Zonen, Lautstärke, Sprache |
+| MusicServer4Home / Audioserver4Home | URL-Vorlage (ohne Eintrag die MS4H-Vorlage) | wie oben, dazu die Vorlage |
+| Originaler Loxone Audioserver | nur der Text im MQTT-Thema `<präfix>/ansage`; die Ausgabe baut man in Loxone Config (Textgenerator am TTS-Eingang) | – |
+| Chromecast4lox | MQTT `<cc-präfix>/<lautsprecher>/cmd/tts`, QoS 1, nicht zurückbehalten, Nutzlast = Text | Themenpräfix (ab Werk `chromecast4lox`), Ziel-Lautsprecher oder `alle`; die Lautstärke stellt Chromecast4lox ein |
+| Alexa-NG (eigenes Plugin) | `POST http://127.0.0.1/plugins/alexang/index.php`, `aktion=sprechen` | Gerät (leer = Standardgerät), Sprechtoken, Lautstärke (leer = unverändert) |
+| Eigene Vorlage | URL mit `{ip} {port} {zones} {vol} {lang} {text}` – darüber auch eine vorhandene Alexa-Brücke (Home Assistant, Node-RED) | Vorlage |
+
+**Fällt das Ziel aus, bleibt der bisherige Weg.** Chromecast4lox gilt als da,
+wenn `<cc-präfix>/server/online` am Broker `1` ist und es den Lautsprecher
+unter `<cc-präfix>/+/type` kennt; die Ansage gilt als angekommen, wenn dort
+binnen 10 s `…/tts_active` auf `1` geht. Alexa-NG muss mit `SPRECHEN;OK=1`
+antworten. Sonst sprechen die Lautsprecher der Sprachgeräte – auch beim
+Antwortweg *nur Loxone* –, das Plugin-Protokoll und eine Benachrichtigung
+nennen den Grund, und der Reiter *Test* zeigt die Zeile *Zusätzliche
+Ansage* samt Ergebnis der letzten Ansage. Ruhezeit und Wiederholungsbremse
+gelten für alle Wege und sind kein Ausfall.
+
+Über Chromecast4lox geht die Ansage absichtlich **nicht** über dessen
+UDP-Eingang: der trennt an `;`, und ein Lautsprechername mit Leerzeichen
+scheitert. Das **Sprechtoken** von Alexa-NG wird wie ein Kennwort behandelt:
+es wird nie angezeigt, steht nicht in der Sicherung und in keiner Adresse
+(der Aufruf geht per POST). **Alexa selbst** ist nicht eingebaut – es gibt
+keine offizielle lokale Schnittstelle, nur inoffizielle mit
+Amazon-Anmeldecookies.
+
+Wer vor dieser Fassung eine Ausgabe eingerichtet hatte, behält sie: ein
+gespeicherter Block ohne Angabe der Art gilt weiter als Music Server.
+
 ## Aufbau
 
     bin/sprachsteuerung_dienst.py  Sprachdienst: Wyoming-Client, Wortwecker,
@@ -977,7 +1034,8 @@ Vorlage im Reiter *Einbindung in Loxone* baut den Ausgang fertig.
                               (läuft ohne venv)
     bin/verstehen.py          Satzmuster: Deutung und Prüfung
     bin/sp_notify.php         Meldung in den Benachrichtigungsbereich
-    bin/dienst.sh             Start, Stopp, Wächter
+    bin/dienst.sh             Start, Stopp, Wächter (unter einer Startsperre:
+                              zwei gleichzeitige Aufrufe starten einen Dienst)
     cron/cron.01min           minütlicher Wächter
     templates/vorgaben.json   Vorgabewerte und Grenzen — EINE Datei für
                               Dienst und Oberfläche
@@ -1022,7 +1080,7 @@ liefert 3.11.
   stillschweigend zurechtgebogen.
 - Die Container-Ports hören nur auf `127.0.0.1`.
 - Die Sicherungsdatei enthält **weder Token noch Miniserver-Adresse noch
-  Mikrofon-Schlüssel**.
+  Mikrofon-Schlüssel noch das Sprechtoken für Alexa-NG**.
 
 ## Was ungeprüft bleibt
 
@@ -1039,7 +1097,9 @@ steht weiterhin kein Mikrofon und kein Container.
 
 **Ebenfalls ungemessen, und zwar ausdrücklich:**
 
-* **Das Mithören fremder Themen am Broker.** Das Plugin abonniert nichts;
+* **Das Mithören fremder Themen am Broker.** Das Plugin abonniert nichts
+  dauerhaft (nur für eine Ansage über Chromecast4lox kurz dessen Themen
+  `server/online`, `+/type`, `+/tts_active` und `+/last_error`);
   gemessen ist das nicht.
 * **Die Blockade der Ereignisschleife ist in 0.10.3 behoben** und gemessen
   (siehe oben). Was bleibt: `dienste_erreichbar()` baut alle 30 Sekunden
@@ -1049,6 +1109,11 @@ steht weiterhin kein Mikrofon und kein Container.
   kann das Plugin ohnehin nicht arbeiten. Bewusst nicht mit umgebaut: ein
   zweiter Faden für eine gedeckelte Wartezeit wäre ein zweites Risiko ohne
   zweiten Nutzen.
+
+* **Die Ansage über Chromecast4lox und Alexa-NG.** Gemessen gegen einen
+  Prüfbroker mit dem Dienst von Chromecast4lox und einer Attrappe von
+  Alexa-NG, nicht an echten Lautsprechern und nicht an einem echten
+  Alexa-Gerät.
 
 **Seit 0.11.5 nicht mehr auf dieser Liste:** `retain` am laufenden
 MQTT-Gateway. Am Gerät gemessen am 13.09.2026 — der UDP-Eingang nimmt das

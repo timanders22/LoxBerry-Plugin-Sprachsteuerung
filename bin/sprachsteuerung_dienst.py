@@ -522,8 +522,37 @@ def config() -> dict:
     t = dict(VORGABEN.get("tts") or {})
     if isinstance(c.get("tts"), dict):
         t.update(c["tts"])
+        # Ansage-1: ab Werk "aus". Ein gespeicherter Block OHNE Modus stammt
+        # von vor dieser Fassung, als "musicserver" die Vorgabe war - er
+        # behaelt sie, sonst schaltete das Update eine eingerichtete Ansage
+        # ab. Dieselbe Regel in sp_config() (sp_lib.php).
+        if "mode" not in c["tts"]:
+            t["mode"] = "musicserver"
     modi = AUSWAHL.get("tts_mode") or ["musicserver"]
     t["mode"] = t.get("mode") if t.get("mode") in modi else "musicserver"
+    tv = VORGABEN.get("tts") or {}
+    t["cc_praefix"] = str(t.get("cc_praefix") or "").strip("/")
+    if not re.fullmatch(r"[A-Za-z0-9_\-]+(/[A-Za-z0-9_\-]+){0,3}", t["cc_praefix"]):
+        t["cc_praefix"] = str(tv.get("cc_praefix") or "chromecast4lox")
+    t["cc_ziel"] = str(t.get("cc_ziel") if t.get("cc_ziel") is not None else "")
+    if not (0 < len(t["cc_ziel"]) <= 60) or re.search(r"[\x00-\x1f\x7f/+#]", t["cc_ziel"]) \
+            or t["cc_ziel"].strip() != t["cc_ziel"]:
+        # Ein unbrauchbares Ziel wird NICHT zu "alle": sonst spraeche das
+        # ganze Haus, weil ein Name nicht stimmt. Leer heisst: kein Ziel,
+        # die Ansage faellt auf den bisherigen Weg zurueck.
+        t["cc_ziel"] = ""
+    t["alexa_geraet"] = str(t.get("alexa_geraet") or "").strip()
+    if len(t["alexa_geraet"]) > 200 or re.search(r"[\x00-\x1f\x7f]", t["alexa_geraet"]):
+        t["alexa_geraet"] = ""
+    t["alexa_token"] = str(t.get("alexa_token") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{8,128}", t["alexa_token"]):
+        t["alexa_token"] = ""
+    try:
+        t["alexa_laut"] = int(t.get("alexa_laut"))
+    except (TypeError, ValueError):
+        t["alexa_laut"] = -1
+    if not 0 <= t["alexa_laut"] <= 100:
+        t["alexa_laut"] = -1
     for feld, klein, gross in (("port", 1, 65535), ("volume", 1, 100)):
         try:
             t[feld] = max(klein, min(gross, int(t.get(feld) or 0)))
@@ -1704,6 +1733,460 @@ def ansage_vermerken(jetzt=None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Zusaetzliche Ansage ueber ein anderes Geraet (Ansage-1, ab Werk aus)
+#
+# Zu den vier Wegen oben (Music Server, MusicServer4Home, eigene Vorlage,
+# Text fuer den originalen Audioserver) kommen zwei Plugins im Haus:
+#
+#   chromecast  Chromecast4lox ueber MQTT. Thema <praefix>/<geraet>/cmd/tts,
+#               QoS 1, NICHT retained (ein retained Befehl wird dort
+#               verworfen und geloescht), Nutzlast = der Text. Nicht ueber
+#               dessen UDP-Eingang: der trennt an ';', und ein Name mit
+#               Leerzeichen scheitert (vb_cc_bau_skripte/BAUBERICHT.md,
+#               Abschnitt "Schnittstelle fuer andere Plugins").
+#   alexang     Alexa-NG ueber seinen Endpunkt, aktion=sprechen, per POST -
+#               das Sprechtoken steht damit in keiner Adresse und keinem
+#               Zugriffsprotokoll.
+#
+# "Fehlt das Ziel oder schweigt es, bleibt der bisherige Ausgabeweg" - das
+# sind die Lautsprecher der Sprachgeraete. Ob Chromecast4lox da ist, sagt der
+# Broker (<praefix>/server/online = 1, retained mit Letztem Willen), welche
+# Lautsprecher es kennt, sagt <praefix>/+/type. Ob die Ansage begann, sagt
+# <praefix>/<geraet>/tts_active; kommt dort binnen CC_WARTEN_S keine 1, gilt
+# das Ziel als stumm. Ein erfolgreiches publish() allein beweist nichts
+# (Regeln/07, "Ein Absender merkt nichts davon").
+#
+# Diese Linie hat kein paho - die kurze MQTT-3.1.1-Sitzung steht deshalb von
+# Hand hier, wie schon mqtt_behalten_liste(). Das Kennwort des Brokers steht
+# nur im CONNECT-Paket.
+# ---------------------------------------------------------------------------
+ANSAGE_NEUE_MODI = ("chromecast", "alexang")
+ANSAGE_NAMEN = {"musicserver": "Loxone Music Server", "ms4h": "MusicServer4Home",
+                "custom": "eigene Vorlage", "audioserver": "Loxone Audioserver (Text)",
+                "chromecast": "Chromecast4lox", "alexang": "Alexa-NG"}
+CC_SAMMELZIEL = ("alle", "all", "*")
+CC_WARTEN_S = 10.0
+ALEXANG_ADRESSE = "http://127.0.0.1/plugins/alexang/index.php"
+DATEI_AUSGABE = PDATA / "ausgabe.json"
+
+
+def cc_praefix_ok(praefix) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_\-]+(/[A-Za-z0-9_\-]+){0,3}", str(praefix or "")))
+
+
+def cc_ziel_ok(ziel) -> bool:
+    z = str(ziel or "")
+    return 0 < len(z) <= 60 and not re.search(r"[\x00-\x1f\x7f/+#]", z) and z.strip() == z
+
+
+def cc_thema(name: str) -> str:
+    """Geraetename -> Themenebene, Wort fuer Wort wie thema_saeubern() in
+    Chromecast4lox (Umlaute umgeschrieben, sonst jedes Zeichen ausser
+    A-Za-z0-9_- ein Unterstrich). Das Sammelziel bleibt, wie es ist."""
+    if str(name).lower() in CC_SAMMELZIEL:
+        return str(name).lower()
+    for alt, neu in (("\u00e4", "ae"), ("\u00f6", "oe"), ("\u00fc", "ue"),
+                     ("\u00c4", "Ae"), ("\u00d6", "Oe"), ("\u00dc", "Ue"), ("\u00df", "ss")):
+        name = name.replace(alt, neu)
+    import unicodedata
+    name = unicodedata.normalize("NFKD", name)
+    name = "".join(c for c in name if not unicodedata.combining(c))
+    name = re.sub(r"[^A-Za-z0-9_-]+", "_", name)
+    return name.strip("_") or "geraet"
+
+
+def _mqtt_zk(text: str) -> bytes:
+    b = text.encode("utf-8")
+    return len(b).to_bytes(2, "big") + b
+
+
+def _mqtt_laenge(n: int) -> bytes:
+    o = b""
+    while True:
+        b = n % 128
+        n //= 128
+        if n:
+            b |= 128
+        o += bytes([b])
+        if not n:
+            return o
+
+
+class MqttKurz:
+    """Eine kurze MQTT-3.1.1-Sitzung: anmelden, abonnieren, einmal mit QoS 1
+    senden, Nachrichten lesen, abmelden. fehler ist leer, wenn die Anmeldung
+    gelang."""
+
+    def __init__(self, kennung: str) -> None:
+        self.s = None
+        self.puffer = b""
+        self.fehler = ""
+        self.nummer = 0
+        self.gemerkt = []
+        z = mqtt_zugang()
+        if not z["port"]:
+            self.fehler = "in der general.json steht kein Brokerport"
+            return
+        try:
+            self.s = socket.create_connection((z["host"], z["port"]), timeout=3)
+        except OSError as err:
+            self.s = None
+            self.fehler = "keine Verbindung zum Broker %s:%d (%s)" % (z["host"], z["port"],
+                                                                       fehlertext(err))
+            return
+        flags = 0x02
+        nutz = _mqtt_zk(kennung)
+        if z["user"]:
+            flags |= 0x80
+            nutz += _mqtt_zk(z["user"])
+            if z["pass"]:
+                flags |= 0x40
+                nutz += _mqtt_zk(z["pass"])
+        kopf = _mqtt_zk("MQTT") + bytes([4, flags]) + (30).to_bytes(2, "big")
+        try:
+            self.s.sendall(bytes([0x10]) + _mqtt_laenge(len(kopf) + len(nutz)) + kopf + nutz)
+            p = self.paket(time.monotonic() + 3.0)
+        except OSError:
+            p = None
+        if p is None or p[0] >> 4 != 2 or len(p[1]) < 2:
+            self.fehler = "der Broker hat die Anmeldung nicht beantwortet"
+        elif p[1][1] != 0:
+            self.fehler = "der Broker weist die Anmeldung ab (CONNACK %d)" % p[1][1]
+        if self.fehler:
+            self.schliessen(sauber=False)
+
+    def _fuellen(self, n: int, bis: float) -> bool:
+        """Mindestens n Byte im Puffer - ohne etwas zu verbrauchen. Ein
+        Zeitablauf mitten im Paket verliert so nichts."""
+        while len(self.puffer) < n:
+            rest = bis - time.monotonic()
+            if rest <= 0:
+                return False
+            try:
+                self.s.settimeout(rest)
+                d = self.s.recv(4096)
+            except OSError:
+                return False
+            if not d:
+                return False
+            self.puffer += d
+        return True
+
+    def paket(self, bis: float):
+        """Das naechste Paket (Kopfbyte, Rumpf) - oder None nach Ablauf."""
+        if self.s is None:
+            return None
+        if not self._fuellen(2, bis):
+            return None
+        i, n, mult = 1, 0, 1
+        while True:
+            if not self._fuellen(i + 1, bis):
+                return None
+            b = self.puffer[i]
+            n += (b & 127) * mult
+            mult *= 128
+            i += 1
+            if not b & 128 or i > 4:
+                break
+        if not self._fuellen(i + n, bis):
+            return None
+        k, rumpf = self.puffer[0], self.puffer[i:i + n]
+        self.puffer = self.puffer[i + n:]
+        return k, rumpf
+
+    def abonnieren(self, filter_: list) -> bool:
+        self.nummer += 1
+        sub = self.nummer.to_bytes(2, "big")
+        for f in filter_:
+            sub += _mqtt_zk(f) + b"\x00"
+        try:
+            self.s.sendall(bytes([0x82]) + _mqtt_laenge(len(sub)) + sub)
+        except OSError:
+            return False
+        bis = time.monotonic() + 3.0
+        while True:
+            p = self.paket(bis)
+            if p is None:
+                return False
+            if p[0] >> 4 == 9:
+                r = p[1][2:]
+                return len(r) == len(filter_) and all(c < 0x80 for c in r)
+            self._merken(p)
+
+    def senden_qos1(self, thema: str, text: str) -> bool:
+        self.nummer += 1
+        pid = self.nummer.to_bytes(2, "big")
+        rumpf = _mqtt_zk(thema) + pid + text.encode("utf-8")
+        try:
+            self.s.sendall(bytes([0x32]) + _mqtt_laenge(len(rumpf)) + rumpf)
+        except OSError:
+            return False
+        bis = time.monotonic() + 3.0
+        while True:
+            p = self.paket(bis)
+            if p is None:
+                return False
+            if p[0] >> 4 == 4 and p[1][:2] == pid:
+                return True
+            self._merken(p)
+
+    def _merken(self, p) -> None:
+        n = self._nachricht(p)
+        if n is not None:
+            self.gemerkt.append(n)
+
+    @staticmethod
+    def _nachricht(p):
+        k, r = p
+        if k >> 4 != 3 or len(r) < 2:
+            return None
+        tl = int.from_bytes(r[0:2], "big")
+        thema = r[2:2 + tl].decode("utf-8", "replace")
+        versatz = 2 + tl + (2 if (k >> 1) & 3 else 0)
+        return thema, r[versatz:].decode("utf-8", "replace"), bool(k & 1)
+
+    def nachrichten(self, bis: float, ruhe: float = 0.0):
+        """(thema, nutzlast, retained) bis zum Zeitpunkt bis; mit ruhe > 0
+        endet es frueher, sobald so lange nichts mehr kam."""
+        while self.gemerkt:
+            yield self.gemerkt.pop(0)
+        while True:
+            jetzt = time.monotonic()
+            if jetzt >= bis:
+                return
+            p = self.paket(min(bis, jetzt + ruhe) if ruhe > 0 else bis)
+            if p is None:
+                if ruhe > 0 or time.monotonic() >= bis:
+                    return
+                continue
+            n = self._nachricht(p)
+            if n is not None:
+                yield n
+
+    def schliessen(self, sauber: bool = True) -> None:
+        if self.s is None:
+            return
+        try:
+            if sauber:
+                self.s.sendall(b"\xe0\x00")
+        except OSError:
+            pass
+        try:
+            self.s.close()
+        except OSError:
+            pass
+        self.s = None
+
+
+def _cc_lage_lesen(m: "MqttKurz", praefix: str) -> tuple:
+    """Zurueckbehaltene Werte nach dem Abo: (online, {geraetethema: typ})."""
+    online, geraete = "", {}
+    for thema, wert, retained in m.nachrichten(time.monotonic() + 2.0, ruhe=0.6):
+        if thema == praefix + "/server/online":
+            online = wert
+        elif retained and thema.startswith(praefix + "/") and thema.endswith("/type"):
+            g = thema[len(praefix) + 1:-len("/type")]
+            if g and "/" not in g:
+                geraete[g] = wert
+    return online, geraete
+
+
+def _cc_ziel_finden(ziel: str, geraete: dict):
+    """Das Geraetethema zum eingestellten Ziel, das Sammelziel selbst - oder None."""
+    if ziel.lower() in CC_SAMMELZIEL:
+        return ziel.lower()
+    gesucht = cc_thema(ziel).lower()
+    for g in sorted(geraete):
+        if g.lower() == gesucht:
+            return g
+    return None
+
+
+def cc_ansagen(tts: dict, text: str, warten: float = CC_WARTEN_S) -> dict:
+    """Die Ansage an Chromecast4lox geben. ok=1 erst, wenn dort tts_active=1
+    kam - nicht schon, wenn der Broker die Nachricht angenommen hat."""
+    praefix = str(tts.get("cc_praefix") or "").strip("/")
+    ziel = str(tts.get("cc_ziel") or "")
+    if not cc_praefix_ok(praefix) or not cc_ziel_ok(ziel):
+        return {"ok": 0, "grund": "cc_einstellung",
+                "meldung": "Chromecast4lox: Themenpraefix oder Ziel-Lautsprecher ist nicht "
+                           "eingestellt (Reiter Einstellungen)."}
+    text = str(text or "").strip()
+    if text == "":
+        # Nie eine leere Nachricht auf cmd/ (Entscheidung 18).
+        return {"ok": 0, "grund": "leer", "meldung": "Ansage ohne Text."}
+    m = MqttKurz("spansage%d" % os.getpid())
+    if m.fehler:
+        return {"ok": 0, "grund": "cc_broker", "meldung": "Chromecast4lox: " + m.fehler + "."}
+    try:
+        if not m.abonnieren([praefix + "/server/online", praefix + "/+/type",
+                             praefix + "/+/tts_active", praefix + "/+/last_error"]):
+            return {"ok": 0, "grund": "cc_broker",
+                    "meldung": "Chromecast4lox: der Broker hat das Abonnement nicht bestaetigt."}
+        online, geraete = _cc_lage_lesen(m, praefix)
+        if online != "1":
+            return {"ok": 0, "grund": "cc_fehlt",
+                    "meldung": "Chromecast4lox meldet sich nicht (%s/server/online ist %s)."
+                               % (praefix, online or "nicht gesetzt")}
+        gthema = _cc_ziel_finden(ziel, geraete)
+        if gthema is None:
+            return {"ok": 0, "grund": "cc_geraet",
+                    "meldung": "Chromecast4lox kennt keinen Lautsprecher %r (bekannt: %s)."
+                               % (ziel, ", ".join(sorted(geraete)) or "keiner")}
+        thema = "%s/%s/cmd/tts" % (praefix, gthema)
+        if not m.senden_qos1(thema, text):
+            return {"ok": 0, "grund": "cc_broker",
+                    "meldung": "Chromecast4lox: der Broker hat die Ansage nicht bestaetigt (PUBACK)."}
+        sammel = gthema in CC_SAMMELZIEL
+        for t, wert, retained in m.nachrichten(time.monotonic() + warten):
+            if retained or not t.startswith(praefix + "/"):
+                continue
+            teile = t[len(praefix) + 1:].split("/")
+            if len(teile) != 2 or (not sammel and teile[0].lower() != gthema.lower()):
+                continue
+            if teile[1] == "tts_active" and wert.strip() == "1":
+                return {"ok": 1, "grund": "cc",
+                        "meldung": "Chromecast4lox spricht auf %s." % teile[0]}
+            if teile[1] == "last_error" and wert.strip():
+                return {"ok": 0, "grund": "cc_fehler",
+                        "meldung": "Chromecast4lox meldet: %s" % wert.strip()[:200]}
+        return {"ok": 0, "grund": "cc_schweigt",
+                "meldung": "Chromecast4lox hat die Ansage nicht begonnen (%s/%s/tts_active "
+                           "kam binnen %d s nicht auf 1)." % (praefix, gthema, int(warten))}
+    finally:
+        m.schliessen()
+
+
+def cc_lage(tts: dict) -> tuple:
+    """Fuer den Selbsttest: (ok, Satz). Sendet nichts."""
+    praefix = str(tts.get("cc_praefix") or "").strip("/")
+    ziel = str(tts.get("cc_ziel") or "")
+    if not cc_praefix_ok(praefix) or not cc_ziel_ok(ziel):
+        return False, "Chromecast4lox: Themenpraefix oder Ziel-Lautsprecher fehlt."
+    m = MqttKurz("splage%d" % os.getpid())
+    if m.fehler:
+        return False, "Chromecast4lox: " + m.fehler + "."
+    try:
+        if not m.abonnieren([praefix + "/server/online", praefix + "/+/type"]):
+            return False, "Chromecast4lox: der Broker hat das Abonnement nicht bestaetigt."
+        online, geraete = _cc_lage_lesen(m, praefix)
+    finally:
+        m.schliessen()
+    if online != "1":
+        return False, ("Chromecast4lox meldet sich nicht (%s/server/online ist %s)."
+                       % (praefix, online or "nicht gesetzt"))
+    if _cc_ziel_finden(ziel, geraete) is None:
+        return False, ("Chromecast4lox laeuft, kennt aber keinen Lautsprecher %r (bekannt: %s)."
+                       % (ziel, ", ".join(sorted(geraete)) or "keiner"))
+    return True, ("Chromecast4lox laeuft (%s/server/online = 1), Ziel %r; Lautsprecher: %s."
+                  % (praefix, ziel, ", ".join(sorted(geraete)) or "keiner"))
+
+
+def alexa_token_ok(token) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_\-]{8,128}", str(token or "")))
+
+
+def _alexa_rufen(felder: dict, zeit: float = 15.0) -> tuple:
+    """POST an Alexa-NG. (http-Code oder 0, erste Antwortzeile, Fehlertext)."""
+    daten = urllib.parse.urlencode(felder).encode("utf-8")
+    anfrage = urllib.request.Request(ALEXANG_ADRESSE, data=daten, method="POST")
+    try:
+        with urllib.request.urlopen(anfrage, timeout=zeit) as antwort:
+            code, roh = int(antwort.status), antwort.read(600)
+    except urllib.error.HTTPError as err:
+        code = int(err.code)
+        try:
+            roh = err.read(600)
+        except OSError:
+            roh = b""
+    except (urllib.error.URLError, OSError, ValueError) as err:
+        return 0, "", fehlertext(err)
+    zeilen = roh.decode("utf-8", "replace").strip().splitlines()
+    return code, (zeilen[0].strip() if zeilen else ""), ""
+
+
+def alexa_ansagen(cfg: dict, tts: dict, text: str) -> dict:
+    """Die Ansage an Alexa-NG geben. ok=1 nur bei SPRECHEN;OK=1."""
+    token = str(tts.get("alexa_token") or "")
+    if not alexa_token_ok(token):
+        return {"ok": 0, "grund": "alexa_einstellung",
+                "meldung": "Alexa-NG: es ist kein Sprechtoken eingetragen (Reiter Einstellungen)."}
+    text = str(text or "").strip()
+    if text == "":
+        return {"ok": 0, "grund": "leer", "meldung": "Ansage ohne Text."}
+    felder = {"aktion": "sprechen", "token": token, "text": text}
+    geraet = str(tts.get("alexa_geraet") or "").strip()
+    if geraet:
+        felder["geraet"] = geraet
+    try:
+        laut = int(tts.get("alexa_laut"))
+    except (TypeError, ValueError):
+        laut = -1
+    if 0 <= laut <= 100:
+        felder["laut"] = str(laut)
+    # Der Mitschnitt nennt Adresse und Laenge - nie das Token.
+    mitschnitt(cfg, "ALEXA>", "%s aktion=sprechen geraet=%s laut=%s text=%d Zeichen (POST, Token verborgen)"
+               % (ALEXANG_ADRESSE, geraet or "(Standard)", felder.get("laut", "-"), len(text)))
+    code, zeile, fehler = _alexa_rufen(felder)
+    mitschnitt(cfg, "ALEXA<", "HTTP %d %s" % (code, zeile[:200] or fehler))
+    if code == 200 and zeile.startswith("SPRECHEN;") and ";OK=1" in zeile:
+        return {"ok": 1, "grund": "alexa", "meldung": "Alexa-NG: " + zeile[:160]}
+    if code == 0:
+        return {"ok": 0, "grund": "alexa_fehlt",
+                "meldung": "Alexa-NG antwortet nicht (%s)." % fehler}
+    if not zeile.startswith("SPRECHEN;"):
+        return {"ok": 0, "grund": "alexa_fehlt",
+                "meldung": "Alexa-NG ist nicht installiert oder antwortet nicht wie erwartet "
+                           "(HTTP %d)." % code}
+    return {"ok": 0, "grund": "alexa_fehler", "meldung": "Alexa-NG: HTTP %d %s" % (code, zeile[:160])}
+
+
+def alexa_lage(tts: dict) -> tuple:
+    """Fuer den Selbsttest: prueft Erreichbarkeit und Token, loest nichts aus."""
+    token = str(tts.get("alexa_token") or "")
+    if not alexa_token_ok(token):
+        return False, "Alexa-NG: es ist kein Sprechtoken eingetragen."
+    code, zeile, fehler = _alexa_rufen({"selftest": "1", "token": token}, 5.0)
+    if code == 200 and zeile.startswith("SELFTEST;OK=1"):
+        return True, "Alexa-NG antwortet, das Sprechtoken passt (%s)." % zeile[:80]
+    if code == 0:
+        return False, "Alexa-NG antwortet nicht (%s)." % fehler
+    if zeile.startswith("SELFTEST;"):
+        return False, "Alexa-NG weist das Sprechtoken ab (HTTP %d %s)." % (code, zeile[:80])
+    return False, "Alexa-NG ist nicht installiert oder antwortet nicht wie erwartet (HTTP %d)." % code
+
+
+def ausgabe_vermerken(modus: str, erg: dict) -> None:
+    """Das Ergebnis der letzten zusaetzlichen Ansage - fuer den Reiter Test.
+    Nur Modus, Ergebnis, Grund und Meldung; kein Text, kein Token."""
+    json_schreiben(DATEI_AUSGABE, {"ts": int(time.time()), "modus": modus,
+                                   "ok": 1 if erg.get("ok") else 0,
+                                   "grund": str(erg.get("grund") or ""),
+                                   "meldung": str(erg.get("meldung") or "")[:300]})
+
+
+def satelliten_sprechen(cfg: dict, ausgabe=None) -> bool:
+    """Spricht der Lautsprecher der Sprachgeraete diese Antwort?
+
+    Beim Antwortweg 'satellit' und 'beide' immer (wie bisher). Bei 'nur
+    Loxone' wie bisher nicht - AUSSER die zusaetzliche Ansage ist aus
+    (dann gibt es keinen anderen Weg) oder eine der neuen Ausgaben
+    (Chromecast4lox, Alexa-NG) hat die Ansage nicht angenommen: dann bleibt
+    der bisherige Weg. Ruhezeit und Wiederholungsbremse sind kein Ausfall -
+    ein Rueckfall wuerde sie umgehen.
+    """
+    weg = str(cfg.get("antwortweg") or "beide")
+    if weg != "loxone":
+        return True
+    modus = str((cfg.get("tts") or {}).get("mode") or "musicserver")
+    if modus == "aus":
+        return True
+    if modus not in ANSAGE_NEUE_MODI or not isinstance(ausgabe, dict):
+        return False
+    return not ausgabe.get("ok") and ausgabe.get("grund") not in ("ruhe", "bremse")
+
+
+# ---------------------------------------------------------------------------
 # Der Rueckweg nach Loxone
 #
 #   MQTT   <praefix>/antwort   der fertige Satz -> Virtueller Texteingang
@@ -1773,6 +2256,12 @@ def loxone_ansagen(cfg: dict, text: str, zonen: str = "") -> dict:
     Aufrufer: es gibt drei Aufrufer (Satzweg, Warteschlange, Timer), und eine
     Wache, die an drei Stellen steht, fehlt beim vierten Aufrufer.
     """
+    tts = cfg.get("tts") or {}
+    modus = str(tts.get("mode") or "musicserver")
+    if modus == "aus":
+        # Ab Werk: keine zusaetzliche Ausgabe. Die Lautsprecher der
+        # Sprachgeraete sprechen (satelliten_sprechen()).
+        return {"ok": 0, "grund": "aus"}
     dringend = bool(cfg.get("_dringend"))
     if not dringend:
         still, grund = ruhe_aktiv(cfg)
@@ -1784,7 +2273,27 @@ def loxone_ansagen(cfg: dict, text: str, zonen: str = "") -> dict:
             melde_gebremst("tts_bremse", "Ansage unterdrueckt: " + grund, 900)
             return {"ok": 0, "grund": "bremse", "meldung": grund}
 
-    url = loxone_tts_url(cfg.get("tts") or {}, text, zonen)
+    if modus in ANSAGE_NEUE_MODI:
+        # Zonen gibt es dort nicht: das Ziel ist der eingestellte
+        # Lautsprecher bzw. das eingestellte Alexa-Geraet.
+        if modus == "chromecast":
+            erg = cc_ansagen(tts, text)
+        else:
+            erg = alexa_ansagen(cfg, tts, text)
+        ausgabe_vermerken(modus, erg)
+        if erg.get("ok"):
+            ansage_vermerken()
+            _LOG.info("Ansage ueber %s gesendet (%d Zeichen).", ANSAGE_NAMEN[modus], len(text))
+        else:
+            melden(3, "Die Ansage ueber %s kam nicht an: %s Es sprechen weiter die "
+                      "Lautsprecher der Sprachgeraete." % (ANSAGE_NAMEN[modus],
+                                                           erg.get("meldung", "")), "tts_" + modus)
+            melde_gebremst("tts_" + modus, "Ansage ueber %s nicht angekommen: %s - es bleibt der "
+                                           "bisherige Weg." % (ANSAGE_NAMEN[modus],
+                                                              erg.get("meldung", "")), 900)
+        return erg
+
+    url = loxone_tts_url(tts, text, zonen)
     if url is None:
         # Modus 'Originaler Loxone Audioserver': es gibt keinen Aufruf ueber
         # das Netz. Bis 0.9.11 endete der Weg hier - die Auswahl war eine
@@ -1840,7 +2349,9 @@ def antwort_ausgeben(cfg: dict, erg: dict) -> None:
     if text == "":
         return
     if str(cfg.get("antwortweg") or "beide") in ("loxone", "beide"):
-        loxone_ansagen(cfg, text, str(erg.get("zone") or ""))
+        # Das Ergebnis reist mit dem Satz zurueck: satelliten_sprechen()
+        # entscheidet daran, ob der Lautsprecher des Mikrofons einspringt.
+        erg["ausgabe"] = loxone_ansagen(cfg, text, str(erg.get("zone") or ""))
 
 
 # Genau EIN Satz zur Zeit - siehe satz_im_faden().
@@ -2444,8 +2955,11 @@ class Satellit:
         # Ab 0.9.1 entscheidet zusaetzlich der Antwortweg. Bei 'loxone' bleibt
         # der Satellit still, weil die Ansage bereits ueber den Music Server
         # gelaufen ist - sonst hoerte man sie im selben Raum zweimal.
+        # Ausnahme (Ansage-1): die zusaetzliche Ansage ist aus, oder
+        # Chromecast4lox/Alexa-NG hat sie nicht angenommen - dann bleibt der
+        # bisherige Weg (satelliten_sprechen()).
         if (not cfg.get("antwort_sprechen") or not erg.get("antwort")
-                or str(cfg.get("antwortweg") or "beide") == "loxone"):
+                or not satelliten_sprechen(cfg, erg.get("ausgabe"))):
             return
         # Die Ruhezeit gilt auch fuer den Lautsprecher des Mikrofons - er steht
         # in aller Regel im selben Zimmer wie ein Bett.
@@ -3136,7 +3650,7 @@ async def esphome_satz(mikro: "EsphomeMikrofon", rahmen: list, holen_v) -> None:
         # ein ESPHome-Geraet mit Lautsprecher bekam nie einen Ton.
         text = str(erg.get("antwort") or "").strip()
         if (text and cfg.get("antwort_sprechen")
-                and str(cfg.get("antwortweg") or "beide") != "loxone"):
+                and satelliten_sprechen(cfg, erg.get("ausgabe"))):
             still, grund = ruhe_aktiv(cfg)
             if still:
                 melde_gebremst("esph_ruhe",
@@ -3188,16 +3702,26 @@ async def ansage_ausgeben(cfg: dict, text: str, zonen: str = "",
     weg = str(cfg.get("antwortweg") or "beide")
 
     # 1. Ueber Loxone (Music Server, MS4H, eigene Vorlage oder MQTT-Thema)
+    #    oder eine zusaetzliche Ausgabe (Chromecast4lox, Alexa-NG).
+    extern = None
     if weg in ("loxone", "beide"):
-        erg = loxone_ansagen(cfg, text, zonen)
-        if erg.get("ok"):
-            wege.append("Loxone-Audioausgabe")
+        modus = str((cfg.get("tts") or {}).get("mode") or "musicserver")
+        if modus in ANSAGE_NEUE_MODI and hasattr(asyncio, "to_thread"):
+            # Bis zu CC_WARTEN_S bzw. 15 s - nicht in der Schleife warten.
+            erg = await asyncio.to_thread(loxone_ansagen, cfg, text, zonen)
         else:
+            erg = loxone_ansagen(cfg, text, zonen)
+        extern = erg
+        if erg.get("ok"):
+            wege.append(ANSAGE_NAMEN.get(modus, "Loxone-Audioausgabe")
+                        if modus in ANSAGE_NEUE_MODI else "Loxone-Audioausgabe")
+        elif erg.get("grund") != "aus":
             fehler.append(str(erg.get("meldung") or erg.get("fehler")
                               or erg.get("grund") or "Loxone-Audioausgabe"))
 
-    # 2. Ueber den Lautsprecher eines Satelliten
-    if weg in ("satellit", "beide") and cfg.get("antwort_sprechen"):
+    # 2. Ueber den Lautsprecher eines Satelliten - wie bisher bei 'satellit'
+    #    und 'beide', dazu als Rueckfall (satelliten_sprechen()).
+    if satelliten_sprechen(cfg, extern) and cfg.get("antwort_sprechen"):
         still, grund = ruhe_aktiv(cfg)
         if still and not dringend:
             fehler.append(grund)
@@ -3818,7 +4342,28 @@ def selbsttest() -> int:
         zeilen.append("[INFO] Keine Wiederholungsbremse - ein Loxone-Baustein in einer "
                       "Schleife kann beliebig viele Ansagen ausloesen.")
 
-    if weg in ("loxone", "beide"):
+    modus = str((cfg.get("tts") or {}).get("mode") or "musicserver")
+    if weg in ("loxone", "beide") and modus == "aus":
+        zeilen.append("[INFO] Zusaetzliche Ansage: aus (ab Werk). Ansagen sprechen die "
+                      "Lautsprecher der Sprachgeraete%s."
+                      % (" - auch beim Antwortweg 'nur Loxone'" if weg == "loxone" else ""))
+    elif weg in ("loxone", "beide") and modus in ANSAGE_NEUE_MODI:
+        tts = cfg.get("tts") or {}
+        ok, satz = cc_lage(tts) if modus == "chromecast" else alexa_lage(tts)
+        if ok:
+            zeilen.append("[OK]   Zusaetzliche Ansage: " + satz)
+        else:
+            fehler += 1
+            zeilen.append("[FEHL] Zusaetzliche Ansage: " + satz)
+            zeilen.append("       Bis das behoben ist, bleibt der bisherige Weg: die "
+                          "Lautsprecher der Sprachgeraete sprechen.")
+        letzte = json_lesen(DATEI_AUSGABE)
+        if letzte.get("modus") == modus:
+            zeilen.append("       Letzte Ansage (vor %d s): %s"
+                          % (max(0, int(time.time()) - int(letzte.get("ts") or 0)),
+                             "angekommen" if letzte.get("ok")
+                             else "NICHT angekommen - " + str(letzte.get("meldung") or "")))
+    elif weg in ("loxone", "beide"):
         tts = cfg.get("tts") or {}
         probe = "Ich habe das Licht im Wohnzimmer auf 50 Prozent gestellt."
         url = loxone_tts_url(tts, probe)
