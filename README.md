@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.11.13
+Version 0.11.14
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,17 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.11.14
+
+Neuinstallation ohne Altlast, Aktualisierung ohne Stundengrenze (Nachzug B: X-1, Entscheidung 1).
+Gemessen im Installer-Prüfstand (WSL, ohne Netz); nicht am Gerät.
+
+* **Neu: `preinstall.sh`.** Bei einer Neuinstallation ohne Upgrade-Marke legt es vor dem Kopieren drei Dinge einer früheren Installation nach `.alt` und meldet das einmal: die Zweitschriften der Einstellungen und Sätze, eine liegengebliebene Sicherung der Langzeitwerte und den Startmerker. Bisher holte `postinstall.sh` bei jeder Installation Aktionstoken, Miniserver-Zugang und Sätze aus einer liegengebliebenen Zweitschrift zurück, auch bei einer Neuinstallation.
+* **Zurückgespielt wird nur bei einer Aktualisierung,** erkannt allein an der Upgrade-Marke, ohne Altersvergleich. Bisher galt eine Aktualisierung, die länger als eine Stunde brauchte, als „nicht aus diesem Vorgang“. Verlauf, Messreihe und Ansagezeiten kamen dann nicht zurück. Ab dieser Fassung entscheidet die Marke; die Angaben zu „höchstens eine Stunde alt“ unter 0.11.7 beschreiben das frühere Verhalten.
+* **Dienst startet nicht ungefragt:** Der Merker „der Dienst lief vor dem Update“ zählt nur noch bei einer Aktualisierung. Bisher startete ein liegengebliebener Merker den Dienst nach einer Neuinstallation ungefragt. Dasselbe geschah nach einer Aktualisierung, vor der der Dienst gar nicht lief. `preupgrade.sh` entfernt einen alten Merker und legt eine alte Sicherung der Langzeitwerte nach `.alt`.
+* **Deinstallation** räumt die `.alt`-Dateien und den Merker mit ab.
+* Die heruntergeladenen Sprachmodelle werden bei einer Neuinstallation weiter benutzt.
 
 ## Neu in 0.11.13
 

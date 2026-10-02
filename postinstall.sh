@@ -63,36 +63,16 @@ SPERRE="$BASE/data/plugins/$PFOLDER.upgrade_laeuft"
 # starten nicht, solange sie gilt. Hier wird sie ausgewertet und am Ende
 # wieder entfernt.
 #
-# Sie zaehlt nur, wenn sie eine Unixzeit traegt und hoechstens eine Stunde
-# alt ist. Eine abgebrochene Installation darf das Plugin nicht fuer immer
-# stilllegen; ein Zeitpunkt in der Zukunft ist keine laufende Installation.
-#
-# Ohne lesbare Uhr gilt eine liegende Marke (auch eine unlesbare) - die
-# Pruefung faellt geschlossen aus, wie sperre_gilt() in bin/dienst.sh. Bis
-# 0.11.8 stand hier 'MARKE_ALTER=$(( $(date +%s) - MARKE_WERT ))' ohne
-# Pruefung der Uhr: lieferte 'date' nichts, galt die Marke nicht, und ein
-# Dienst ohne PID-Datei lief waehrend der Installation weiter; eine Ausgabe
-# 'a[$(befehl)]' fuehrte die Rechnung aus. Gemessen am 18.09.2026 in WSL
-# (Pruefung-Sprachsteuerung-0.11.9, messe_nachtrag2.sh, Faelle Q2-Q5).
+# Sie gilt, wenn sie LIEGT - ohne Altersvergleich (Entscheidung 1 vom
+# 29.09.2026; Nachzug G1, 02.10.2026). Bis 0.11.14 galt sie hier nur, wenn
+# sie hoechstens eine Stunde alt war: ein Update mit mehr als einer Stunde
+# zwischen preupgrade.sh und postinstall.sh galt damit als Neuinstallation.
+# Die 3600 s bleiben allein fuer die Startsperre des Dienstes (sperre_gilt()
+# in bin/dienst.sh): eine abgebrochene Installation darf den Dienst nicht fuer
+# immer stilllegen. Hier entscheidet die Marke, ob ZURUECKGESPIELT wird; sie
+# wird am Ende dieses Skripts entfernt (trap unten), auf jedem Ausgang.
 MARKE_GILT=""
-if [ -f "$SPERRE" ]; then
-    MARKE_JETZT=$(date +%s 2>/dev/null)
-    MARKE_WERT=$(cat "$SPERRE" 2>/dev/null)
-    case "$MARKE_JETZT" in
-        ''|*[!0-9]*) MARKE_GILT=ja ;;
-        *)
-            case "$MARKE_WERT" in
-                ''|*[!0-9]*) ;;
-                *)
-                    MARKE_ALTER=$((MARKE_JETZT - MARKE_WERT))
-                    if [ "$MARKE_ALTER" -ge -300 ] && [ "$MARKE_ALTER" -lt 3600 ]; then
-                        MARKE_GILT=ja
-                    fi
-                    ;;
-            esac
-            ;;
-    esac
-fi
+[ -f "$SPERRE" ] && MARKE_GILT=ja
 # Die Marke muss weg, BEVOR der Waechter den Dienst wieder starten darf -
 # und zwar auf JEDEM Ausgang dieses Skripts. Es steigt an sechs Stellen mit
 # 'exit 1' aus (Architektur, Python, venv, pip, Vorgabenliste); wuerde die
@@ -202,7 +182,44 @@ if sys.argv[2] == "saetze":
     sys.exit(0 if ("regeln" in d or "ziele" in d) else 1)
 sys.exit(0 if str(d.get("aktionstoken") or "").strip() else 1)' "$1" "$2" 2>/dev/null
 }
+# NUR BEI EINER AKTUALISIERUNG (Entscheidung 1; Nachzug G1, 02.10.2026). Bis
+# 0.11.14 lief diese Schleife ohne Blick auf die Marke: eine Neuinstallation
+# ueber liegengebliebene Zweitschriften holte Aktionstoken, Miniserver-Zugang
+# und Saetze einer frueheren Installation zurueck (gemessen,
+# vb_g1_bau_skripte/sp/proben/x1_vorher.txt). Ohne Marke hat preinstall.sh
+# sie schon nach .alt gelegt; was trotzdem liegt, legt der Rueckfallzweig
+# weiter unten (sp_neuinstallation_beiseite) beiseite.
+sp_alt_weg() {
+    if [ -L "$1" ]; then
+        rm -f "$1"
+    elif [ -d "$1" ]; then
+        rm -rf "${1:?}"
+    elif [ -f "$1" ]; then
+        sp_l=$(stat -c %s "$1" 2>/dev/null || echo 0)
+        [ "$sp_l" -gt 0 ] && dd if=/dev/zero of="$1" bs=1 count="$sp_l" conv=notrunc >/dev/null 2>&1
+        rm -f "$1"
+    fi
+}
+SP_ALT=""
+sp_neuinstallation_beiseite() {   # $1 Pfad; nur ohne Marke aufgerufen
+    [ -e "$1" ] || [ -L "$1" ] || return 0
+    if [ -e "$1.alt" ] || [ -L "$1.alt" ]; then
+        sp_alt_weg "$1.alt"
+    fi
+    if mv -f "$1" "$1.alt" 2>/dev/null; then
+        SP_ALT="$SP_ALT $1.alt"
+        [ -f "$1.alt" ] && [ ! -L "$1.alt" ] && chmod 600 "$1.alt" 2>/dev/null
+    else
+        SP_ALT="$SP_ALT $1 (liess sich NICHT verschieben)"
+    fi
+}
+if [ -z "$MARKE_GILT" ]; then
+    for f in sprachsteuerung.json saetze.json; do
+        sp_neuinstallation_beiseite "$BASE/config/plugins/$PFOLDER.backup.$f"
+    done
+fi
 for f in sprachsteuerung.json saetze.json; do
+    [ -n "$MARKE_GILT" ] || continue
     BK="$BASE/config/plugins/$PFOLDER.backup.$f"
     CF="$PCONFIG/$f"
     [ -f "$BK" ] || continue
@@ -254,87 +271,60 @@ fi
 # ---------- Langzeitwerte zurueckholen ----------
 # Gegenstueck zu preupgrade.sh. Zwischen beiden Skripten hat der Installer
 # data/plugins/<x>/ vollstaendig geloescht; der Nachbar mit dem Punkt hat es
-# ueberstanden. Eine Neuinstallation findet keine Sicherung vor und faengt
-# sauber bei null an.
+# ueberstanden.
 #
-# Traegt die Sicherung den Zeitpunkt aus preupgrade.sh und ist er hoechstens
-# eine Stunde alt, ist sie die von eben: dann kommt jede gesicherte Datei
-# zurueck, OHNE nach dem Inhalt der Zieldatei zu fragen. Bis 0.11.6 kam sie
-# nur zurueck, wenn die Zieldatei fehlte oder leer war. Der Installer legt
-# die Cron-Datei aber vor diesem Skript an (am Geraet 52 s vorher gemessen,
-# Einspeisebremse 08.09.2026). In WSL nachgestellt (17.09.2026): startet der
-# Waechter in dieser Luecke den Dienst und verarbeitet der einen Satz, legt
-# er verlauf.json selbst an - die Rueckholung sprang nicht an, die Sicherung
-# wurde trotzdem geloescht, der Verlauf war fort. Laeuft der Dienst danach
-# weiter, schadet das nicht: er liest die Datei vor jedem Eintrag neu und
-# schreibt an die zurueckgeholte an. Was er in der Luecke eingetragen hat,
-# geht dabei verloren.
+# Entschieden wird an der MARKE, ohne Altersvergleich (Entscheidung 1;
+# Nachzug G1, 02.10.2026, vom Koordinator entschieden). Bis 0.11.14 stand hier
+# der Zeitpunkt IN der Sicherung mit einer Grenze von 3600 s: eine
+# Aktualisierung, die laenger dauerte, spielte die Werte nicht zurueck, und
+# die Sicherung blieb liegen. Dass die Sicherung aus DIESEM Vorgang stammt,
+# sagt seither preupgrade.sh zu: es legt eine liegengebliebene Sicherung aus
+# einem frueheren Vorgang nach .alt, bevor es die neue anlegt.
 #
-# Entschieden wird am Zeitpunkt IN der Sicherung, nicht an der Marke oben:
-# preupgrade.sh schreibt beide im selben Durchlauf, aber der Zeitpunkt
-# gehoert zur Sicherung und liegt bei ihr. Er beantwortet deshalb auch den
-# Fall, in dem die Marke fehlt (Erstinstallation dieser Fassung ueber eine
-# aeltere hinweg, von Hand entfernt) - und er beantwortet ihn fuer GENAU
-# diese Sicherung, waehrend die Marke nur sagt, dass irgendetwas laeuft.
+# Mit Marke kommt jede gesicherte Datei zurueck, OHNE nach dem Inhalt der
+# Zieldatei zu fragen (bis 0.11.6 nur bei fehlender oder leerer Zieldatei; der
+# Waechter kann in der Luecke vor diesem Skript verlauf.json selbst angelegt
+# haben - in WSL nachgestellt 17.09.2026). Was der Dienst in der Luecke
+# eingetragen hat, geht dabei verloren.
 #
-# Ohne Zeitpunkt, mit einem aelteren oder einem in der Zukunft stammt die
-# Sicherung NICHT aus diesem Vorgang. Dann wird daraus NICHTS eingespielt.
-# Bis 0.11.6 fuellte sie noch, was im Datenordner fehlte oder leer war -
-# das ist falsch: eine solche Sicherung kann von einer Deinstallation
-# stammen, die nicht aufgeraeumt hat, oder von einem Update vor Monaten.
-# Was sie traegt, ist dann aelter als alles, was jetzt dasteht, und das
-# Einspielen legte alten Verlauf ueber eine frische Installation
-# (Entscheidung des Hausherrn, 17.09.2026). Sie bleibt liegen und wird
-# EINMAL gemeldet; wer sie doch will, kopiert sie von Hand. Damit sie gar
-# nicht erst liegenbleibt, raeumt uninstall/uninstall sie weg.
+# Ohne Marke ist es eine Neuinstallation: preinstall.sh hat die Sicherung
+# schon nach .alt gelegt; liegt trotzdem eine da, legt der Rueckfallzweig sie
+# beiseite, und nichts davon wird eingespielt.
 #
 # Die Sicherung verschwindet erst, wenn jede Rueckholung gelungen ist.
 # Zurueckgeschrieben wird ueber eine Nebendatei und mv: cp schreibt in die
 # Zieldatei hinein, mv tauscht sie in einem Schritt aus.
 LANG_SICHER="$BASE/data/plugins/$PFOLDER.upgrade_sicherung"
-if [ -d "$LANG_SICHER" ]; then
-    LANG_JETZT=$(date +%s)
-    LANG_ANGELEGT=$(cat "$LANG_SICHER/angelegt" 2>/dev/null)
-    LANG_FRISCH=""
-    case "$LANG_ANGELEGT" in
-        ''|*[!0-9]*) ;;
-        *)
-            if [ "$LANG_JETZT" -ge "$LANG_ANGELEGT" ] \
-               && [ $((LANG_JETZT - LANG_ANGELEGT)) -le 3600 ]; then
-                LANG_FRISCH=ja
-            fi
-            ;;
-    esac
-    if [ -z "$LANG_FRISCH" ]; then
-        LANG_WANN="unbekannt"
-        [ -n "$LANG_ANGELEGT" ] && LANG_WANN=$(date -d "@$LANG_ANGELEGT" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$LANG_ANGELEGT")
-        echo "<WARNING> Die Sicherung der Langzeitwerte stammt nicht aus diesem Vorgang (angelegt: $LANG_WANN)."
-        echo "<INFO> Daraus wird nichts eingespielt - sie koennte aelter sein als das,"
-        echo "<INFO> was jetzt im Datenordner steht. Sie bleibt unberuehrt liegen:"
-        echo "<INFO> $LANG_SICHER"
-        echo "<INFO> Wer sie doch will, kopiert die Dateien von dort nach $PDATA/."
-    else
-        LANG_FEHLER=0
-        for LANG_F in verlauf.json messwerte.json ansagen.json; do
-            [ -f "$LANG_SICHER/$LANG_F" ] || continue
-            LANG_ZIEL="$PDATA/$LANG_F"
-            if cp -p "$LANG_SICHER/$LANG_F" "$LANG_ZIEL.rueckholung" 2>/dev/null \
-               && mv -f "$LANG_ZIEL.rueckholung" "$LANG_ZIEL" 2>/dev/null; then
-                echo "<OK> $LANG_F ueber das Update gerettet."
-            else
-                rm -f "$LANG_ZIEL.rueckholung" 2>/dev/null
-                LANG_FEHLER=$((LANG_FEHLER + 1))
-                echo "<WARNING> $LANG_F liess sich nicht aus der Sicherung zurueckholen."
-            fi
-        done
-        if [ "$LANG_FEHLER" -eq 0 ]; then
-            rm -rf "$LANG_SICHER" 2>/dev/null
-            [ -d "$LANG_SICHER" ] && echo "<INFO> Die Sicherung liess sich nicht entfernen: $LANG_SICHER"
+if [ -z "$MARKE_GILT" ]; then
+    sp_neuinstallation_beiseite "$LANG_SICHER"
+    # F3: der Sollmerker gehoert ebenso zu einer frueheren Installation.
+    sp_neuinstallation_beiseite "$BASE/data/plugins/$PFOLDER.soll_laufen"
+elif [ -d "$LANG_SICHER" ]; then
+    LANG_FEHLER=0
+    for LANG_F in verlauf.json messwerte.json ansagen.json; do
+        [ -f "$LANG_SICHER/$LANG_F" ] || continue
+        LANG_ZIEL="$PDATA/$LANG_F"
+        if cp -p "$LANG_SICHER/$LANG_F" "$LANG_ZIEL.rueckholung" 2>/dev/null \
+           && mv -f "$LANG_ZIEL.rueckholung" "$LANG_ZIEL" 2>/dev/null; then
+            echo "<OK> $LANG_F ueber das Update gerettet."
         else
-            echo "<INFO> Die Sicherung bleibt deshalb liegen: $LANG_SICHER"
-            echo "<INFO> Von dort laesst sich die Datei von Hand nach $PDATA/ kopieren."
+            rm -f "$LANG_ZIEL.rueckholung" 2>/dev/null
+            LANG_FEHLER=$((LANG_FEHLER + 1))
+            echo "<WARNING> $LANG_F liess sich nicht aus der Sicherung zurueckholen."
         fi
+    done
+    if [ "$LANG_FEHLER" -eq 0 ]; then
+        rm -rf "$LANG_SICHER" 2>/dev/null
+        [ -d "$LANG_SICHER" ] && echo "<INFO> Die Sicherung liess sich nicht entfernen: $LANG_SICHER"
+    else
+        echo "<INFO> Die Sicherung bleibt deshalb liegen: $LANG_SICHER"
+        echo "<INFO> Von dort laesst sich die Datei von Hand nach $PDATA/ kopieren."
     fi
+fi
+# Genau EINE Meldung fuer alles, was der Rueckfallzweig beiseitegelegt hat.
+# Nach preinstall.sh findet er nichts mehr und schweigt.
+if [ -n "$SP_ALT" ]; then
+    echo "<WARNING> Neuinstallation: Einstellungen und Langzeitwerte einer frueheren Installation werden NICHT eingespielt, sondern beiseitegelegt:$SP_ALT (die Deinstallation raeumt sie ab)."
 fi
 
 # ---------- Der Sollmerker ----------
@@ -343,7 +333,11 @@ fi
 # Plugin still, die Installation meldet Erfolg, und in Loxone sieht es aus
 # wie ein ruhiges Haus. Der Merker ist eine LEERE Datei - '[ ! -s ]' traefe
 # ihn nicht, deshalb '[ ! -e ]'.
-if [ -e "$BASE/data/plugins/$PFOLDER.soll_laufen" ]; then
+# Nur mit Marke (F3; Entscheidung 1, Nachzug G1 02.10.2026). Bis 0.11.14 wurde
+# er ohne Blick auf die Marke ausgewertet: ein liegengebliebener Merker startete
+# nach einer Neuinstallation den Dienst ungefragt. Ohne Marke liegt er schon
+# unter .alt (preinstall.sh bzw. Rueckfallzweig oben).
+if [ -n "$MARKE_GILT" ] && [ -e "$BASE/data/plugins/$PFOLDER.soll_laufen" ]; then
     if [ ! -e "$PDATA/soll_laufen" ]; then
         touch "$PDATA/soll_laufen" \
             && echo "<OK> Der Dienst lief vor dem Update - der Waechter holt ihn"

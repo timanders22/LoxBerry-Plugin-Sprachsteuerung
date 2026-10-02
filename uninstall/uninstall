@@ -18,8 +18,10 @@
 #        config/plugins/<ordner>.backup.sprachsteuerung.json
 #        config/plugins/<ordner>.backup.saetze.json
 #      Sie liegen bewusst NEBEN dem Konfigordner, damit sie ein Update
-#      und sogar eine Neuinstallation ueberstehen - preupgrade.sh legt
-#      sie an, postinstall.sh spielt sie zurueck. Beim Deinstallieren
+#      ueberstehen - preupgrade.sh legt sie an, postinstall.sh spielt sie
+#      zurueck. Eine Neuinstallation legt Liegengebliebenes nach .alt
+#      (preinstall.sh, seit dem Nachzug G1 vom 02.10.2026); die .alt
+#      raeumt dieses Skript mit ab, ebenso upgrade_sicherung.alt. Beim Deinstallieren
 #      ist genau das falsch: in sprachsteuerung.json koennen die
 #      Miniserver-Adresse mit Zugangsdaten und der Noise-Schluessel
 #      eines ESPHome-Mikrofons stehen. Deshalb ist die Datei auch
@@ -216,8 +218,13 @@ fi
 # ---------------------------------------------------------------
 # 2. Sicherungsdateien ausserhalb der Plugin-Ordner
 # ---------------------------------------------------------------
-for f in sprachsteuerung.json saetze.json; do
+for f in sprachsteuerung.json saetze.json sprachsteuerung.json.alt saetze.json.alt; do
     BK="$PCONFIG/$PFOLDER.backup.$f"
+    # Ein Verweis wird nur als Verweis entfernt - dd schriebe sonst in sein Ziel.
+    if [ -L "$BK" ]; then
+        rm -f "$BK" && echo "<OK> Verweis entfernt: $PFOLDER.backup.$f"
+        continue
+    fi
     if [ -f "$BK" ]; then
         # Ueberschreiben, dann entfernen. Das ist eine Erschwernis, keine
         # Zusicherung: auf SD- und eMMC-Speicher schreibt der Baustein die
@@ -239,6 +246,15 @@ echo "<INFO> vom LoxBerry entfernt."
 SICH="$BASE/data/plugins/$PFOLDER.upgrade_sicherung"
 if [ -d "$SICH" ]; then
     rm -rf "$SICH" && echo "<OK> Sicherung des Aktualisierens entfernt: $PFOLDER.upgrade_sicherung"
+fi
+# Seit dem Nachzug G1 (02.10.2026) auch der Sollmerker neben dem Datenordner
+# samt .alt (F3) - er startete sonst nach einer Neuinstallation den Dienst.
+rm -f "$BASE/data/plugins/$PFOLDER.soll_laufen" "$BASE/data/plugins/$PFOLDER.soll_laufen.alt" 2>/dev/null
+# Seit dem Nachzug G1 (02.10.2026) auch ihr .alt (preinstall.sh, preupgrade.sh).
+if [ -L "$SICH.alt" ]; then
+    rm -f "$SICH.alt"
+elif [ -e "$SICH.alt" ]; then
+    rm -rf "${SICH:?}.alt" && echo "<OK> Beiseitegelegte Sicherung entfernt: $PFOLDER.upgrade_sicherung.alt"
 fi
 # Seit 0.11.7 auch die Marke "Aktualisierung laeuft", aus demselben Grund:
 # sie liegt NEBEN dem Datenordner und uebersteht das Deinstallieren sonst.

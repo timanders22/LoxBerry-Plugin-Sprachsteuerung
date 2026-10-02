@@ -183,14 +183,31 @@ echo "<OK> preupgrade abgeschlossen. Die Container bleiben unberuehrt."
 # Deshalb NEBEN den Ordner: "rm -rf .../<x>/" trifft den Nachbarn mit dem
 # Punkt nicht. postinstall.sh holt ihn zurueck und raeumt ihn weg.
 LANG_SICHER="$BASE/data/plugins/$PFOLDER.upgrade_sicherung"
+# Liegt hier schon eine Sicherung, stammt sie aus einem FRUEHEREN Vorgang (ein
+# abgebrochenes Update, eine Deinstallation, die nicht aufgeraeumt hat). Sie
+# geht nach .alt, BEVOR die neue angelegt wird - postinstall.sh spielt seit
+# dem Nachzug G1 (02.10.2026, Entscheidung 1) an der Marke zurueck, ohne
+# Altersvergleich, und darf deshalb nie einen alten Bestand einspielen. Ein
+# vorhandenes .alt geht vorher weg; die Deinstallation raeumt .alt ab.
+if [ -e "$LANG_SICHER" ] || [ -L "$LANG_SICHER" ]; then
+    if [ -L "$LANG_SICHER.alt" ]; then
+        rm -f "$LANG_SICHER.alt"
+    elif [ -e "$LANG_SICHER.alt" ]; then
+        rm -rf "${LANG_SICHER:?}.alt"
+    fi
+    if mv -f "$LANG_SICHER" "$LANG_SICHER.alt" 2>/dev/null; then
+        echo "<WARNING> Eine Sicherung der Langzeitwerte aus einem frueheren Vorgang wurde nicht wiederverwendet, sondern beiseitegelegt: $LANG_SICHER.alt"
+    else
+        echo "<WARNING> Eine Sicherung der Langzeitwerte aus einem frueheren Vorgang liess sich nicht beiseitelegen: $LANG_SICHER"
+    fi
+fi
 mkdir -p "$LANG_SICHER" 2>/dev/null
 chmod 0700 "$LANG_SICHER" 2>/dev/null
-# Der Zeitpunkt sagt postinstall.sh, dass die Sicherung aus DIESEM Update
-# stammt und ohne Blick auf die Zieldateien zurueckkommen darf. Er steht vor
-# dem Kopieren. Eine Datei, die jetzt im Datenordner fehlt, aber von einem
-# frueheren, abgebrochenen Update noch hier liegt, bleibt liegen und kommt
-# mit zurueck: brach jenes Update nach purge_installation ab, ist sie die
-# einzige Abschrift (in WSL nachgestellt, 17.09.2026).
+# Der Zeitpunkt ist seit dem Nachzug G1 nur noch eine Auskunft: wann diese
+# Sicherung angelegt wurde. Ob sie zurueckkommt, entscheidet postinstall.sh an
+# der Marke. Bis 0.11.14 blieb eine Datei aus einem frueheren, abgebrochenen
+# Update hier liegen und kam mit zurueck; seither liegt sie unter .alt (oben)
+# und wird von Hand geholt, wenn sie gebraucht wird.
 date +%s > "$LANG_SICHER/angelegt" 2>/dev/null
 for LANG_F in verlauf.json messwerte.json ansagen.json; do
     [ -f "$BASE/data/plugins/$PFOLDER/$LANG_F" ] \
@@ -210,6 +227,11 @@ fi
 # Er sagt, ob der Dienst laufen SOLL, und liegt im Datenordner - also in
 # dem, den der Installer gleich abraeumt. Ohne ihn startet der Waechter
 # nach dem Update nichts mehr, und das faellt niemandem auf.
+# Ein Merker NEBEN dem Datenordner stammt aus einem frueheren Vorgang (F3;
+# Entscheidung 1, Nachzug G1 02.10.2026): er geht weg, bevor ueber den neuen
+# entschieden wird. Sonst startete diese Aktualisierung einen Dienst, der vorher
+# nicht lief. Er ist eine leere Datei; es geht nichts verloren.
+rm -f "$BASE/data/plugins/$PFOLDER.soll_laufen" 2>/dev/null
 if [ -e "$BASE/data/plugins/$PFOLDER/soll_laufen" ]; then
     touch "$BASE/data/plugins/$PFOLDER.soll_laufen" 2>/dev/null \
         && echo "<OK> Der Dienst lief - er wird nach dem Update wieder gestartet."
