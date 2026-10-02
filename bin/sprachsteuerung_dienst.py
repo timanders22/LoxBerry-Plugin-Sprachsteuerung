@@ -1789,7 +1789,9 @@ ANSAGE_NAMEN = {"musicserver": "Loxone Music Server", "ms4h": "MusicServer4Home"
                 "cc4lox": "Google-Lautsprecher (Chromecast 4 Lox NG)"}
 CC_SAMMELZIEL = ("alle", "all", "*")
 CC_WARTEN_S = 10.0
-ALEXANG_ADRESSE = "http://127.0.0.1/plugins/alexang/index.php"
+# Nr. 36 b, Stufe 1: Alexa-NG auf dem Webport des LoxBerry wie Chromecast 4 Lox NG
+# (bis 0.11.14 fest Port 80 - auf einem LoxBerry mit anderem Webport scheiterte jede Ansage).
+ALEXANG_PFAD = "/plugins/alexang/index.php"
 # Ansage-3: angenommen wird dort nur von 127.0.0.1/::1 (sonst 403
 # NUR_LOKAL) - deshalb nie die LAN-Adresse; der Port ist der des
 # LoxBerry-Webservers (webport()).
@@ -2115,11 +2117,55 @@ def alexa_token_ok(token) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9_\-]{8,128}", str(token or "")))
 
 
-class _KeineUmleitung(urllib.request.HTTPRedirectHandler):
-    """Ansage-3: einer Umleitung wird nicht gefolgt (wie CURLOPT_FOLLOWLOCATION
-    false) - eine 3xx-Antwort kommt als HTTPError mit ihrem Code zurueck."""
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
+# ---------------------------------------------------------------------------
+# Nr. 36 b, Stufe 1: der Transport zu Alexa-NG, Chromecast 4 Lox NG und dem Music
+# Server laeuft ueber die gemeinsame Sprachausgabe der Plugins dieses Hauses
+# (sprachausgabe.php, PHP) - ueber die Bruecke bin/sp_ansage.php, dieselbe Bauweise
+# wie sp_notify.php. Der Auftrag traegt Ansagetext und Sprechtoken und geht deshalb
+# ueber die STANDARDEINGABE, nie ueber die Kommandozeile (die sieht jeder in der
+# Prozessliste). Bewertung, Saetze und der Rueckfall auf die Lautsprecher der
+# Sprachgeraete bleiben hier.
+# ---------------------------------------------------------------------------
+BRUECKE = SELF / "sp_ansage.php"
+
+
+def _bruecke(auftrag: dict, zeit: float) -> tuple:
+    """(Ergebnis der Bruecke als dict oder None, Fehlertext)."""
+    try:
+        aus = subprocess.run(["php", str(BRUECKE), PNAME],
+                             input=json.dumps(auftrag).encode("utf-8"),
+                             capture_output=True, timeout=float(zeit) + 10.0, check=False)
+    except subprocess.TimeoutExpired:
+        return None, "Zeitueberlauf: der Dienst hat nicht geantwortet."
+    except OSError as err:
+        return None, "sp_ansage.php laesst sich nicht starten: " + fehlertext(err)
+    if aus.returncode != 0:
+        return None, ("sp_ansage.php endete mit %d: %s"
+                      % (aus.returncode, (aus.stderr or b"").decode("utf-8", "replace").strip()[:160]))
+    zeilen = (aus.stdout or b"").decode("utf-8", "replace").strip().splitlines()
+    try:
+        erg = json.loads(zeilen[-1])
+    except (ValueError, IndexError):
+        return None, "sp_ansage.php: Antwort nicht lesbar."
+    if not isinstance(erg, dict):
+        return None, "sp_ansage.php: Antwort nicht lesbar."
+    return erg, ""
+
+
+def _grund_text(grund_id) -> str:
+    """Kennung eines Transportfehlers der gemeinsamen Sprachausgabe -> derselbe Satz,
+    den fehlertext() fuer denselben Fehler bisher lieferte."""
+    g = str(grund_id or "")
+    if g == "HTTP_ZEIT":
+        return "Zeitueberlauf: der Dienst hat nicht geantwortet."
+    if g == "HTTP_ABGEWIESEN":
+        return ("Verbindung abgewiesen (ECONNREFUSED): der Rechner ist erreichbar, aber "
+                "auf diesem Port lauscht nichts. Laeuft der Container?")
+    if g == "HTTP_NAME":
+        return "Namensaufloesung fehlgeschlagen: statt des Namens die IP-Adresse eintragen."
+    if g == "HTTP_KEIN_HTTP":
+        return "Die Adresse beginnt nicht mit http:// oder https://."
+    return "keine Antwort (%s)" % (g or "ohne Angabe")
 
 
 def webport() -> int:
@@ -2143,35 +2189,27 @@ def google_adresse() -> str:
     return "http://127.0.0.1:%d%s" % (webport(), GOOGLE_PFAD)
 
 
+def alexa_adresse() -> str:
+    return "http://127.0.0.1:%d%s" % (webport(), ALEXANG_PFAD)
+
+
 def _alexa_rufen(felder: dict, zeit: float = 15.0, adresse: str = "", streng: bool = False) -> tuple:
     """POST an Alexa-NG. (http-Code oder 0, erste Antwortzeile, Fehlertext).
 
     Ansage-3: mit 'adresse' an einen anderen Sprech-Endpunkt derselben
-    Schnittstelle (Chromecast 4 Lox NG). 'streng' (nur dort): ohne Proxy,
-    ohne Umleitung, und ein Token in der Antwortzeile wird vorsorglich
-    ersetzt. Ohne beide laeuft der Alexa-Weg genau wie bisher."""
-    daten = urllib.parse.urlencode(felder).encode("utf-8")
-    anfrage = urllib.request.Request(adresse or ALEXANG_ADRESSE, data=daten, method="POST")
-    oeffnen = urllib.request.urlopen
-    if streng:
-        oeffnen = urllib.request.build_opener(urllib.request.ProxyHandler({}), _KeineUmleitung).open
-    try:
-        with oeffnen(anfrage, timeout=zeit) as antwort:
-            code, roh = int(antwort.status), antwort.read(600)
-    except urllib.error.HTTPError as err:
-        code = int(err.code)
-        try:
-            roh = err.read(600)
-        except OSError:
-            roh = b""
-    except (urllib.error.URLError, OSError, ValueError) as err:
-        return 0, "", fehlertext(err)
-    zeilen = roh.decode("utf-8", "replace").strip().splitlines()
-    zeile = zeilen[0].strip() if zeilen else ""
-    token = str(felder.get("token") or "")
-    if streng and token:
-        zeile = zeile.replace(token, "***")
-    return code, zeile, ""
+    Schnittstelle (Chromecast 4 Lox NG). Nr. 36 b, Stufe 1: beide Wege laufen
+    ueber die Bruecke und damit beide streng (ohne Proxy, ohne Umleitung, ein
+    Token in der Antwortzeile ersetzt); Alexa-NG auf dem Webport. 'streng'
+    bleibt der Aufrufform wegen; die Zeitgrenze ist weiter die des Aufrufers."""
+    modus = "cc4lox" if adresse else "alexang"
+    erg, fehler = _bruecke({"art": "ng", "modus": modus, "port": webport(), "tmo": zeit,
+                            "felder": dict((str(k), str(v)) for k, v in felder.items())}, zeit)
+    if erg is None:
+        return 0, "", fehler
+    code = int(erg.get("code") or 0)
+    if code <= 0:
+        return 0, "", _grund_text(erg.get("grund_id"))
+    return code, str(erg.get("zeile") or "").strip(), ""
 
 
 def alexa_ansagen(cfg: dict, tts: dict, text: str) -> dict:
@@ -2195,7 +2233,7 @@ def alexa_ansagen(cfg: dict, tts: dict, text: str) -> dict:
         felder["laut"] = str(laut)
     # Der Mitschnitt nennt Adresse und Laenge - nie das Token.
     mitschnitt(cfg, "ALEXA>", "%s aktion=sprechen geraet=%s laut=%s text=%d Zeichen (POST, Token verborgen)"
-               % (ALEXANG_ADRESSE, geraet or "(Standard)", felder.get("laut", "-"), len(text)))
+               % (alexa_adresse(), geraet or "(Standard)", felder.get("laut", "-"), len(text)))
     code, zeile, fehler = _alexa_rufen(felder)
     mitschnitt(cfg, "ALEXA<", "HTTP %d %s" % (code, zeile[:200] or fehler))
     if code == 200 and zeile.startswith("SPRECHEN;") and ";OK=1" in zeile:
@@ -2490,17 +2528,21 @@ def loxone_ansagen(cfg: dict, text: str, zonen: str = "") -> dict:
                        "Ansage uebersprungen: fuer die Loxone-Audioausgabe ist "
                        "keine Adresse eingetragen.")
         return {"ok": 0, "grund": "keine_adresse"}
-    try:
-        mitschnitt(cfg, "TTS-URL>", url)
-        with urllib.request.urlopen(url, timeout=10) as antwort:
-            antwort.read(200)
-    except (urllib.error.URLError, OSError) as err:
-        melde_gebremst("tts_fehler", "Ansage fehlgeschlagen: " + fehlertext(err))
-        melden(3, "Die Ansage ueber die Loxone-Audioausgabe schlaegt fehl: "
-                  + fehlertext(err), "tts")
-        return {"ok": 0, "fehler": fehlertext(err)}
+    mitschnitt(cfg, "TTS-URL>", url)
+    # Nr. 36 b, Stufe 1: der Abruf laeuft ueber die gemeinsame Sprachausgabe (Bruecke) - ohne
+    # Proxy, ohne Umleitung, gesendet nur bei HTTP 2xx (bis 0.11.14 folgte urllib einer Umleitung).
+    erg, fehler = _bruecke({"art": "get", "url": url, "tmo": 10}, 10.0)
+    if erg is not None:
+        code = int(erg.get("code") or 0)
+        if str(erg.get("grund_id") or ""):
+            fehler = ("HTTPError: HTTP Error %d" % code) if code > 0 else _grund_text(erg.get("grund_id"))
+    if fehler:
+        melde_gebremst("tts_fehler", "Ansage fehlgeschlagen: " + fehler)
+        melden(3, "Die Ansage ueber die Loxone-Audioausgabe schlaegt fehl: " + fehler, "tts")
+        return {"ok": 0, "fehler": fehler}
     ansage_vermerken()
-    _LOG.info("Ansage gesendet: %r", text)
+    # Nr. 40: vom Ansagetext nur seine Laenge.
+    _LOG.info("Ansage gesendet (%d Zeichen).", len(text))
     return {"ok": 1}
 
 

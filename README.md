@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.11.14
+Version 0.11.15
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,25 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.11.15
+
+Gemeinsame Sprachausgabe (Entscheidung 40, Stufe 1).
+Gemessen in WSL (echter Dienst, echter Chromecast-Endpunkt, Attrappen) und unter PHP 7.4/8.5 (Oberfläche); nicht am
+Gerät, nicht an einem echten Lautsprecher.
+
+* **Der Ansagetext steht nicht mehr im Protokoll** – „Ansage gesendet (29 Zeichen).“ statt des Satzes.
+* Die Antwort auf `aktion=sprechen` nennt zusätzlich die Länge des Texts: `SET;OK=1;AKTION=sprechen;TEXTLAENGE=16;MELDUNG=…`
+  (wie bei allen Plugins dieses Hauses; der Text selbst stand dort nie).
+* **Alexa-NG wird auf dem Port des LoxBerry-Webservers angesprochen** (bisher fest Port 80) – auf einem LoxBerry mit
+  anderem Webport kommen Ansagen über Alexa-NG jetzt an.
+* Ansagen an Alexa-NG, Chromecast 4 Lox NG und den Music Server laufen über die gemeinsame Sprachausgabe der Plugins
+  dieses Hauses (`sprachausgabe.php`, angesprochen über `bin/sp_ansage.php`): ohne Proxy, ohne Umleitung; beim Music
+  Server und bei einer eigenen Vorlage gilt eine Ansage nur bei HTTP 2xx als gesendet (eine Umleitung wird gemeldet).
+  Einstellungen, Felder, Testansage, Reiter Test, Sicherungen und der Rückfall auf die Lautsprecher der Sprachgeräte
+  bleiben gleich.
+
+**In Loxone:** nichts zu tun.
 
 ## Neu in 0.11.14
 
@@ -1021,7 +1040,7 @@ Im Reiter *Einstellungen* wählt **Art der Audioausgabe** ein weiteres Gerät,
 | MusicServer4Home / Audioserver4Home | URL-Vorlage (ohne Eintrag die MS4H-Vorlage) | wie oben, dazu die Vorlage |
 | Originaler Loxone Audioserver | nur der Text im MQTT-Thema `<präfix>/ansage`; die Ausgabe baut man in Loxone Config (Textgenerator am TTS-Eingang) | – |
 | Chromecast4lox | MQTT `<cc-präfix>/<lautsprecher>/cmd/tts`, QoS 1, nicht zurückbehalten, Nutzlast = Text | Themenpräfix (ab Werk `chromecast4lox`), Ziel-Lautsprecher oder `alle`; die Lautstärke stellt Chromecast4lox ein |
-| Alexa-NG (eigenes Plugin) | `POST http://127.0.0.1/plugins/alexang/index.php`, `aktion=sprechen` | Gerät (leer = Standardgerät), Sprechtoken, Lautstärke (leer = unverändert) |
+| Alexa-NG (eigenes Plugin) | `POST http://127.0.0.1:<Webport>/plugins/alexang/index.php`, `aktion=sprechen` | Gerät (leer = Standardgerät), Sprechtoken, Lautstärke (leer = unverändert) |
 | Google-Lautsprecher (Chromecast 4 Lox NG) | `POST http://127.0.0.1:<Webport>/plugins/chromecast-4lox-ng/index.php`, `aktion=sprechen` (ab Chromecast 4 Lox NG 1.3.15) | Gerät (leer = Standardgerät), eigenes Sprechtoken, Lautstärke (leer = Ansagelautstärke) |
 | Eigene Vorlage | URL mit `{ip} {port} {zones} {vol} {lang} {text}` – darüber auch eine vorhandene Alexa-Brücke (Home Assistant, Node-RED) | Vorlage |
 

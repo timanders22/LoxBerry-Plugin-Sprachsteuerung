@@ -22,6 +22,11 @@ if (!function_exists('sp_e')) {
     }
 }
 
+/* Gemeinsame Sprachausgabe (Abschrift von Werkzeuge/gemeinsam/sprachausgabe.php, Nr. 36 b,
+ * Stufe 1). Liegt neben dieser Datei; die Datei schuetzt sich selbst gegen doppeltes Laden.
+ * Der Dienst erreicht sie ueber bin/sp_ansage.php. */
+require_once __DIR__ . '/sprachausgabe.php';
+
 
 /* Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
  *
@@ -1491,11 +1496,9 @@ function sp_sicherung_bauen($pruefen = true)
             if (is_array($s)) { unset($cfg['satelliten'][$i]['schluessel']); }
         }
     }
-    // Und das Sprechtoken fuer Alexa-NG (Ansage-1) - es wird wie ein
-    // Kennwort behandelt.
-    unset($cfg['tts']['alexa_token']);
-    // Ansage-3: ebenso das Sprechtoken fuer Chromecast 4 Lox NG.
-    unset($cfg['tts']['google_token']);
+    // Und die Sprechtoken fuer Alexa-NG (Ansage-1) und Chromecast 4 Lox NG
+    // (Ansage-3) - sie werden wie Kennwoerter behandelt. Nr. 36 b: eine Quelle.
+    if (isset($cfg['tts'])) { $cfg['tts'] = ansage_sicherung_bereinigen($cfg['tts']); }
     $sp_sich = array(
         'art'      => 'sprachsteuerung-sicherung',
         'fassung'  => 1,
@@ -1646,7 +1649,8 @@ function sp_sicherung_lesen($roh, $nur_pruefen = false)
  * Reiter Test. Dieselben Pruefregeln wie im Dienst: ein Feld, zwei Sprachen,
  * gleiche Muster.
  * ================================================================== */
-define('SP_ALEXANG_ADRESSE', 'http://127.0.0.1/plugins/alexang/index.php');
+/* Nr. 36 b, Stufe 1: Alexa-NG auf dem Webport des LoxBerry (ansage_adresse()); bis 0.11.14
+ * fest Port 80. */
 
 /* Ansage-3 (01.10.2026): Google-Lautsprecher ueber den Sprech-Endpunkt von
  * Chromecast 4 Lox NG (ab 1.3.15), ab Werk nicht gewaehlt. Gleiche
@@ -1660,14 +1664,7 @@ function sp_webport()
 {
     $p = sp_paths();
     if ($p['home'] === '') { return 80; }
-    $g = sp_json_lesen($p['home'] . '/config/system/general.json');
-    foreach (array('Webserver', 'WEBSERVER') as $ab) {
-        if (isset($g[$ab]['Port']) && is_scalar($g[$ab]['Port'])
-            && (int) $g[$ab]['Port'] > 0 && (int) $g[$ab]['Port'] <= 65535) {
-            return (int) $g[$ab]['Port'];
-        }
-    }
-    return 80;
+    return ansage_webport($p['home'] . '/config/system/general.json');     // Nr. 36 b: eine Quelle
 }
 
 function sp_google_adresse()
@@ -1721,14 +1718,13 @@ function sp_cc_ziel_ok($z)
 
 function sp_alexa_token_ok($t)
 {
-    return is_string($t) && (bool) preg_match('/^[A-Za-z0-9_\-]{8,128}$/', $t);
+    return ansage_token_ok($t);     // Nr. 36 b: dieselbe Form, eine Quelle
 }
 
 /** Leer (= Standardgeraet von Alexa-NG) oder bis 200 Zeichen ohne Steuerzeichen. */
 function sp_alexa_geraet_ok($g)
 {
-    return is_string($g) && ($g === ''
-        || ((bool) preg_match('/^.{1,200}$/us', $g) && !preg_match('/[\x00-\x1F\x7F]/', $g)));
+    return ansage_geraet_ok($g);     // Nr. 36 b: dieselbe Form, eine Quelle
 }
 
 /** Geraetename -> Themenebene wie thema_saeubern() in Chromecast4lox. */
@@ -1881,32 +1877,17 @@ function sp_mqtt_retained_lesen(array $filter, $sekunden = 2.0)
 function sp_alexa_rufen(array $felder, $sekunden = 5, $adresse = '', $streng = false)
 {
     /* Ansage-3: mit $adresse an einen anderen Sprech-Endpunkt derselben
-     * Schnittstelle (Chromecast 4 Lox NG). $streng (nur dort): keiner
-     * Umleitung folgen, ein Token in der Antwortzeile vorsorglich ersetzen.
-     * Ohne beide laeuft der Alexa-Weg genau wie bisher. */
-    $ziel = $adresse !== '' ? $adresse : SP_ALEXANG_ADRESSE;
-    $http = array(
-        'method'        => 'POST',
-        'header'        => "Content-Type: application/x-www-form-urlencoded\r\n",
-        'content'       => http_build_query($felder),
-        'timeout'       => (float) $sekunden,
-        'ignore_errors' => true,
-    );
-    if ($streng) {
-        $http['follow_location'] = 0;
-        $http['max_redirects'] = 0;
-    }
-    $ctx = stream_context_create(array('http' => $http));
-    $roh = @file_get_contents($ziel, false, $ctx, 0, 600);
-    if ($roh === false) {
+     * Schnittstelle (Chromecast 4 Lox NG). Nr. 36 b, Stufe 1: der Transport
+     * der gemeinsamen Sprachausgabe - fuer beide Wege ohne Proxy, ohne
+     * Umleitung, ein Token in der Antwortzeile ersetzt; Alexa-NG auf dem
+     * Webport. $streng bleibt der Aufrufform wegen. */
+    $ziel = $adresse !== '' ? $adresse : ansage_adresse('alexang', sp_webport());
+    $a = ansage_ng_rufen($ziel, $felder, (int) ceil((float) $sekunden),
+                         array('kopf' => array('User-Agent: LoxBerry Sprachsteuerung')));
+    if ($a['code'] <= 0) {
         return array('', 'keine Antwort von ' . $ziel);
     }
-    $z = preg_split('/\r?\n/', trim((string) $roh));
-    $zeile = trim((string) $z[0]);
-    if ($streng && isset($felder['token']) && is_string($felder['token']) && $felder['token'] !== '') {
-        $zeile = str_replace($felder['token'], '***', $zeile);
-    }
-    return array($zeile, '');
+    return array(trim($a['roh']), '');
 }
 
 /**

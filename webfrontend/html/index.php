@@ -299,5 +299,8 @@ list($sp_erg, $sp_meldung) = sp_befehl_absetzen($sp_befehl);
 if ($sp_erg === 0) {
     http_response_code(500);
 }
-printf("SET;OK=%d;AKTION=%s;MELDUNG=%s\n", $sp_erg, $sp_aktion,
+/* Nr. 40 / Entwurf 3.6: zu einer Ansage nennt die Antwort ihre Laenge (TEXTLAENGE, wie alle
+ * Linien), nie den Text. */
+printf("SET;OK=%d;AKTION=%s;%sMELDUNG=%s\n", $sp_erg, $sp_aktion,
+    $sp_aktion === 'sprechen' ? 'TEXTLAENGE=' . ansage_zeichen($sp_text) . ';' : '',
     str_replace(array("\r", "\n", ';'), ' ', $sp_meldung));
