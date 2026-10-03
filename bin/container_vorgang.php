@@ -74,10 +74,52 @@ ini_set('log_errors', '1');
 ini_set('display_errors', '0');
 ini_set('error_log', $sp_p['logdir'] . '/container_vorgang.err');
 
-/* Zweimal laufen geht nicht: lebt schon ein anderer Vorgang, endet dieser. */
-$sp_v = sp_ct_vorgang();
-if ($sp_v['zustand'] === 'laeuft' && (int) $sp_v['pid'] !== getmypid()) {
-    fwrite(STDERR, 'Es laeuft bereits ein Vorgang (PID ' . (int) $sp_v['pid'] . ").\n");
+/* Zweimal laufen geht nicht. Bis 0.11.15 ohne Sperre und nur fuer "laeuft":
+ * zwei Aufrufe kurz nacheinander (oder ein Aufruf von Hand, waehrend die
+ * Oberflaeche gerade "gestartet" eingetragen hatte) sahen beide "frei" und
+ * arbeiteten gleichzeitig. Jetzt unter derselben Sperre wie
+ * sp_ct_vorgang_starten() (data/plugins/<ordner>/container_vorgang.lock):
+ *   - "laeuft" mit einem anderen lebenden Vorgang: endet (3).
+ *   - "gestartet": das ist der Eintrag der Oberflaeche fuer GENAU EINEN Start.
+ *     Ihn uebernimmt nur ein Aufruf mit demselben Auftrag und Dienst; ein
+ *     anderer Auftrag endet (3).
+ * Uebernommen wird, indem "laeuft" mit der eigenen PID eingetragen wird, noch
+ * unter der Sperre - ein zweiter Aufruf mit demselben Auftrag sieht danach
+ * "laeuft" und endet. Die Sperre wird vor der Arbeit freigegeben: die Kinder
+ * (docker) erbten sie sonst und hielten sie ueber das Ende hinaus. */
+if (!is_dir($sp_p['datadir'])) {
+    @mkdir($sp_p['datadir'], 0775, true);
+}
+$sp_sperre = @fopen($sp_p['datadir'] . '/container_vorgang.lock', 'c');
+if ($sp_sperre === false) {
+    fwrite(STDERR, "Sperrdatei nicht anlegbar: " . $sp_p['datadir'] . "/container_vorgang.lock\n");
+    exit(1);
+}
+if (!flock($sp_sperre, LOCK_EX | LOCK_NB)) {
+    fclose($sp_sperre);
+    fwrite(STDERR, "Es laeuft bereits ein Vorgang (Sperre belegt).\n");
     exit(3);
+}
+$sp_v = sp_ct_vorgang();
+$sp_grund = '';
+$sp_ende = 0;
+if ($sp_v['zustand'] === 'laeuft' && (int) $sp_v['pid'] !== getmypid()) {
+    $sp_grund = 'Es laeuft bereits ein Vorgang (PID ' . (int) $sp_v['pid'] . ').';
+    $sp_ende = 3;
+} elseif ($sp_v['zustand'] === 'gestartet'
+    && ((string) $sp_v['vorgang'] !== $sp_auftrag || (string) $sp_v['dienst'] !== $sp_dienst)) {
+    $sp_grund = 'Die Oberflaeche hat gerade einen anderen Vorgang gestartet ("' . $sp_v['vorgang'] . '").';
+    $sp_ende = 3;
+} elseif (!sp_ct_vorgang_schreiben(array('vorgang' => $sp_auftrag, 'dienst' => $sp_dienst, 'zustand' => 'laeuft',
+        'start' => ($sp_v['zustand'] === 'gestartet' && (int) $sp_v['start'] > 0) ? (int) $sp_v['start'] : time(),
+        'pid' => getmypid(), 'schritt' => 'plan', 'schritt_nr' => 0, 'schritte' => 0, 'meldung' => ''))) {
+    $sp_grund = 'Die Zustandsdatei laesst sich nicht schreiben.';
+    $sp_ende = 1;
+}
+flock($sp_sperre, LOCK_UN);
+fclose($sp_sperre);
+if ($sp_ende !== 0) {
+    fwrite(STDERR, $sp_grund . "\n");
+    exit($sp_ende);
 }
 exit(sp_ct_vorgang_ausfuehren($sp_auftrag, $sp_dienst) ? 0 : 1);

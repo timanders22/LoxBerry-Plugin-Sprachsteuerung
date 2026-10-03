@@ -63,7 +63,7 @@ if (!$home || !file_exists($sdk)) {
 require_once $home . '/libs/phplib/loxberry_system.php';
 require_once $sdk;
 
-$schwere = isset($argv[1]) && preg_match('/^[0-9]+$/', (string) $argv[1])
+$schwere = isset($argv[1]) && preg_match('/^[0-9]+\z/', (string) $argv[1])
     ? (int) $argv[1] : 4;
 if ($schwere < 1 || $schwere > 7) { $schwere = 4; }
 $text = isset($argv[2]) ? (string) $argv[2] : '';
