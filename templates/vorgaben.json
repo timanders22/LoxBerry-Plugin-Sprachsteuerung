@@ -31,7 +31,7 @@
 
     "llm_ein": 0,
     "sprache": "de",
-    "wakeword": "ok_nabu",
+    "wakeword": "okay_nabu",
 
     "whisper_modell": "",
     "piper_stimme": "",
@@ -138,7 +138,17 @@
     "endungen": { "/aktion": 0, "/wert": 0 }
   },
 
+  "_hinweis_wakewords": [
+    "Die eingebauten Modelle von openWakeWord ab 2.0 (pyopen-wakeword,",
+    "Model in const.py): okay_nabu, hey_jarvis, hey_mycroft, alexa,",
+    "hey_rhasspy. Bis 0.11.15 stand hier 'ok_nabu' - so hiess das Modell",
+    "bis wyoming-openwakeword 1.10; 2.0.0 hat es in 'okay_nabu' umbenannt",
+    "(CHANGELOG: 'Rename ok_nabu to okay_nabu to match microWakeWord').",
+    "Eine Konfiguration mit 'ok_nabu' bleibt gueltig; sp_lib.php bildet sie",
+    "auf 'okay_nabu' ab (sp_weckwort_norm())."
+  ],
+
   "wakewords": [
-    "ok_nabu", "hey_jarvis", "alexa", "hey_mycroft", "hey_rhasspy"
+    "okay_nabu", "hey_jarvis", "alexa", "hey_mycroft", "hey_rhasspy"
   ]
 }

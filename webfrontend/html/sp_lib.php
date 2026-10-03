@@ -27,6 +27,53 @@ if (!function_exists('sp_e')) {
  * Der Dienst erreicht sie ueber bin/sp_ansage.php. */
 require_once __DIR__ . '/sprachausgabe.php';
 
+/* 0.12.0 (I2): die gemeinsame Feldpruefung der Oberflaeche - dieselben Regeln
+ * wie das Formular, damit "Sicherung einspielen" nichts annimmt, was das
+ * Formular abweisen wuerde. Die Datei gehoert der Oberflaeche; fehlt sie
+ * (aeltere Abschrift, Pruefstand), bleibt es bei den eigenen Formpruefungen
+ * in sp_sicherung_lesen(). */
+if (is_file(__DIR__ . '/sp_pruefen.php')) {
+    require_once __DIR__ . '/sp_pruefen.php';
+}
+
+/**
+ * Die Zeitzone des Systems setzen, wenn PHP keine kennt.
+ *
+ * Ohne date.timezone rechnet PHP in UTC, der Dienst (Python, localtime) in
+ * der Systemzeit. Ruhezeit, Verlauf und CSV standen damit um ein bis zwei
+ * Stunden neben dem Protokoll des Dienstes - die Statuszeile meldete RUHE=0,
+ * waehrend der Dienst schwieg. Gelesen wird, was auch Python liest:
+ * /etc/timezone, sonst das Ziel des Verweises /etc/localtime.
+ * Eine gesetzte date.timezone bleibt unangetastet. "Nicht gesetzt" heisst
+ * leer (PHP 7.4) ODER "UTC": seit PHP 8.2 ist UTC die eingebaute Vorgabe
+ * (gemessen: php -n -i nennt "date.timezone => UTC"), und Debians php.ini
+ * laesst den Eintrag auskommentiert - ein leeres ini_get() kommt dort nie
+ * vor. Ein ausdruecklich gesetztes UTC ist davon nicht zu unterscheiden;
+ * auch dann ist die Systemzeit richtig, denn nach ihr rechnet der Dienst.
+ */
+function sp_zeitzone_setzen($tzdatei = '/etc/timezone', $localtime = '/etc/localtime')
+{
+    $ini = trim((string) ini_get('date.timezone'));
+    if ($ini !== '' && strtoupper($ini) !== 'UTC') { return; }
+    $kandidaten = array();
+    if (is_readable($tzdatei)) {
+        $kandidaten[] = trim((string) @file_get_contents($tzdatei));
+    }
+    if (is_link($localtime)) {
+        $ziel = (string) @readlink($localtime);
+        $pos = strpos($ziel, 'zoneinfo/');
+        if ($pos !== false) { $kandidaten[] = substr($ziel, $pos + 9); }
+    }
+    $gueltig = timezone_identifiers_list();
+    foreach ($kandidaten as $z) {
+        if ($z !== '' && in_array($z, $gueltig, true)) {
+            date_default_timezone_set($z);
+            return;
+        }
+    }
+}
+sp_zeitzone_setzen();
+
 
 /* Den LoxBerry-Wurzelordner ohne festen Systempfad bestimmen.
  *
@@ -212,6 +259,46 @@ function sp_json_schreiben($pfad, $daten, $rechte = null)
     return true;
 }
 
+/**
+ * Eine Datei atomar kopieren: Zwischendatei im Zielordner, Rechte zuerst,
+ * Inhalt, fflush, fsync, rename.
+ *
+ * Bis 0.11.15 standen hier copy()-Aufrufe (Heilung aus der Zweitschrift,
+ * Zweitschrift selbst, .kaputt). copy() schreibt in die Zieldatei hinein:
+ * ein Leser sieht einen Augenblick eine halbe Datei - die Selbstheilung haelt
+ * eine halbe Konfiguration fuer "ohne Inhalt" -, die Datei steht kurz mit den
+ * Vorgaberechten (0644) samt Miniserver-Anmeldung da, und ohne fsync kann ein
+ * Stromausfall die Zweitschrift leer hinterlassen, waehrend die Quelle schon
+ * ersetzt ist. rename() im selben Ordner ist atomar.
+ *
+ * fsync() gibt es erst ab PHP 8.1; darunter bleibt es bei fflush - das ist
+ * nicht schlechter als vorher. Rueckgabe: true bei Erfolg.
+ */
+function sp_datei_kopieren_atomar($quelle, $ziel, $rechte = 0600)
+{
+    if (!is_file($quelle)) { return false; }
+    $inhalt = @file_get_contents($quelle);
+    if ($inhalt === false) { return false; }
+    $ordner = dirname($ziel);
+    if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) { return false; }
+    $tmp = $ziel . '.tmp.' . getmypid();
+    $fp = @fopen($tmp, 'wb');
+    if ($fp === false) { return false; }
+    // Rechte VOR dem Inhalt - wie in sp_json_schreiben().
+    @chmod($tmp, $rechte);
+    $n = @fwrite($fp, $inhalt);
+    $ok = ($n === strlen($inhalt)) && @fflush($fp);
+    if ($ok && function_exists('fsync')) {
+        $ok = @fsync($fp);
+    }
+    fclose($fp);
+    if (!$ok || !@rename($tmp, $ziel)) {
+        @unlink($tmp);
+        return false;
+    }
+    return true;
+}
+
 /* ==================================================================
  * Vorgaben - EINE Datei fuer beide Sprachen
  *
@@ -367,11 +454,9 @@ function sp_config($erzeugen = true)
         $alt = is_file($p['config']) ? (string) @file_get_contents($p['config']) : '';
         $rest = preg_replace('/\s+/', '', $alt);
         if ($rest !== '' && $rest !== '{}' && $rest !== '[]') {
-            @copy($p['config'], $p['config'] . '.kaputt');
-            @chmod($p['config'] . '.kaputt', 0600);
+            sp_datei_kopieren_atomar($p['config'], $p['config'] . '.kaputt', 0600);
         }
-        if (@copy($p['sicherung'], $p['config'])) {
-            @chmod($p['config'], 0600);
+        if (sp_datei_kopieren_atomar($p['sicherung'], $p['config'], 0600)) {
             sp_log('Die Konfiguration trug kein Aktionstoken und wurde aus der Zweitschrift '
                 . 'wiederhergestellt: ' . $p['sicherung']
                 . ($rest !== '' && $rest !== '{}' && $rest !== '[]'
@@ -379,6 +464,20 @@ function sp_config($erzeugen = true)
         }
     }
     $vor = sp_vorgaben();
+    /* Ohne lesbare vorgaben.json (abgebrochene Installation, Pruefstand) gab
+     * es bis 0.11.15 einen Fatal Error: array_merge(null, ...) unter PHP 8.
+     * Der Dienst laeuft dann mit leeren Vorgaben weiter; hier ebenso, mit den
+     * Vorgaben der gemeinsamen Sprachausgabe fuer den tts-Block und den
+     * wenigen Schluesseln, die diese Datei ohne isset() liest. */
+    $vor += array('aktionstoken' => '', 'miniserver_url' => '', 'antwortweg' => 'beide',
+                  'mqtt_topic' => 'sprachsteuerung', 'satelliten' => array());
+    if (!isset($vor['tts']) || !is_array($vor['tts'])) {
+        $vor['tts'] = ansage_vorgaben('aus') + array('stimme' => '', 'cc_praefix' => 'chromecast4lox',
+                                                     'cc_ziel' => 'alle');
+    }
+    if (!isset($vor['ruhe']) || !is_array($vor['ruhe'])) {
+        $vor['ruhe'] = array('ein' => 0, 'von' => '22:00', 'bis' => '07:00');
+    }
     $cfg = array_merge($vor, sp_json_lesen($p['config']));
 
     // array_merge ersetzt einen verschachtelten Block vollstaendig. Steht in
@@ -395,12 +494,16 @@ function sp_config($erzeugen = true)
     if (is_array(isset($cfg['tts']) ? $cfg['tts'] : null) && !array_key_exists('mode', $cfg['tts'])) {
         $tts['mode'] = 'musicserver';
     }
-    if (!in_array($tts['mode'], sp_auswahl('tts_mode'), true)) {
+    $sp_modi = sp_auswahl('tts_mode');
+    if (!$sp_modi) { $sp_modi = ansage_modi(); }     // ohne vorgaben.json: die Liste der Sprachausgabe
+    if (!in_array($tts['mode'], $sp_modi, true)) {
         $tts['mode'] = 'musicserver';
     }
     $tts['ip'] = trim((string) $tts['ip']);
-    $tts['port'] = max(1, min(65535, (int) $tts['port']));
-    $tts['volume'] = max(1, min(100, (int) $tts['volume']));
+    // Nicht numerisch heisst Vorgabe, nicht Untergrenze: (int) 'abc' war 0 und
+    // wurde zu Port 1, der Dienst nahm 7091 (sp_zahl_in_grenzen()).
+    $tts['port'] = sp_zahl_in_grenzen($tts['port'], 1, 65535, $vor['tts']['port']);
+    $tts['volume'] = sp_zahl_in_grenzen($tts['volume'], 1, 100, $vor['tts']['volume']);
     $tts['zones'] = trim((string) $tts['zones']) !== '' ? trim((string) $tts['zones']) : '1';
     $tts['lang'] = preg_replace('/[^a-z]/', '', strtolower((string) $tts['lang'])) ?: 'de';
     $tts['template'] = trim((string) $tts['template']);
@@ -443,15 +546,50 @@ function sp_config($erzeugen = true)
     }
     $cfg['ruhe'] = $ruhe;
 
+    /* Bis 0.11.15 stand hier isset(): ein gespeichertes null blieb NULL
+     * (wartezeit null - sp_befehl_absetzen() wartete 0 s und meldete sofort
+     * "2"), und (int) "abc" ergab die Untergrenze. Jetzt wie
+     * _zahl_in_grenzen() im Dienst: fehlt, leer, null oder nicht ganzzahlig
+     * heisst Vorgabe; eine Zahl wird in die Grenzen gelegt. */
     foreach (sp_grenzen() as $feld => $g) {
-        if (!isset($cfg[$feld])) { continue; }
-        $cfg[$feld] = max((int) $g[0], min((int) $g[1], (int) $cfg[$feld]));
+        if (!is_array($g) || count($g) < 2) { continue; }
+        $vorgabe = array_key_exists($feld, $vor) ? $vor[$feld] : $g[0];
+        $wert = array_key_exists($feld, $cfg) ? $cfg[$feld] : $vorgabe;
+        $cfg[$feld] = sp_zahl_in_grenzen($wert, $g[0], $g[1], $vorgabe);
     }
 
-    if (!in_array($cfg['antwortweg'], sp_auswahl('antwortweg'), true)) {
+    if (!in_array($cfg['antwortweg'], sp_auswahl('antwortweg') ?: array('satellit', 'loxone', 'beide'), true)) {
         $cfg['antwortweg'] = 'beide';
     }
     return $cfg;
+}
+
+/**
+ * Eine ganze Zahl lesen, wie Pythons int(): Zahl, Wahrheitswert oder Text aus
+ * Ziffern mit Vorzeichen und Leerraum am Rand. Alles andere (auch "12.5",
+ * "", null, Listen) ist keine Zahl - Rueckgabe null.
+ */
+function sp_ganzzahl($w)
+{
+    if (is_int($w)) { return $w; }
+    if (is_bool($w)) { return $w ? 1 : 0; }
+    if (is_float($w)) { return is_finite($w) ? (int) $w : null; }
+    if (is_string($w) && preg_match('/^\s*[+-]?[0-9]{1,18}\s*\z/', $w)) { return (int) trim($w); }
+    return null;
+}
+
+/**
+ * Ein Wert in Grenzen - dieselbe Rechnung wie _zahl_in_grenzen() im Dienst:
+ * keine Zahl heisst Vorgabe, eine Zahl wird in [klein, gross] gelegt. Auch
+ * die Vorgabe wird begrenzt (sie steht in einer Datei, die man verbiegen
+ * kann); ist sie selbst keine Zahl, gilt die Untergrenze.
+ */
+function sp_zahl_in_grenzen($wert, $klein, $gross, $vorgabe)
+{
+    $z = sp_ganzzahl($wert);
+    if ($z === null) { $z = sp_ganzzahl($vorgabe); }
+    if ($z === null) { $z = (int) $klein; }
+    return max((int) $klein, min((int) $gross, $z));
 }
 
 /**
@@ -530,9 +668,9 @@ function sp_saetze($erzeugen = true)
         $alt = is_file($p['saetze']) ? (string) @file_get_contents($p['saetze']) : '';
         $rest = preg_replace('/\s+/', '', $alt);
         if ($rest !== '' && $rest !== '{}' && $rest !== '[]') {
-            @copy($p['saetze'], $p['saetze'] . '.kaputt');
+            sp_datei_kopieren_atomar($p['saetze'], $p['saetze'] . '.kaputt', 0600);
         }
-        if (@copy($p['sicherung_saetze'], $p['saetze'])) {
+        if (sp_datei_kopieren_atomar($p['sicherung_saetze'], $p['saetze'], 0600)) {
             sp_log('Die Satzdatei trug keine Regeln und keine Ziele - aus der Zweitschrift '
                 . 'wiederhergestellt: ' . $p['sicherung_saetze']
                 . ($rest !== '' && $rest !== '{}' && $rest !== '[]'
@@ -583,9 +721,10 @@ function sp_zweitschrift_ziehen($quelle, $ziel, array $neu, array $felder, $rech
             . 'traegt nicht, was dort steht (' . implode(', ', $fehlt) . '): ' . $ziel);
         return false;
     }
-    @copy($quelle, $ziel);
-    if ($rechte !== null) { @chmod($ziel, $rechte); }
-    return true;
+    // Atomar (sp_datei_kopieren_atomar()); ohne ausdrueckliche Rechte 0600 -
+    // auch die Satzdatei braucht kein Lesen fuer alle, Dienst und Oberflaeche
+    // laufen unter demselben Benutzer.
+    return sp_datei_kopieren_atomar($quelle, $ziel, $rechte !== null ? $rechte : 0600);
 }
 
 function sp_saetze_speichern($saetze)
@@ -643,19 +782,76 @@ function sp_token()
  * Dieses Plugin hat genau diese beiden Knoepfe. Bis 0.9.11 hatte es das
  * Merkmal nicht.
  *
- * Abgeleitet statt gespeichert: es gibt damit keinen zweiten Wert, der
- * verlorengehen kann, und es wechselt automatisch mit, wenn das Aktionstoken
- * neu gewuerfelt wird.
+ * Abgeleitet statt gespeichert: es wechselt automatisch mit, wenn das
+ * Aktionstoken neu gewuerfelt wird.
+ *
+ * SEIT 0.12.0 mit eigenem Geheimnis. Bis 0.11.15 war der Schluessel des HMAC
+ * allein das Aktionstoken - und das steht im Heimnetz im Klartext in jedem
+ * Aufruf des Miniservers (http, kein TLS). Wer es mitlas, konnte das Merkmal
+ * selbst ausrechnen. Jetzt ist der Schluessel ein Zufallswert, der nur auf
+ * dem LoxBerry liegt (data/<ordner>/formgeheimnis, 0600); das Aktionstoken
+ * wird eingemischt, damit "Token neu" weiterhin alle offenen Formulare
+ * ungueltig macht.
  */
 function sp_formtoken()
 {
     $cfg = sp_config(false);
-    $t = trim((string) $cfg['aktionstoken']);
+    $t = trim((string) (isset($cfg['aktionstoken']) ? $cfg['aktionstoken'] : ''));
     // Fail closed: ohne Aktionstoken gibt es kein Merkmal. Ein aus dem
     // Leerstring abgeleiteter Wert waere fuer jeden ausrechenbar und damit
     // kein Schutz, sondern die Behauptung eines Schutzes.
     if ($t === '') { return ''; }
-    return hash_hmac('sha256', 'formular-v1', $t);
+    // Ebenso ohne Geheimnis: lieber kein Formular annehmen als eines mit
+    // einem Merkmal, das jeder ausrechnen kann.
+    $g = sp_formgeheimnis();
+    if ($g === '') { return ''; }
+    return hash_hmac('sha256', 'formular-v2|' . $t, $g);
+}
+
+/**
+ * Das Geheimnis fuer sp_formtoken(): 32 Zufallsbytes als Hex, angelegt beim
+ * ersten Bedarf. Atomar: die Zwischendatei bekommt 0600 und den Inhalt,
+ * bevor sie per link() unter dem endgueltigen Namen erscheint - link()
+ * scheitert, wenn ein zweiter Seitenaufruf schneller war, und dann gilt
+ * dessen Geheimnis. Ein unbrauchbarer Inhalt (kein 64-stelliges Hex) wird
+ * ersetzt; das macht nur offene Formulare ungueltig.
+ * Rueckgabe: das Geheimnis oder '' (fail closed).
+ */
+function sp_formgeheimnis()
+{
+    $datei = sp_paths()['datadir'] . '/formgeheimnis';
+    $lesen = function () use ($datei) {
+        if (!is_file($datei)) { return ''; }
+        $g = trim((string) @file_get_contents($datei));
+        return preg_match('/^[0-9a-f]{64}\z/', $g) ? $g : '';
+    };
+    $g = $lesen();
+    if ($g !== '') { return $g; }
+    $ordner = dirname($datei);
+    if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) { return ''; }
+    try {
+        $neu = bin2hex(random_bytes(32));
+    } catch (Throwable $e) {
+        return '';
+    }
+    $tmp = $datei . '.tmp.' . getmypid();
+    if (@file_put_contents($tmp, '') === false) { return ''; }
+    @chmod($tmp, 0600);
+    if (@file_put_contents($tmp, $neu) !== strlen($neu)) { @unlink($tmp); return ''; }
+    $vorhanden = is_file($datei);
+    if (!$vorhanden && function_exists('link') && @link($tmp, $datei)) {
+        @unlink($tmp);
+    } elseif ($vorhanden || is_file($datei)) {
+        // Schon da: entweder der andere Aufruf war schneller (dann gilt
+        // dessen Wert) oder der Inhalt ist unbrauchbar (dann ersetzen).
+        if ($lesen() === '') { @rename($tmp, $datei); } else { @unlink($tmp); }
+    } else {
+        // Ein Dateisystem ohne harte Verweise: rename ist ebenfalls atomar,
+        // nur ohne "nicht ueberschreiben".
+        @rename($tmp, $datei);
+    }
+    @unlink($tmp);
+    return $lesen();
 }
 
 /* ---------------- Zwischenspeicher ---------------- */
@@ -691,11 +887,17 @@ function sp_log($text)
         @mkdir($p['logdir'], 0775, true);
     }
     clearstatcache(true, $p['log']);
-    if (is_file($p['log']) && filesize($p['log']) > 512000) {
-        // Rotation: die letzten 400 Zeilen behalten. sp_log_ende liefert sie
-        // neueste zuerst - zum Zurueckschreiben wieder umdrehen.
-        $rest = array_reverse(sp_log_ende($p['log'], 400));
-        @file_put_contents($p['log'], implode("\n", $rest) . "\n");
+    /* Bis 0.11.15 kuerzte PHP die Datei hier an Ort und Stelle auf die
+     * letzten 400 Zeilen. Dieselbe Datei rotiert aber der Dienst
+     * (WachsameRotation, maxBytes=512000, backupCount=1): schrieb er zwischen
+     * dem Lesen und dem Zurueckschreiben, war seine Zeile weg, und nach dem
+     * Kuerzen stand sein Schreibzeiger hinter dem Dateiende.
+     * Jetzt rotiert, solange der Dienst laeuft, nur der Dienst. Laeuft er
+     * nicht, benennt PHP die Datei genauso um wie er (nach .1, die alte .1
+     * faellt weg) - es geht keine Zeile verloren, und die Datei waechst
+     * auch ohne Dienst nicht ohne Grenze. */
+    if (is_file($p['log']) && filesize($p['log']) > 512000 && sp_dienst_pid() === 0) {
+        @rename($p['log'], $p['log'] . '.1');
     }
     @file_put_contents($p['log'], '[' . date('Y-m-d H:i:s') . '] ' . $text . "\n", FILE_APPEND);
 }
@@ -744,10 +946,17 @@ function sp_url_ok($url)
 function sp_url_maskiert($url)
 {
     $url = (string) $url;
-    return preg_replace_callback('#^(https?://)([^:@/]+):([^@/]*)@#',
+    /* Die Anmeldung reicht bis zum LETZTEN @ vor dem ersten / (bzw. ? oder #)
+     * nach dem Schema - so trennt auch parse_url(). Bis 0.11.15 endete das
+     * Muster am ERSTEN @: aus admin:ge@heim@192.168.1.5 wurde
+     * "admin:********(2 Zeichen)@heim@192.168.1.5" - der Rest des Kennworts
+     * stand sichtbar da. Der Benutzer endet am ersten Doppelpunkt. */
+    return preg_replace_callback('#^(https?://)([^/?\#]*)@#i',
         function ($t) {
-            return $t[1] . $t[2] . ':' . str_repeat('*', 8)
-                 . '(' . sp_zeichen($t[3]) . ' Zeichen)@';
+            $p = strpos($t[2], ':');
+            if ($p === false) { return $t[0]; }
+            return $t[1] . substr($t[2], 0, $p) . ':' . str_repeat('*', 8)
+                 . '(' . sprintf(sp_t('LIB012.ZEICHEN'), sp_zeichen(substr($t[2], $p + 1))) . ')@';
         }, $url);
 }
 
@@ -922,27 +1131,33 @@ function sp_archiv_verweigert()
 {
     $p = sp_paths();
     if ($p['home'] !== '') { return ''; }
-    return 'Diese Oberflaeche liegt nicht in einer LoxBerry-Installation'
-        . (!empty($p['archiv']) ? ' (die Wurzel ' . $p['archiv'] . ' wurde gefunden, diese Datei liegt aber nicht darin)' : '')
-        . ' - ausgepacktes Archiv oder Pruefordner. Es wurde nichts geschaltet.';
+    return !empty($p['archiv']) ? sprintf(sp_t('LIB012.ARCHIV_WURZEL'), $p['archiv']) : sp_t('LIB012.ARCHIV');
 }
 
 /** $befehl ist 'start', 'stop' oder 'restart'. Rueckgabe: array(ok, Ausgabe) */
 function sp_dienst($befehl)
 {
     if (!in_array($befehl, array('start', 'stop', 'restart'), true)) {
-        return array(0, 'Unbekannter Befehl.');
+        return array(0, sp_t('LIB012.DIENST_BEFEHL'));
     }
     $sp_nein = sp_archiv_verweigert();
     if ($sp_nein !== '') { return array(0, $sp_nein); }
     $skript = sp_paths()['bindir'] . '/dienst.sh';
     if (!is_file($skript)) {
-        return array(0, 'dienst.sh nicht gefunden: ' . $skript);
+        return array(0, sprintf(sp_t('LIB012.DIENST_SH_FEHLT'), $skript));
     }
-    $ausgabe = array();
-    $code = 0;
-    @exec(escapeshellcmd($skript) . ' ' . escapeshellarg($befehl) . ' 2>&1', $ausgabe, $code);
-    return array($code === 0 ? 1 : 0, implode("\n", $ausgabe));
+    /* Argumentweise und mit Zeitgrenze statt exec(escapeshellcmd(...)):
+     * escapeshellcmd laesst Leerzeichen im Pfad stehen, und ein haengendes
+     * dienst.sh hielt die Seite fest. --foreground: dienst.sh startet den
+     * Dienst mit nohup ohne eigene Sitzung - ohne den Schalter traefe ein
+     * Zeitablauf die ganze Prozessgruppe und damit den frisch gestarteten
+     * Dienst. stop wartet in dienst.sh hoechstens rund 20 s. */
+    list($code, $aus, $err) = sp_prozess_ruf(array($skript, $befehl), 60, true);
+    $text = trim($aus . ($err !== '' ? "\n" . $err : ''));
+    if (sp_ct_zeitablauf($code)) {
+        $text = trim($text . "\n" . sprintf(sp_t('LIB012.ZEITABLAUF'), 'dienst.sh ' . $befehl, 60));
+    }
+    return array($code === 0 ? 1 : 0, $text);
 }
 
 /* ---------------- Ruhezeit ----------------
@@ -981,7 +1196,7 @@ function sp_ruhe_aktiv($cfg = null, $jetzt = null)
     $jetzt = $jetzt === null ? time() : $jetzt;
     $nun = (int) date('H', $jetzt) * 60 + (int) date('i', $jetzt);
     $drin = $von < $bis ? ($nun >= $von && $nun < $bis) : ($nun >= $von || $nun < $bis);
-    return $drin ? array(1, 'Ruhezeit ' . $r['von'] . ' bis ' . $r['bis']) : array(0, '');
+    return $drin ? array(1, sprintf(sp_t('LIB012.RUHEZEIT'), $r['von'], $r['bis'])) : array(0, '');
 }
 
 /* ---------------- Befehlswarteschlange ----------------
@@ -1026,13 +1241,12 @@ function sp_befehl_absetzen($befehl, $wartezeit = null)
      * verspaetet ausgefuehrt. Bei einer Sprachausgabe ist das kein
      * Schoenheitsfehler, sondern eine Stimme aus dem Nichts. */
     if (sp_dienst_pid() === 0) {
-        return array(0, 'Der Dienst laeuft nicht - der Befehl wurde nicht eingereiht. '
-                      . 'Im Reiter Einstellungen starten.');
+        return array(0, sp_t('LIB012.BEFEHL_DIENST_AUS'));
     }
 
     $ordner = $p['datadir'] . '/befehle';
     if (!is_dir($ordner) && !@mkdir($ordner, 0775, true) && !is_dir($ordner)) {
-        return array(0, 'Der Ordner fuer die Warteschlange liess sich nicht anlegen: ' . $ordner);
+        return array(0, sprintf(sp_t('LIB012.BEFEHL_ORDNER'), $ordner));
     }
     $kennung = bin2hex(random_bytes(8));
     $datei = $ordner . '/' . $kennung . '.json';
@@ -1046,11 +1260,11 @@ function sp_befehl_absetzen($befehl, $wartezeit = null)
      * sp_json_schreiben(). */
     $sp_js = json_encode($befehl);
     if ($sp_js === false) {
-        return array(0, 'Der Befehl liess sich nicht als JSON darstellen (ungueltiges UTF-8).');
+        return array(0, sp_t('LIB012.BEFEHL_JSON'));
     }
     if (@file_put_contents($tmp, $sp_js) !== strlen($sp_js) || !@rename($tmp, $datei)) {
         @unlink($tmp);
-        return array(0, 'Der Befehl liess sich nicht ablegen: ' . $datei);
+        return array(0, sprintf(sp_t('LIB012.BEFEHL_ABLEGEN'), $datei));
     }
     $antwort = $p['datadir'] . '/antworten/' . $kennung . '.json';
     for ($i = 0; $i < $wartezeit * 10; $i++) {
@@ -1067,9 +1281,7 @@ function sp_befehl_absetzen($befehl, $wartezeit = null)
         }
         usleep(100000);
     }
-    return array(2, 'Eingereiht, aber der Dienst hat innerhalb von ' . $wartezeit . ' s nicht geantwortet. '
-                  . 'Er arbeitet den Befehl zu Ende - das Ergebnis steht im Protokoll.',
-                 array());
+    return array(2, sprintf(sp_t('LIB012.BEFEHL_OHNE_ANTWORT'), $wartezeit), array());
 }
 
 /* ---------------- MQTT-Gateway des LoxBerry ----------------
@@ -1092,35 +1304,90 @@ function sp_mqtt_zustand()
         return $leer;
     }
     $gen = sp_json_lesen($p['home'] . '/config/system/general.json');
-    $m = array();
-    if (isset($gen['Mqtt']) && is_array($gen['Mqtt'])) {
-        $m = $gen['Mqtt'];
-    } elseif (isset($gen['mqtt']) && is_array($gen['mqtt'])) {
-        $m = $gen['mqtt'];
-    }
+    // Abschnitt und Schluessel ohne Ruecksicht auf die Schreibweise: in den
+    // Anlagen stehen Mqtt/mqtt und Gatewayautostart/GatewayAutostart.
+    $m = sp_schluessel_klein(sp_feld_ohne_fall($gen, 'mqtt'));
     if (!$m) {
         return $leer;
     }
-    $hol = function ($gross, $klein) use ($m) {
-        if (isset($m[$gross])) {
-            return $m[$gross];
-        }
-        return isset($m[$klein]) ? $m[$klein] : '';
+    $hol = function ($name) use ($m) {
+        $k = strtolower($name);
+        return (isset($m[$k]) && is_scalar($m[$k])) ? $m[$k] : '';
     };
-    return array(
+    $erg = array(
         'gefunden'   => 1,
-        'autostart'  => in_array((string) $hol('Gatewayautostart', 'gatewayautostart'), array('1', 'true'), true) ? 1 : 0,
-        'udpport'    => (int) $hol('Udpinport', 'udpinport'),
+        'autostart'  => sp_wahr($hol('Gatewayautostart')) ? 1 : 0,
+        'udpport'    => (int) $hol('Udpinport'),
         // 0 heisst 'nicht lesbar' und NICHT '1'. Wer hier auf 1 vorbelegt,
         // behauptet fuer die Haelfte der Anlagen etwas Falsches - siehe
         // sp_mqtt_gateway_info().
-        'fassung'    => (int) $hol('Gatewayversion', 'gatewayversion'),
-        'broker'     => (string) $hol('Brokerhost', 'brokerhost'),
-        'brokerport' => (string) $hol('Brokerport', 'brokerport'),
-        'user'       => (string) $hol('Brokeruser', 'brokeruser'),
-        'pw'         => (string) $hol('Brokerpass', 'brokerpass'),
-        'lokal'      => in_array((string) $hol('Uselocalbroker', 'uselocalbroker'), array('1', 'true'), true) ? 1 : 0,
+        'fassung'    => (int) $hol('Gatewayversion'),
+        'broker'     => (string) $hol('Brokerhost'),
+        'brokerport' => (string) $hol('Brokerport'),
+        'user'       => (string) $hol('Brokeruser'),
+        'pw'         => (string) $hol('Brokerpass'),
+        'lokal'      => sp_wahr($hol('Uselocalbroker')) ? 1 : 0,
     );
+    /* Ist das SDK von LoxBerry geladen (container_vorgang.php laedt es),
+     * gelten dessen Zugangsdaten: mqtt_connectiondetails() kennt die
+     * Rueckfaelle des Systems. Selbst geladen wird es hier nicht -
+     * loxberry_system.php legt beim Laden Konstanten an und wirft ohne
+     * lesbare general.json eine Ausnahme, und diese Funktion laeuft auch im
+     * unangemeldeten Endpunkt. */
+    if (function_exists('mqtt_connectiondetails')) {
+        try {
+            $c = mqtt_connectiondetails();
+            if (is_array($c)) {
+                foreach (array('brokerhost' => 'broker', 'brokerport' => 'brokerport',
+                               'brokeruser' => 'user', 'brokerpass' => 'pw') as $q => $z) {
+                    if (isset($c[$q]) && is_scalar($c[$q]) && (string) $c[$q] !== '') { $erg[$z] = (string) $c[$q]; }
+                }
+                if (isset($c['udpinport']) && (int) $c['udpinport'] > 0) { $erg['udpport'] = (int) $c['udpinport']; }
+            }
+        } catch (Throwable $e) {
+            // Dann gilt, was oben aus der general.json gelesen wurde.
+        }
+    }
+    return $erg;
+}
+
+/**
+ * Ein Wahrheitswert, wie LoxBerry ihn liest (is_enabled()): true, 1, '1',
+ * 'true', 'yes', 'on', 'enabled' ... - Gross- und Kleinschreibung egal.
+ * Bis 0.11.15 galten nur '1' und 'true'; ein 'True' oder ein JSON-true
+ * (Ausgabe '1', das ging) bzw. 'on' hiess "Gateway aus".
+ */
+function sp_wahr($w)
+{
+    if (is_bool($w)) { return $w; }
+    if (is_int($w) || is_float($w)) { return $w != 0; }
+    if (!is_string($w)) { return false; }
+    return in_array(strtolower(trim($w)), array('1', 'true', 'yes', 'on', 'enabled', 'enable',
+                                                'check', 'checked', 'select', 'selected'), true);
+}
+
+/** Ein Feld eines Arrays ohne Ruecksicht auf die Schreibweise des Schluessels; sonst array(). */
+function sp_feld_ohne_fall($d, $name)
+{
+    if (!is_array($d)) { return array(); }
+    foreach ($d as $k => $v) {
+        if (is_string($k) && strtolower($k) === strtolower($name)) {
+            return is_array($v) ? $v : array();
+        }
+    }
+    return array();
+}
+
+/** Die Schluessel eines Arrays klein geschrieben (bei Doppelten gewinnt der erste). */
+function sp_schluessel_klein($d)
+{
+    $aus = array();
+    if (!is_array($d)) { return $aus; }
+    foreach ($d as $k => $v) {
+        $kk = strtolower((string) $k);
+        if (!array_key_exists($kk, $aus)) { $aus[$kk] = $v; }
+    }
+    return $aus;
 }
 
 /**
@@ -1236,7 +1503,11 @@ function sp_statuszeile()
 function sp_vorlage()
 {
     $p = sp_paths();
-    $host = sp_hostname();
+    // Die LAN-Adresse des LoxBerry, nicht der Name aus der Adresszeile des
+    // Browsers: wer die Oberflaeche ueber "loxberry" oder einen Tunnel
+    // aufruft, bekam bis 0.11.15 eine Adresse in die Vorlage, die der
+    // Miniserver nicht aufloesen kann (sp_lb_adresse()).
+    $basis_url = sp_lb_adresse();
     $token = sp_token();
     $cmds = array();
     foreach (sp_status_felder() as $feld => $info) {
@@ -1252,7 +1523,7 @@ function sp_vorlage()
     }
     return array('VI_Sprachsteuerung.xml', sp_xml_virtual_in_http(array(
         'title'   => 'Sprachsteuerung lokal',
-        'address' => 'http://' . $host . '/plugins/' . $p['plugin']
+        'address' => $basis_url . '/plugins/' . $p['plugin']
                    . '/index.php?token=' . $token . '&aktion=status',
         'polling' => '60',
         'comment' => 'Erzeugt vom LoxBerry-Plugin Sprachsteuerung lokal (' . date('d.m.Y') . ')',
@@ -1271,7 +1542,6 @@ function sp_vorlage()
 function sp_vorlage_ausgang()
 {
     $p = sp_paths();
-    $host = sp_hostname();
     $token = sp_token();
     $basis = '/plugins/' . $p['plugin'] . '/index.php?token=' . $token;
     $cmds = array(
@@ -1294,47 +1564,147 @@ function sp_vorlage_ausgang()
     );
     return array('VQ_Sprachsteuerung.xml', sp_xml_virtual_out(array(
         'title'   => 'Sprachsteuerung lokal - Befehle',
-        'address' => 'http://' . $host,
+        'address' => sp_lb_adresse(),     // wie sp_vorlage()
         'comment' => 'Erzeugt vom LoxBerry-Plugin Sprachsteuerung lokal (' . date('d.m.Y') . ')',
     ), $cmds));
 }
 
 /**
- * Vorlage mit einem virtuellen Texteingang JE ZIEL.
+ * Vorlage fuer die Ziele - passend zu dem, was das MQTT-Gateway von LoxBerry
+ * tatsaechlich an den Miniserver schickt.
  *
- * Genau der Fall, den der Hausstandard meint: bei drei Zielen tippt man das
- * noch ab, bei dreissig nicht mehr. Die Themen stehen in der Satzdatei, also
- * kann das Plugin die Datei bauen.
+ * BIS 0.11.15 war das ein VirtualInHttp mit leerer Adresse und je Ziel einem
+ * Suchtext "\i<praefix>/<thema>/aktion=\i\v". Ein VirtualInHttp FRAGT aber
+ * selbst eine Adresse ab - ohne Adresse fragt er nichts, und das Gateway
+ * schreibt nie in einen solchen Baustein. Die Vorlage lieferte also nie einen
+ * Wert. Dazu kam ein Thema mit Schraegstrichen am Rand ("/wz/licht/" ergab
+ * "sprachsteuerung//wz/licht//aktion") und bei einem Ziel, dessen Thema kein
+ * Text war, das Wort "Array".
+ *
+ * WAS DAS GATEWAY TUT - nachgelesen im Quelltext von LoxBerry (Zweig master,
+ * gelesen am 03.10.2026):
+ *   - Gateway V1, sbin/mqttgateway.pl, sub received():
+ *       HTTP (Main.use_http): Name = Thema mit "/" und "%" durch "_" ersetzt,
+ *       gesendet als GET /dev/sps/io/<Name>/<Wert>
+ *       (LoxBerry::MQTTGateway::IO::mshttp_send2) - das trifft im
+ *       Miniserver einen virtuellen Eingang bzw. virtuellen TEXTeingang
+ *       genau dieses Namens. Solche Eingaenge lassen sich nicht als Vorlage
+ *       einspielen; ihre Namen stehen deshalb in den Kommentaren.
+ *       UDP (Main.use_udp): Datagramm "MQTT: <Thema>=<Wert> " an
+ *       Main.udpport (Vorgabe 11883), Thema UNVERAENDERT mit "/"
+ *       (LoxBerry::IO::msudp_send, Praefix "MQTT", Trenner "=").
+ *   - Gateway V2, sbin/mqtt_gateway.py: build_vi_name() (zusaetzlich " "
+ *       durch "_"), build_udp_name() = Thema unveraendert, send_udp_bundled()
+ *       buendelt mehrere Paare in EIN Datagramm "MQTT: a=1 b=2 " (das
+ *       Praefix steht nur am Anfang); Vorgabe-Port 7777; weitergeleitet wird
+ *       nur ein abonniertes Thema.
+ *   - Umwandlung: convert_booleans macht aus true/on/yes/enabled ... "1",
+ *       aus false/off/no ... "0"; "ein"/"aus" bleiben Text. Eigene
+ *       Umwandlungen (mqtt_conversions) gelten fuer ALLE Themen aller
+ *       Plugins - dieses Plugin legt deshalb keine an.
+ *   - Zwischenspeicher: ohne Eintrag unter "Noncached" (V1: $cfg->{Noncached},
+ *       V2: Abonnement "Noncached") schickt das Gateway nur GEAENDERTE Werte
+ *       (msudp_send_mem/mshttp_send_mem2) - "ein" zweimal hintereinander
+ *       kommt einmal an. Der Kopf der Vorlage sagt das.
+ *
+ * DARAUS: ein VirtualInUdp. Die Aktion ist Text, und ein UDP-Befehl liest
+ * mit \v nur Zahlen - deshalb je Ziel und je Aktion aus den Regeln ein
+ * DIGITALER Befehl, der anspricht, wenn "<Thema>/aktion=<Aktion>" ankommt,
+ * und je Ziel ein analoger fuer "<Thema>/wert=\v". Ohne das Praefix
+ * "MQTT: ", weil V2 es nur vor das erste Paar eines Datagramms setzt.
+ * Grenze: Loxone sucht den Text als Teilstueck; eine Aktion, die mit einer
+ * anderen beginnt ("ein" in "einschalten"), spricht bei beiden an.
+ * Aufbau und Attributfolge wie LoxBerry::LoxoneTemplateBuilder (VirtualInUdp)
+ * - eine Ausfuhr aus Loxone Config fuer UDP lag zum Vergleich nicht vor, das
+ * Info-Element der HTTP-Vorlagen steht deshalb hier nicht.
+ * NICHT am Geraet geprueft: Import in Loxone Config und Empfang.
  */
 function sp_vorlage_ziele()
 {
-    $p = sp_paths();
     $cfg = sp_config();
     $saetze = sp_saetze();
     $praefix = trim((string) $cfg['mqtt_topic'], '/');
+    if ($praefix === '') { $praefix = 'sprachsteuerung'; }
     $ziele = isset($saetze['ziele']) && is_array($saetze['ziele']) ? $saetze['ziele'] : array();
     if (!$ziele) { return array('', ''); }
+    // Die Aktionen kommen aus den Regeln: {ziel} steht in den Mustern, jede
+    // Regel kann also jedes Ziel treffen.
+    $aktionen = array();
+    foreach ((isset($saetze['regeln']) && is_array($saetze['regeln']) ? $saetze['regeln'] : array()) as $r) {
+        $a = (is_array($r) && isset($r['aktion']) && is_scalar($r['aktion'])) ? trim((string) $r['aktion']) : '';
+        if ($a !== '' && preg_match('/^[A-Za-z0-9_\-]{1,40}\z/', $a) && !in_array($a, $aktionen, true)) {
+            $aktionen[] = $a;
+        }
+    }
+    $aktionen = array_slice($aktionen, 0, 12);
     $cmds = array();
+    $namen = array();
     foreach ($ziele as $k => $z) {
-        $name = is_array($z) && isset($z['name']) ? $z['name'] : $k;
-        $thema = is_array($z) ? (isset($z['thema']) ? $z['thema'] : $k) : (string) $z;
-        // Der Titel ist fuer Menschen, der Suchtext fuer die Maschine.
+        $thema = sp_ziel_thema($k, $z);
+        if ($thema === '') { continue; }
+        $name = (is_array($z) && isset($z['name']) && is_scalar($z['name'])) ? (string) $z['name'] : (string) $k;
+        $t_aktion = $praefix . '/' . $thema . '/aktion';
+        $t_wert = $praefix . '/' . $thema . '/wert';
+        $vi_aktion = str_replace(array('/', '%', ' '), '_', $t_aktion);
+        $vi_wert = str_replace(array('/', '%', ' '), '_', $t_wert);
+        $namen[] = $vi_aktion;
+        $titel = 'SPR_' . strtoupper(trim(preg_replace('/[^A-Za-z0-9]+/', '_', (string) $k), '_'));
+        foreach ($aktionen as $a) {
+            $cmds[] = array(
+                'title'   => $titel . '_AKTION_' . strtoupper(preg_replace('/[^A-Za-z0-9]+/', '_', $a)),
+                'comment' => sprintf(sp_t('LIB012.VORLAGE_ZIEL_AKTION'), $name, $a, $t_aktion, $vi_aktion),
+                'check'   => $t_aktion . '=' . $a,
+                'analog'  => false,
+            );
+        }
         $cmds[] = array(
-            'title'   => 'SPR_' . strtoupper(preg_replace('/[^A-Za-z0-9]+/', '_', $k)),
-            'comment' => 'Aktion für ' . $name . ' - MQTT-Thema '
-                       . $praefix . '/' . $thema . '/aktion (ALS TEXT verwenden)',
-            'check'   => '\i' . $praefix . '/' . $thema . '/aktion=\i\v',
-            'unit'    => '<v.1>',
-            'min'     => 0, 'max' => 1,
+            'title'   => $titel . '_WERT',
+            'comment' => sprintf(sp_t('LIB012.VORLAGE_ZIEL_WERT'), $name, $t_wert, $vi_wert),
+            'check'   => $t_wert . '=\v',
+            'analog'  => true,
         );
     }
-    return array('VI_Sprachsteuerung_Ziele.xml', sp_xml_virtual_in_http(array(
+    if (!$cmds) { return array('', ''); }
+    $port = sp_mqtt_gateway_udpport();
+    return array('VIU_Sprachsteuerung_Ziele.xml', sp_xml_virtual_in_udp(array(
         'title'   => 'Sprachsteuerung lokal - Ziele',
         'address' => '',
-        'polling' => '60',
-        'comment' => 'Je Ziel ein Texteingang. Diese Bausteine werden über MQTT '
-                   . 'versorgt, nicht ueber die Adresse im Kopf.',
+        'port'    => $port,
+        'comment' => sprintf(sp_t('LIB012.VORLAGE_ZIELE_KOPF'), $port, $praefix,
+                             implode(', ', array_slice($namen, 0, 20)) . (count($namen) > 20 ? ', ...' : '')),
     ), $cmds));
+}
+
+/**
+ * Das Thema eines Ziels, wie es hinter dem Praefix steht: ohne Schraegstriche
+ * am Rand und ohne leere Ebenen; ein Thema, das kein Text ist, faellt auf
+ * den Schluessel zurueck ("Array" stand bis 0.11.15 in der Vorlage).
+ */
+function sp_ziel_thema($k, $z)
+{
+    $t = is_array($z) ? (isset($z['thema']) ? $z['thema'] : $k) : $z;
+    if (!is_scalar($t) || trim((string) $t, "/ \t") === '') { $t = $k; }
+    $teile = array_filter(explode('/', (string) $t), 'strlen');
+    return implode('/', $teile);
+}
+
+/**
+ * Der UDP-Port, an den das MQTT-Gateway den Miniserver beliefert:
+ * config/system/mqttgateway.json, Main.udpport. Ohne Eintrag die Vorgabe des
+ * Gateways - 11883 bei V1 (mqttgateway.pl, read_config), 7777 bei V2
+ * (mqtt_gateway.py, get_udp_out_port).
+ */
+function sp_mqtt_gateway_udpport()
+{
+    $p = sp_paths();
+    if ($p['home'] !== '') {
+        $g = sp_json_lesen($p['home'] . '/config/system/mqttgateway.json');
+        $m = sp_schluessel_klein(sp_feld_ohne_fall($g, 'main'));
+        $port = isset($m['udpport']) ? sp_ganzzahl($m['udpport']) : null;
+        if ($port !== null && $port >= 1 && $port <= 65535) { return $port; }
+    }
+    $info = sp_mqtt_gateway_info();
+    return $info['fassung'] >= 2 ? 7777 : 11883;
 }
 
 function sp_hostname()
@@ -1439,6 +1809,46 @@ function sp_xml_virtual_out($kopf, $cmds)
     return $o;
 }
 
+/**
+ * Virtueller UDP-Eingang - Aufbau und Attributfolge wie
+ * LoxBerry::LoxoneTemplateBuilder::output() fuer 'VirtualInUdp' (LoxBerry,
+ * libs/perllib/LoxBerry/LoxoneTemplateBuilder.pm): Kopf Title, Comment,
+ * Address, Port; je Befehl Title, Comment, Address, Check, Signed, Analog,
+ * Source/Dest-Werte, DefVal, MinVal, MaxVal. Ein digitaler Befehl
+ * (Analog="false") spricht an, wenn sein Suchtext ankommt.
+ */
+function sp_xml_virtual_in_udp($kopf, $cmds)
+{
+    $crlf = "\r\n";
+    $o = '<?xml version="1.0" encoding="utf-8"?>' . $crlf;
+    $o .= '<VirtualInUdp ';
+    $o .= 'Title="' . sp_x($kopf['title']) . '" ';
+    $o .= 'Comment="' . sp_x(isset($kopf['comment']) ? $kopf['comment'] : '') . '" ';
+    $o .= 'Address="' . sp_x(isset($kopf['address']) ? $kopf['address'] : '') . '" ';
+    $o .= 'Port="' . sp_x(isset($kopf['port']) ? $kopf['port'] : '') . '" ';
+    $o .= '>' . $crlf;
+    foreach ($cmds as $c) {
+        $analog = !isset($c['analog']) || $c['analog'];
+        $o .= "\t" . '<VirtualInUdpCmd ';
+        $o .= 'Title="' . sp_x($c['title']) . '" ';
+        $o .= 'Comment="' . sp_x(isset($c['comment']) ? $c['comment'] : '') . '" ';
+        $o .= 'Address="" ';
+        $o .= 'Check="' . sp_x(isset($c['check']) ? $c['check'] : '') . '" ';
+        $o .= 'Signed="true" ';
+        $o .= 'Analog="' . ($analog ? 'true' : 'false') . '" ';
+        $o .= 'SourceValLow="0" ';
+        $o .= 'DestValLow="0" ';
+        $o .= 'SourceValHigh="100" ';
+        $o .= 'DestValHigh="100" ';
+        $o .= 'DefVal="0" ';
+        $o .= 'MinVal="-2147483647" ';
+        $o .= 'MaxVal="2147483647"';
+        $o .= '/>' . $crlf;
+    }
+    $o .= '</VirtualInUdp>' . $crlf;
+    return $o;
+}
+
 /** Ist die erzeugte Vorlage wohlgeformt? Gehoert in den Reiter Test. */
 function sp_vorlage_pruefen(&$geprueft = null, &$gesamt = null)
 {
@@ -1466,7 +1876,8 @@ function sp_vorlage_pruefen(&$geprueft = null, &$gesamt = null)
         if (substr_count($inhalt, "\r\n") < 3) {
             $befunde[] = $art . ': Zeilenenden sind nicht CRLF';
         }
-        if (strpos($inhalt, '<Info template') === false) {
+        // Die UDP-Vorlage traegt kein Info-Element (siehe sp_xml_virtual_in_udp()).
+        if (strpos($inhalt, '<VirtualInUdp') === false && strpos($inhalt, '<Info template') === false) {
             $befunde[] = $art . ': das Info-Element fehlt';
         }
     }
@@ -1552,25 +1963,25 @@ function sp_sicherung_lesen($roh, $nur_pruefen = false)
 {
     $roh = (string) $roh;
     if (strlen($roh) > 2 * 1024 * 1024) {
-        return array(0, 'Die Datei ist groesser als 2 MB - das ist keine Sicherung dieses Plugins.');
+        return array(0, sp_t('LIB012.SICH_GROSS'));
     }
     if (trim($roh) === '') {
-        return array(0, 'Die Datei ist leer.');
+        return array(0, sp_t('LIB012.SICH_LEER'));
     }
     $d = json_decode($roh, true);
     if (!is_array($d)) {
-        return array(0, 'Das ist kein gueltiges JSON: ' . json_last_error_msg());
+        return array(0, sprintf(sp_t('LIB012.SICH_KEIN_JSON'), json_last_error_msg()));
     }
     if (!isset($d['art']) || $d['art'] !== 'sprachsteuerung-sicherung') {
-        return array(0, 'Das ist keine Sicherung dieses Plugins (Kennzeichen fehlt).');
+        return array(0, sp_t('LIB012.SICH_KENNZEICHEN'));
     }
     if (!isset($d['config']) || !is_array($d['config'])
         || !isset($d['saetze']) || !is_array($d['saetze'])) {
-        return array(0, 'In der Sicherung fehlt die Konfiguration oder die Satzdatei.');
+        return array(0, sp_t('LIB012.SICH_TEILE'));
     }
     if (!isset($d['saetze']['regeln']) || !is_array($d['saetze']['regeln'])
         || !isset($d['saetze']['ziele']) || !is_array($d['saetze']['ziele'])) {
-        return array(0, 'Die Satzdatei in der Sicherung hat keine Listen regeln und ziele.');
+        return array(0, sp_t('LIB012.SICH_LISTEN'));
     }
     // Ansage-1: die neuen Felder werden geprueft wie im Formular - eine
     // Sicherung mit einem unbrauchbaren Wert wird benannt abgewiesen, nicht
@@ -1578,6 +1989,17 @@ function sp_sicherung_lesen($roh, $nur_pruefen = false)
     // der eigenen Sicherung, wenn kein brauchbares gespeichert war.
     if (isset($d['config']['tts']) && is_array($d['config']['tts'])) {
         $t = $d['config']['tts'];
+        /* Sprechtoken: eine Sicherung dieses Plugins traegt nie eines - weder
+         * fuer Alexa-NG noch fuer Chromecast 4 Lox NG. Seit 0.12.0 beide
+         * gleich ueber die gemeinsame Sprachausgabe (ansage_sicherung_mangel(),
+         * eine Quelle mit "Einstellungen sichern"); bis 0.11.15 wurde ein
+         * Alexa-Token in der Datei still uebergangen, ein Google-Token
+         * abgewiesen. Eine Liste oder Zahl an dieser Stelle ist ebenfalls
+         * kein leeres Token (Klasse 12). */
+        $sp_mangel = function_exists('ansage_sicherung_mangel') ? ansage_sicherung_mangel($t) : array();
+        if ($sp_mangel) {
+            return array(0, sprintf(sp_t('LIB012.SICH_TOKEN'), implode(', ', $sp_mangel)));
+        }
         $falsch = array();
         if (array_key_exists('cc_praefix', $t) && !sp_cc_praefix_ok($t['cc_praefix'])) { $falsch[] = 'tts.cc_praefix'; }
         if (array_key_exists('cc_ziel', $t) && $t['cc_ziel'] !== '' && !sp_cc_ziel_ok($t['cc_ziel'])) { $falsch[] = 'tts.cc_ziel'; }
@@ -1586,23 +2008,10 @@ function sp_sicherung_lesen($roh, $nur_pruefen = false)
             && !(is_int($t['alexa_laut']) && $t['alexa_laut'] >= -1 && $t['alexa_laut'] <= 100)) {
             $falsch[] = 'tts.alexa_laut';
         }
-        // Ansage-3: eine Sicherung traegt nie ein Sprechtoken fuer Chromecast
-        // 4 Lox NG - eine mit Token wird abgewiesen, nicht still uebergangen.
-        // Kein Text (Liste, Zahl - Klasse 12): unten als unbrauchbarer Wert.
-        if (array_key_exists('google_token', $t) && is_string($t['google_token']) && $t['google_token'] !== '') {
-            return array(0, 'Die Sicherung traegt ein Sprechtoken fuer Chromecast 4 Lox NG '
-                          . '(tts.google_token) - eine Sicherung dieses Plugins traegt nie eines. '
-                          . 'Es wurde nichts eingespielt.');
-        }
         $falsch = array_merge($falsch, sp_google_felder_falsch($t, true));
         if ($falsch) {
-            return array(0, 'Die Sicherung traegt unbrauchbare Werte (' . implode(', ', $falsch)
-                          . '). Es wurde nichts eingespielt.');
+            return array(0, sprintf(sp_t('LIB012.SICH_WERTE'), implode(', ', $falsch)));
         }
-    }
-    // X-3: bis hierher geprueft, nichts geschrieben.
-    if ($nur_pruefen) {
-        return array(1, '');
     }
     // Das laufende Token und die Miniserver-Adresse BLEIBEN - sie stehen
     // nicht in der Sicherung, und ein Einspielen darf die Adressen im
@@ -1611,34 +2020,86 @@ function sp_sicherung_lesen($roh, $nur_pruefen = false)
     $neu = array_merge($alt, $d['config']);
     $neu['aktionstoken'] = $alt['aktionstoken'];
     $neu['miniserver_url'] = $alt['miniserver_url'];
-    // Das Alexa-Sprechtoken steht nicht in der Sicherung (Ansage-1) und
-    // bleibt. Ist der tts-Block der Sicherung kein Block, gilt der alte
-    // ganz - sonst ginge das Token mit ihm verloren.
+    // Die Sprechtoken stehen nicht in der Sicherung und bleiben. Ist der
+    // tts-Block der Sicherung kein Block, gilt der alte ganz - sonst gingen
+    // die Token mit ihm verloren.
     if (!isset($neu['tts']) || !is_array($neu['tts'])) {
         $neu['tts'] = $alt['tts'];
     }
-    $neu['tts']['alexa_token'] = $alt['tts']['alexa_token'];
-    // Ansage-3: ebenso das Sprechtoken fuer Chromecast 4 Lox NG.
-    $neu['tts']['google_token'] = $alt['tts']['google_token'];
+    $neu['tts'] = ansage_sicherung_tokens_behalten($neu['tts'], $alt['tts']);
+    /* Die Schluessel der ESPHome-Mikrofone stehen nicht in der Sicherung.
+     * Bis 0.11.15 kamen sie nach der LISTENPOSITION zurueck: eine Sicherung
+     * mit anderer Reihenfolge (ein Mikrofon dazwischen, eines entfernt) gab
+     * Mikrofon B den Schluessel von Mikrofon A. Jetzt nach Rechner und Port,
+     * dann nach Rechner, dann nach Namen - und nur bei genau einem Treffer. */
     if (isset($alt['satelliten']) && is_array($alt['satelliten'])
         && isset($neu['satelliten']) && is_array($neu['satelliten'])) {
         foreach ($neu['satelliten'] as $i => $s) {
-            if (is_array($s) && empty($s['schluessel']) && !empty($alt['satelliten'][$i]['schluessel'])) {
-                $neu['satelliten'][$i]['schluessel'] = $alt['satelliten'][$i]['schluessel'];
-            }
+            if (!is_array($s) || !empty($s['schluessel'])) { continue; }
+            $k = sp_satellit_schluessel_finden($s, $alt['satelliten']);
+            if ($k !== '') { $neu['satelliten'][$i]['schluessel'] = $k; }
         }
     }
+    /* I2 (0.12.0): dieselben Regeln wie das Formular, auf die
+     * zusammengefuehrte Konfiguration - also genau das, was gespeichert
+     * wuerde. Eine Sicherung mit mqtt_topic "#" nahm bis 0.11.15 jeder
+     * Weg an, den das Formular abweist. */
+    if (function_exists('sp_cfg_pruefen')) {
+        $sp_fehler = sp_cfg_pruefen($neu);
+        if (is_array($sp_fehler) && $sp_fehler) {
+            return array(0, sprintf(sp_t('LIB012.SICH_FELDER'),
+                                    implode('; ', array_map('strval', array_slice($sp_fehler, 0, 8)))));
+        }
+    }
+    // X-3: bis hierher geprueft, nichts geschrieben.
+    if ($nur_pruefen) {
+        return array(1, '');
+    }
     if (!sp_config_speichern($neu)) {
-        return array(0, 'Die Konfiguration liess sich nicht schreiben.');
+        return array(0, sp_t('LIB012.SICH_CONFIG_SCHREIBEN'));
     }
     if (!sp_saetze_speichern(sp_steuerzeichen_weg($d['saetze']))) {
-        return array(0, 'Die Satzdatei liess sich nicht schreiben.');
+        return array(0, sp_t('LIB012.SICH_SAETZE_SCHREIBEN'));
     }
     sp_log('Sicherung eingespielt (' . count($d['saetze']['regeln']) . ' Regeln, '
            . count($d['saetze']['ziele']) . ' Ziele).');
-    return array(1, sprintf('Sicherung eingespielt: %d Regeln, %d Ziele. '
-                          . 'Token und Miniserver-Adresse sind unveraendert geblieben.',
+    return array(1, sprintf(sp_t('LIB012.SICH_EINGESPIELT'),
                             count($d['saetze']['regeln']), count($d['saetze']['ziele'])));
+}
+
+/**
+ * Den Schluessel eines ESPHome-Mikrofons aus der laufenden Liste finden:
+ * zuerst Rechner und Port, dann Rechner allein, dann der Name. Nur ein
+ * EINDEUTIGER Treffer zaehlt - zwei Mikrofone auf demselben Rechner ohne
+ * Port in der Sicherung bekommen keinen geratenen Schluessel.
+ * Rueckgabe: der Schluessel oder ''.
+ */
+function sp_satellit_schluessel_finden(array $s, array $alt)
+{
+    $text = function ($a, $f) {
+        return (isset($a[$f]) && is_scalar($a[$f])) ? strtolower(trim((string) $a[$f])) : '';
+    };
+    $host = $text($s, 'host');
+    $port = $text($s, 'port');
+    $name = $text($s, 'name');
+    $stufen = array(
+        function ($a) use ($text, $host, $port) {
+            return $host !== '' && $port !== '' && $text($a, 'host') === $host && $text($a, 'port') === $port;
+        },
+        function ($a) use ($text, $host) { return $host !== '' && $text($a, 'host') === $host; },
+        function ($a) use ($text, $name) { return $name !== '' && $text($a, 'name') === $name; },
+    );
+    foreach ($stufen as $passt) {
+        $treffer = array();
+        foreach ($alt as $a) {
+            if (is_array($a) && !empty($a['schluessel']) && is_string($a['schluessel']) && $passt($a)) {
+                $treffer[] = $a['schluessel'];
+            }
+        }
+        if (count($treffer) === 1) { return $treffer[0]; }
+        if (count($treffer) > 1) { return ''; }
+    }
+    return '';
 }
 
 /* ================= Zusaetzliche Ansage (Ansage-1, ab Werk aus) =================
@@ -1656,20 +2117,189 @@ function sp_sicherung_lesen($roh, $nur_pruefen = false)
  * Chromecast 4 Lox NG (ab 1.3.15), ab Werk nicht gewaehlt. Gleiche
  * Schnittstelle wie Alexa-NG (GOOGLE_SPRECHEN_SCHNITTSTELLE.md); angenommen
  * wird dort nur von 127.0.0.1 - deshalb nie die LAN-Adresse, und der Port ist
- * der des LoxBerry-Webservers. */
+ * der des LoxBerry-Webservers.
+ * 0.12.0 (V5): der Ordner kommt aus der Plugin-Datenbank (sp_plugin_info());
+ * hat LoxBerry das Plugin bei einer Zweitinstallation unter einem anderen
+ * Ordner abgelegt, stimmte der feste Name nicht. Der feste Name bleibt der
+ * Rueckfall. */
 define('SP_GOOGLE_PFAD', '/plugins/chromecast-4lox-ng/index.php');
 
-/** Port des LoxBerry-Webservers: general.json -> Webserver -> Port (auch WEBSERVER), sonst 80. */
+/**
+ * Port des LoxBerry-Webservers. Dieselbe Rechnung wie die gemeinsame
+ * Sprachausgabe (ansage_webport(): general.json -> Webserver.Port bzw.
+ * WEBSERVER.Port, 1 bis 65535, sonst 80) - Ansage und Pruefzeile duerfen
+ * nicht verschiedene Ports nehmen. lbwebserverport() aus loxberry_system.php
+ * kennt nur Webserver.Port und gilt deshalb nur dort, wo keine general.json
+ * zu lesen ist (Archivmodus) und das SDK schon geladen ist.
+ */
 function sp_webport()
 {
     $p = sp_paths();
-    if ($p['home'] === '') { return 80; }
+    if ($p['home'] === '') {
+        if (function_exists('lbwebserverport')) {
+            $w = sp_ganzzahl(@lbwebserverport());
+            if ($w !== null && $w >= 1 && $w <= 65535) { return $w; }
+        }
+        return 80;
+    }
     return ansage_webport($p['home'] . '/config/system/general.json');     // Nr. 36 b: eine Quelle
+}
+
+/**
+ * Die Adresse des LoxBerry fuer den Miniserver: "http://<LAN-IP>[:<Port>]".
+ *
+ * Bis 0.11.15 stand in den Vorlagen der Name aus der Adresszeile des
+ * Browsers (HTTP_HOST): "loxberry", ein Name aus einem Tunnel oder
+ * "localhost" - der Miniserver loest keinen davon auf. Reihenfolge:
+ * LBSystem::get_localip() (nur wenn das SDK geladen ist und die
+ * socket-Erweiterung da ist), Network.Ipaddress aus der general.json,
+ * dieselbe Rechnung wie get_localip() ohne socket-Erweiterung (UDP-"connect"
+ * auf 8.8.8.8 sendet kein Paket, er waehlt nur die Schnittstelle),
+ * "hostname -I", zuletzt der Name aus der Adresszeile.
+ */
+function sp_lb_adresse()
+{
+    $ip = '';
+    $ipv4 = function ($k) {
+        $k = trim((string) $k);
+        return (filter_var($k, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false
+                && strpos($k, '127.') !== 0 && $k !== '0.0.0.0') ? $k : '';
+    };
+    if (class_exists('LBSystem', false) && method_exists('LBSystem', 'get_localip')
+        && function_exists('socket_create')) {
+        try { $ip = $ipv4(@LBSystem::get_localip()); } catch (Throwable $e) { $ip = ''; }
+    }
+    $p = sp_paths();
+    if ($ip === '' && $p['home'] !== '') {
+        $gen = sp_json_lesen($p['home'] . '/config/system/general.json');
+        $netz = sp_schluessel_klein(sp_feld_ohne_fall($gen, 'network'));
+        if (isset($netz['ipaddress']) && is_scalar($netz['ipaddress'])) { $ip = $ipv4($netz['ipaddress']); }
+    }
+    if ($ip === '' && function_exists('stream_socket_client')) {
+        $s = @stream_socket_client('udp://8.8.8.8:53', $nr, $txt, 1);
+        if ($s) {
+            $name = (string) @stream_socket_get_name($s, false);
+            fclose($s);
+            $ip = $ipv4(preg_replace('/:\d+\z/', '', $name));
+        }
+    }
+    if ($ip === '') {
+        list($rc, $aus, ) = sp_prozess_ruf(array('hostname', '-I'), 5);
+        if ($rc === 0) {
+            foreach (preg_split('/\s+/', trim($aus)) as $k) {
+                if ($ipv4($k) !== '') { $ip = $k; break; }
+            }
+        }
+    }
+    if ($ip === '') {
+        $ip = isset($_SERVER['HTTP_HOST']) && $_SERVER['HTTP_HOST'] !== ''
+            ? preg_replace('/:\d+\z/', '', preg_replace('/[^A-Za-z0-9\.\-:\[\]]/', '', (string) $_SERVER['HTTP_HOST']))
+            : (gethostname() ?: 'loxberry');
+    }
+    $port = sp_webport();
+    return 'http://' . $ip . ($port !== 80 ? ':' . $port : '');
+}
+
+/**
+ * Die Miniserver aus der general.json - OHNE Zugangsdaten.
+ * Rueckgabe: Liste von array('nr', 'name', 'ip', 'port', 'https'), nach
+ * Nummer sortiert. Die Feldnamen stehen in den Anlagen verschieden
+ * geschrieben (Ipaddress/IPAddress, Porthttps/PortHttps ...) - gelesen wird
+ * ohne Ruecksicht auf die Schreibweise.
+ */
+function sp_lb_miniserver()
+{
+    $aus = array();
+    foreach (sp_lb_miniserver_roh() as $nr => $m) {
+        $aus[] = array('nr' => $nr, 'name' => $m['name'], 'ip' => $m['ip'],
+                       'port' => $m['https'] ? $m['porthttps'] : $m['port'], 'https' => $m['https']);
+    }
+    return $aus;
+}
+
+/**
+ * Die Miniserver MIT Zugangsdaten - nur fuer diese Datei (Loxone-Import).
+ * Rueckgabe: array(nr => array(name, ip, port, porthttps, https, benutzer,
+ * kennwort)). Benutzer und Kennwort stehen in der general.json URL-kodiert
+ * (LoxBerry: Admin_RAW = urldecode(Admin)) und kommen hier dekodiert heraus.
+ */
+function sp_lb_miniserver_roh()
+{
+    $p = sp_paths();
+    if ($p['home'] === '') { return array(); }
+    $gen = sp_json_lesen($p['home'] . '/config/system/general.json');
+    $liste = sp_feld_ohne_fall($gen, 'miniserver');
+    $aus = array();
+    foreach ($liste as $nr => $roh) {
+        $n = sp_ganzzahl($nr);
+        if ($n === null || $n < 1 || !is_array($roh)) { continue; }
+        $m = sp_schluessel_klein($roh);
+        $txt = function ($k) use ($m) { return (isset($m[$k]) && is_scalar($m[$k])) ? trim((string) $m[$k]) : ''; };
+        $ip = $txt('ipaddress');
+        if ($ip === '') { continue; }
+        $port = sp_ganzzahl($txt('port'));
+        $phttps = sp_ganzzahl($txt('porthttps'));
+        $aus[$n] = array(
+            'name'      => $txt('name') !== '' ? $txt('name') : 'Miniserver ' . $n,
+            'ip'        => $ip,
+            'port'      => ($port !== null && $port >= 1 && $port <= 65535) ? $port : 80,
+            'porthttps' => ($phttps !== null && $phttps >= 1 && $phttps <= 65535) ? $phttps : 443,
+            'https'     => sp_wahr(isset($m['preferhttps']) ? $m['preferhttps'] : ''),
+            'benutzer'  => rawurldecode($txt('admin')),
+            'kennwort'  => rawurldecode($txt('pass')),
+        );
+    }
+    ksort($aus);
+    return $aus;
+}
+
+/**
+ * Ein Plugin in der Plugin-Datenbank von LoxBerry
+ * (data/system/plugindatabase.json) suchen - nach dem Plugin-NAMEN (z. B.
+ * 'alexang', 'chromecast-4lox-ng', 'sonos4lox', 'musicserver4home'), sonst
+ * nach dem Ordner. Die Datei kommt in zwei Formen vor: {"plugins": {md5:
+ * {...}}} und als blosse Liste bzw. Zuordnung; die Feldnamen klein oder
+ * gross. Rueckgabe: array('ordner', 'version', 'titel') oder null.
+ */
+function sp_plugin_info($name)
+{
+    $name = strtolower(trim((string) $name));
+    $p = sp_paths();
+    if ($name === '' || $p['home'] === '') { return null; }
+    $d = sp_json_lesen($p['home'] . '/data/system/plugindatabase.json');
+    $liste = (isset($d['plugins']) && is_array($d['plugins'])) ? $d['plugins'] : $d;
+    $nach_ordner = null;
+    foreach ($liste as $e) {
+        if (!is_array($e)) { continue; }
+        $e = sp_schluessel_klein($e);
+        $f = function ($k) use ($e) { return (isset($e[$k]) && is_scalar($e[$k])) ? trim((string) $e[$k]) : ''; };
+        $ordner = $f('folder');
+        if ($ordner === '' || !preg_match('/^[A-Za-z0-9_.\-]{1,80}\z/', $ordner)) { continue; }
+        $info = array('ordner' => $ordner, 'version' => $f('version'),
+                      'titel' => $f('title') !== '' ? $f('title') : $f('name'));
+        if (strtolower($f('name')) === $name) { return $info; }
+        if ($nach_ordner === null && strtolower($ordner) === $name) { $nach_ordner = $info; }
+    }
+    return $nach_ordner;
+}
+
+/** Der Ordner eines anderen Plugins: aus der Plugin-Datenbank, sonst der feste Name. */
+function sp_plugin_ordner($name, $rueckfall)
+{
+    $i = sp_plugin_info($name);
+    return ($i !== null && $i['ordner'] !== '') ? $i['ordner'] : (string) $rueckfall;
+}
+
+/** Sprech-Endpunkt von Alexa-NG auf diesem LoxBerry (Ordner aus der Plugin-Datenbank). */
+function sp_alexa_adresse()
+{
+    return 'http://127.0.0.1:' . sp_webport() . '/plugins/' . sp_plugin_ordner('alexang', 'alexang') . '/index.php';
 }
 
 function sp_google_adresse()
 {
-    return 'http://127.0.0.1:' . sp_webport() . SP_GOOGLE_PFAD;
+    return 'http://127.0.0.1:' . sp_webport() . '/plugins/'
+         . sp_plugin_ordner('chromecast-4lox-ng', 'chromecast-4lox-ng') . '/index.php';
 }
 
 /**
@@ -1881,7 +2511,7 @@ function sp_alexa_rufen(array $felder, $sekunden = 5, $adresse = '', $streng = f
      * der gemeinsamen Sprachausgabe - fuer beide Wege ohne Proxy, ohne
      * Umleitung, ein Token in der Antwortzeile ersetzt; Alexa-NG auf dem
      * Webport. $streng bleibt der Aufrufform wegen. */
-    $ziel = $adresse !== '' ? $adresse : ansage_adresse('alexang', sp_webport());
+    $ziel = $adresse !== '' ? $adresse : sp_alexa_adresse();     // V5: Ordner aus der Plugin-Datenbank
     $a = ansage_ng_rufen($ziel, $felder, (int) ceil((float) $sekunden),
                          array('kopf' => array('User-Agent: LoxBerry Sprachsteuerung')));
     if ($a['code'] <= 0) {
@@ -1996,13 +2626,25 @@ function sp_ansage_lage($cfg = null)
     return array($stand, $text);
 }
 
-/** Der Verlauf als CSV - fuer die Frage, was regelmaessig NICHT verstanden wird. */
+/**
+ * Der Verlauf als CSV - fuer die Frage, was regelmaessig NICHT verstanden wird.
+ *
+ * Seit 0.12.0 mit UTF-8-BOM: ohne ihn liest Excel die Datei als Windows-1252,
+ * und aus "Küche" wird "KÃ¼che". Und eine Zelle, die mit = + - @ (bzw.
+ * Tabulator oder Wagenruecklauf) beginnt, bekommt ein ' davor: ein Satz ist
+ * gesprochener Text eines beliebigen Menschen im Raum, und "=HYPERLINK(...)"
+ * wuerde die Tabellenkalkulation sonst als Formel ausfuehren (CSV-Injektion).
+ */
 function sp_verlauf_csv()
 {
     $zeilen = array("Zeit;Verstanden;Satz;Mikrofon;Absicht;Aktion;Ziel;Quelle;Grund;Antwort");
     foreach (sp_verlauf() as $e) {
         $f = function ($k) use ($e) {
-            $w = isset($e[$k]) ? (string) $e[$k] : '';
+            $w = (isset($e[$k]) && is_scalar($e[$k])) ? (string) $e[$k] : '';
+            // Ein blosser Strich oder eine negative Zahl bleibt, wie sie ist.
+            if ($w !== '' && strpos("=+-@\t\r", $w[0]) !== false && !preg_match('/^-[0-9.,]*\z/', $w)) {
+                $w = "'" . $w;
+            }
             return str_replace(array(';', "\r", "\n"), array(',', ' ', ' '), $w);
         };
         $zeilen[] = implode(';', array(
@@ -2012,7 +2654,7 @@ function sp_verlauf_csv()
             $f('ziel'), $f('quelle'), $f('grund'), $f('antwort'),
         ));
     }
-    return implode("\r\n", $zeilen) . "\r\n";
+    return "\xEF\xBB\xBF" . implode("\r\n", $zeilen) . "\r\n";
 }
 
 /** Welche Saetze wurden am haeufigsten NICHT verstanden? */
@@ -2171,13 +2813,38 @@ function sp_docker_ruf(array $args, $sekunden)
     if ($bin === '' || !function_exists('proc_open')) {
         return array(127, '', 'docker fehlt');
     }
-    $cmd = array('timeout', '-k', '5', (string) max(1, (int) $sekunden), $bin);
-    foreach ($args as $a) {
-        $cmd[] = (string) $a;
+    return sp_prozess_ruf(array_merge(array($bin), $args), $sekunden);
+}
+
+/**
+ * Ein Programm argumentweise ausfuehren (proc_open mit einer Liste, keine
+ * Schale), begrenzt durch "timeout -k 5 <sekunden>". Rueckgabe array(rc,
+ * stdout, stderr) wie sp_docker_ruf(); 127 heisst: nicht zu starten.
+ *
+ * Seit 0.12.0 die eine Stelle fuer alle Programmaufrufe der Bibliothek.
+ * Bis 0.11.15 liefen hardware.py --messen, der Trockenlauf, der Selbsttest
+ * und dienst.sh ueber exec() ohne Zeitgrenze, mit escapeshellcmd() fuer den
+ * Pfad (laesst Leerzeichen stehen) - und der Trockenlauf reichte den Satz
+ * als eigenes Argument weiter: ein Satz "--mqtt-leeren" war ein Schalter.
+ *
+ * $vordergrund: "timeout --foreground" - dann trifft ein Zeitablauf nur das
+ * Programm selbst, nicht dessen Kinder (dienst.sh startet den Dienst ohne
+ * eigene Sitzung; siehe sp_dienst()).
+ */
+function sp_prozess_ruf(array $cmd, $sekunden, $vordergrund = false)
+{
+    if (!$cmd || !function_exists('proc_open')) {
+        return array(127, '', 'proc_open fehlt');
+    }
+    $liste = array('timeout');
+    if ($vordergrund) { $liste[] = '--foreground'; }
+    array_push($liste, '-k', '5', (string) max(1, (int) $sekunden));
+    foreach ($cmd as $a) {
+        $liste[] = (string) $a;
     }
     $desk = array(0 => array('file', '/dev/null', 'r'), 1 => array('pipe', 'w'), 2 => array('pipe', 'w'));
     $pipes = array();
-    $proc = @proc_open($cmd, $desk, $pipes);
+    $proc = @proc_open($liste, $desk, $pipes);
     if (!is_resource($proc)) {
         return array(127, '', 'proc_open gescheitert');
     }
@@ -2262,10 +2929,31 @@ function sp_dienste()
     return array('whisper', 'piper', 'wakeword', 'llm');
 }
 
-function sp_container_name($dienst)
+/**
+ * Der Containername eines Dienstes.
+ *
+ * Bis 0.11.15 immer sprachsteuerung-<dienst>. Containernamen gelten
+ * rechnerweit: eine Zweitinstallation (LoxBerry haengt dann einen Zaehler an
+ * den Ordner, sprachsteuerung_01) wollte dieselben Namen anlegen und
+ * scheiterte am Container der ersten - oder hielt ihn fuer den eigenen.
+ * Heisst der Ordner nicht "sprachsteuerung", steht er jetzt hinten dran
+ * (sprachsteuerung-whisper-sprachsteuerung_01). Die Erstinstallation behaelt
+ * die bisherigen Namen; ihr Altbestand wird weiter erkannt.
+ */
+function sp_container_name($dienst, $ordner = null)
 {
     $dienst = preg_replace('/[^a-z]/', '', (string) $dienst);
-    return 'sprachsteuerung-' . ($dienst !== '' ? $dienst : 'unbekannt');
+    $name = 'sprachsteuerung-' . ($dienst !== '' ? $dienst : 'unbekannt');
+    if ($ordner === null) { $ordner = sp_paths()['plugin']; }
+    $o = preg_replace('/[^A-Za-z0-9_.\-]/', '', (string) $ordner);
+    if ($o !== '' && $o !== SP_CT_NAME) { $name .= '-' . $o; }
+    return $name;
+}
+
+/** Der Name, den ein Container dieses Dienstes bis 0.11.15 trug (ohne Ordner). */
+function sp_container_name_alt($dienst)
+{
+    return sp_container_name($dienst, SP_CT_NAME);
 }
 
 /** Der Anzeigename eines Dienstes (dieselben Schluessel wie die Einstellungen). */
@@ -2331,6 +3019,86 @@ function sp_port_offen($host, $port, $timeout = 2.0)
     if ($verbindung === false) { return false; }
     fclose($verbindung);
     return true;
+}
+
+/**
+ * Antwortet an dieser Adresse DER Dienst - nicht nur irgendein Programm?
+ *
+ * Bis 0.11.15 galt "Port offen" als "antwortet". Auf 8080 lauscht auf vielen
+ * LoxBerry aber Zigbee2MQTT, und ein Piper auf dem Port von Whisper waere
+ * ebenfalls gruen gewesen. Jetzt wird gefragt:
+ *   - Wyoming (whisper, piper, wakeword): "describe" als JSONL senden und
+ *     ein "info" erwarten, das den passenden Teil traegt (asr, tts bzw.
+ *     wake) - dieselbe Probe wie der HEALTHCHECK der Abbilder.
+ *   - llama.cpp: GET /health muss {"status":"ok"} liefern (503 "Loading
+ *     model" heisst: laedt noch), und /v1/models eine Liste mit "data".
+ * Rueckgabe: array(stand, grund) - stand 1 erkannt, 0 keine Antwort,
+ * 2 es antwortet ein ANDERER Dienst (bzw. das Modell laedt noch); grund
+ * ist ein kurzer Satz fuer die Anzeige ('' bei 1).
+ */
+function sp_dienst_erkennen($dienst, $host, $port, $zeit = 2.0)
+{
+    $host = trim((string) $host);
+    $port = (int) $port;
+    if ($host === '' || $port < 1 || $port > 65535) { return array(0, ''); }
+    if ($dienst === 'llm') {
+        $basis = 'http://' . (strpos($host, ':') !== false ? '[' . trim($host, '[]') . ']' : $host) . ':' . $port;
+        $h = sp_http_holen($basis . '/health', array('zeit' => $zeit, 'max' => 4096));
+        if ($h['code'] === 0) { return array(0, ''); }
+        $j = json_decode($h['rumpf'], true);
+        if ($h['code'] === 503 && strpos($h['rumpf'], 'Loading model') !== false) {
+            return array(2, sp_t('LIB012.ERKENNEN_LAEDT'));
+        }
+        if ($h['code'] === 200 && is_array($j) && isset($j['status']) && $j['status'] === 'ok') {
+            $m = sp_http_holen($basis . '/v1/models', array('zeit' => $zeit, 'max' => 65536));
+            $mj = json_decode($m['rumpf'], true);
+            if ($m['code'] === 200 && is_array($mj) && isset($mj['data']) && is_array($mj['data'])) {
+                return array(1, '');
+            }
+        }
+        return array(2, sprintf(sp_t('LIB012.ERKENNEN_FREMD'), $port));
+    }
+    $teil = array('whisper' => 'asr', 'piper' => 'tts', 'wakeword' => 'wake');
+    if (!isset($teil[$dienst])) { return array(0, ''); }
+    $nr = 0;
+    $txt = '';
+    $fp = @fsockopen($host, $port, $nr, $txt, $zeit);
+    if ($fp === false) { return array(0, ''); }
+    stream_set_timeout($fp, (int) max(1, ceil($zeit)));
+    @fwrite($fp, '{"type": "describe"}' . "\n");
+    $zeile = @fgets($fp, 65536);
+    $info = is_string($zeile) ? json_decode($zeile, true) : null;
+    // Die Nutzdaten stehen bei neueren Wyoming-Fassungen hinter der
+    // Kopfzeile (data_length), bei aelteren in "data".
+    if (is_array($info) && isset($info['data_length']) && (int) $info['data_length'] > 0
+        && (int) $info['data_length'] <= 262144) {
+        $rest = (int) $info['data_length'];
+        $roh = '';
+        while ($rest > 0 && !feof($fp)) {
+            $t = @fread($fp, min(65536, $rest));
+            if ($t === false || $t === '') {
+                $m = stream_get_meta_data($fp);
+                if (!empty($m['timed_out'])) { break; }
+                continue;
+            }
+            $roh .= $t;
+            $rest -= strlen($t);
+        }
+        $zusatz = json_decode($roh, true);
+        if (is_array($zusatz)) {
+            $info['data'] = array_merge(isset($info['data']) && is_array($info['data']) ? $info['data'] : array(),
+                                        $zusatz);
+        }
+    }
+    fclose($fp);
+    if (!is_array($info) || !isset($info['type'])) {
+        return array(2, sprintf(sp_t('LIB012.ERKENNEN_FREMD'), $port));
+    }
+    if ($info['type'] === 'info' && isset($info['data'][$teil[$dienst]])
+        && is_array($info['data'][$teil[$dienst]]) && $info['data'][$teil[$dienst]]) {
+        return array(1, '');
+    }
+    return array(2, sprintf(sp_t('LIB012.ERKENNEN_ANDERER_WYOMING'), $port));
 }
 
 /** Das Abbild eines Dienstes laut templates/modelle.json, oder ''. */
@@ -2405,11 +3173,24 @@ function sp_ct_eigentum($info, $dienst, $ordner = null)
     }
     $ist = isset($info['Config']['Image']) ? (string) $info['Config']['Image'] : '';
     $soll = sp_ct_abbild($dienst);
-    if ($soll === '' || sp_ct_abbild_norm($ist) !== sp_ct_abbild_norm($soll)) {
+    /* Verglichen wird das Abbild OHNE Tag: seit 0.12.0 nennt modelle.json
+     * feste Tags (rhasspy/wyoming-whisper:3.8.1), der Altbestand stammt aus
+     * ":latest". Ein anderer Tag macht ihn nicht fremd - das meldet
+     * sp_ct_abweichung() als Grund zum Neuanlegen. */
+    if ($soll === '' || sp_ct_abbild_repo($ist) !== sp_ct_abbild_repo($soll)) {
         return array('', sprintf(sp_t('CT.FREMD_ABBILD'), $name, $ist !== '' ? $ist : '-',
                                  $soll !== '' ? $soll : '-'));
     }
     return array('altbestand', '');
+}
+
+/** Ein Abbildname ohne Tag (und ohne Digest), vergleichbar gemacht wie sp_ct_abbild_norm(). */
+function sp_ct_abbild_repo($a)
+{
+    $a = sp_ct_abbild_norm(preg_replace('/@.*\z/', '', trim((string) $a)));
+    $letzt = strrpos($a, '/');
+    $doppel = strrpos($a, ':');
+    return ($doppel !== false && ($letzt === false || $doppel > $letzt)) ? substr($a, 0, $doppel) : $a;
 }
 
 /** docker inspect eines Containers; null, wenn es ihn nicht gibt oder docker nicht antwortet. */
@@ -2435,6 +3216,21 @@ function sp_ct_finden($dienst, $sekunden = SP_CT_ZEIT_LESEN)
                  'id' => '', 'id_voll' => '', 'name' => sp_container_name($dienst), 'fehler' => '');
     list($rc, $out, $err) = sp_docker_ruf(array('inspect', '--type', 'container', sp_container_name($dienst)),
                                           $sekunden);
+    /* Zweitinstallation: einen Container, den sie vor 0.12.0 noch unter dem
+     * Namen ohne Ordner angelegt hat, findet sie dort - aber nur, wenn er
+     * IHR Label traegt; der gleichnamige Container der Erstinstallation
+     * bleibt deren. */
+    if ($rc !== 0 && sp_container_name($dienst) !== sp_container_name_alt($dienst)
+        && stripos($err, 'no such') !== false) {
+        list($rc2, $out2, ) = sp_docker_ruf(array('inspect', '--type', 'container', sp_container_name_alt($dienst)),
+                                            $sekunden);
+        $d2 = $rc2 === 0 ? json_decode($out2, true) : null;
+        if (is_array($d2) && isset($d2[0]) && is_array($d2[0])
+            && sp_ct_label_eigen($d2[0], sp_paths()['plugin'])) {
+            list($rc, $out, $err) = array($rc2, $out2, '');
+            $erg['name'] = sp_container_name_alt($dienst);
+        }
+    }
     if ($rc !== 0) {
         $t = strtolower($err);
         if (sp_ct_zeitablauf($rc)) {
@@ -2495,7 +3291,7 @@ function sp_ct_modell($dienst, $cfg, $emp)
     }
     if ($dienst === 'wakeword') {
         $m = trim((string) (isset($cfg['wakeword']) ? $cfg['wakeword'] : ''));
-        return $m !== '' ? $m : 'ok_nabu';
+        return sp_weckwort_norm($m !== '' ? $m : 'okay_nabu');
     }
     if ($dienst === 'llm') {
         $m = trim((string) (isset($cfg['llm_modell']) ? $cfg['llm_modell'] : ''));
@@ -2503,6 +3299,125 @@ function sp_ct_modell($dienst, $cfg, $emp)
         return $m;
     }
     return '';
+}
+
+/**
+ * I4 (0.12.0): openWakeWord 2.0 hat "ok_nabu" in "okay_nabu" umbenannt
+ * (wyoming-openwakeword CHANGELOG 2.0.0, wie microWakeWord). Eine
+ * Konfiguration mit dem alten Namen bleibt gueltig und wird beim Anlegen und
+ * in der Anzeige auf den neuen abgebildet. Alle anderen Namen bleiben.
+ */
+function sp_weckwort_norm($w)
+{
+    $w = trim((string) $w);
+    return $w === 'ok_nabu' ? 'okay_nabu' : $w;
+}
+
+/** Ist das Userland 64 Bit? PHP selbst ist ein Programm des Userlands - PHP_INT_SIZE sagt es ohne Aufruf. */
+function sp_userland_64()
+{
+    return PHP_INT_SIZE === 8;
+}
+
+/**
+ * Die Rechenkerne, die diesem Prozess zustehen - wie len(os.sched_getaffinity(0))
+ * in bin/hardware.py: Cpus_allowed_list aus /proc/self/status (beachtet
+ * cpuset und taskset), sonst die Prozessoren aus /proc/cpuinfo, sonst 1.
+ */
+function sp_kerne()
+{
+    static $n = null;
+    if ($n !== null) { return $n; }
+    $n = 0;
+    $st = @file_get_contents('/proc/self/status');
+    if (is_string($st) && preg_match('/^Cpus_allowed_list:\s*(\S+)/m', $st, $t)) {
+        foreach (explode(',', $t[1]) as $teil) {
+            if (preg_match('/^(\d+)-(\d+)\z/', $teil, $b)) {
+                $n += max(0, (int) $b[2] - (int) $b[1] + 1);
+            } elseif (preg_match('/^\d+\z/', $teil)) {
+                $n++;
+            }
+        }
+    }
+    if ($n < 1) {
+        $ci = @file_get_contents('/proc/cpuinfo');
+        $n = is_string($ci) ? preg_match_all('/^processor\s*:/m', $ci) : 0;
+    }
+    if ($n < 1) { $n = 1; }
+    return $n;
+}
+
+/**
+ * Speichergrenze eines Containers in MB - aus templates/modelle.json
+ * ableitbar: dienste.<dienst>.speicher = {basis_mb, faktor}, dazu die
+ * Dateigroesse des Modells aus den Stufen (datei_mb) mal faktor. Das
+ * Sprachmodell rechnet so "Modell + rund 1 GB" (faktor 1, basis 1024).
+ * Ein Modell, das in keiner Stufe steht (von Hand eingetragen), bekommt die
+ * groesste bekannte Datei dieses Dienstes - lieber zu viel Grenze als ein
+ * Abbruch beim Laden. Ohne Angaben: 0 = keine Grenze (nicht raten).
+ */
+function sp_ct_speicher_mb($dienst, $modell)
+{
+    $tab = sp_modelle();
+    $sp = isset($tab['dienste'][$dienst]['speicher']) && is_array($tab['dienste'][$dienst]['speicher'])
+        ? $tab['dienste'][$dienst]['speicher'] : array();
+    $basis = isset($sp['basis_mb']) ? (int) $sp['basis_mb'] : 0;
+    if ($basis <= 0) { return 0; }
+    $faktor = isset($sp['faktor']) ? (float) $sp['faktor'] : 0.0;
+    $feld = array('whisper' => 'modell', 'piper' => 'stimme', 'llm' => 'quelle');
+    $datei = 0;
+    $groesste = 0;
+    if (isset($feld[$dienst]) && $faktor > 0) {
+        foreach ((isset($tab['stufen']) && is_array($tab['stufen']) ? $tab['stufen'] : array()) as $st) {
+            if (!is_array($st) || empty($st[$dienst]) || !is_array($st[$dienst])) { continue; }
+            $mb = isset($st[$dienst]['datei_mb']) ? (int) $st[$dienst]['datei_mb'] : 0;
+            $groesste = max($groesste, $mb);
+            $name = isset($st[$dienst][$feld[$dienst]]) ? (string) $st[$dienst][$feld[$dienst]] : '';
+            if ($name !== '' && $name === (string) $modell) { $datei = max($datei, $mb); }
+        }
+        if ($datei === 0) { $datei = $groesste; }
+    }
+    return (int) ceil($basis + $faktor * $datei);
+}
+
+/**
+ * Die Zielnamen fuer Whispers --initial-prompt: Namen und Aliasnamen der
+ * Ziele aus der Satzdatei, eindeutig, mit Komma getrennt, hoechstens rund
+ * 200 Zeichen (an einer Namensgrenze gekuerzt).
+ *
+ * WARUM: Whisper kennt "Rollo Gaube" oder "Ölofen" nicht und schreibt, was
+ * es kennt. Ein kurzer Vorspann mit den Namen der Anlage zieht die Erkennung
+ * dorthin (wyoming-faster-whisper: --initial-prompt seit 2.1.0, in 3.8.1
+ * unveraendert; die README nennt 200 Token als Obergrenze, Whispers harte
+ * Grenze ist 223 Token, und bei Distil-Modellen schadet ein langer Vorspann).
+ * 200 ZEICHEN bleiben weit darunter.
+ */
+function sp_whisper_vorspann()
+{
+    $saetze = sp_saetze(false);
+    $ziele = isset($saetze['ziele']) && is_array($saetze['ziele']) ? $saetze['ziele'] : array();
+    $namen = array();
+    $dazu = function ($n) use (&$namen) {
+        $n = trim(preg_replace('/[\x00-\x1F\x7F,\s]+/', ' ', (string) $n));
+        if ($n !== '' && !in_array(strtolower($n), array_map('strtolower', $namen), true)) { $namen[] = $n; }
+    };
+    // Erst alle Namen, dann die Aliasnamen: bei vielen Zielen sollen die
+    // Namen nicht hinter den Aliasnamen des ersten Ziels abgeschnitten werden.
+    foreach ($ziele as $z) {
+        if (is_array($z) && isset($z['name']) && is_scalar($z['name'])) { $dazu($z['name']); }
+    }
+    foreach ($ziele as $z) {
+        foreach ((is_array($z) && isset($z['alias']) && is_array($z['alias'])) ? $z['alias'] : array() as $a) {
+            if (is_scalar($a)) { $dazu($a); }
+        }
+    }
+    $text = '';
+    foreach ($namen as $n) {
+        $neu = $text === '' ? $n : $text . ', ' . $n;
+        if (sp_zeichen($neu) > 200) { break; }
+        $text = $neu;
+    }
+    return $text;
 }
 
 /**
@@ -2516,6 +3431,31 @@ function sp_ct_modell($dienst, $cfg, $emp)
  * Rechner: der Port wird ans Netz gebunden (sonst kaeme der LoxBerry nicht
  * heran), der Modellordner ist ein neutraler Pfad, und die Labels fehlen -
  * sie sagen dort nichts. Diese Zeile wird NIE ausgefuehrt, nur angezeigt.
+ *
+ * SEIT 0.12.0:
+ *   - Port: aussen der EINGESTELLTE Port (whisper_port ...), innen der des
+ *     Abbilds aus modelle.json. Bis 0.11.15 stand beidseitig der Port aus
+ *     modelle.json - Dienst und Ampel fragten aber den eingestellten; wer
+ *     den Port wegen eines Nachbarn (Zigbee2MQTT auf 8080) umgestellt hatte,
+ *     bekam einen Container, den niemand fand.
+ *   - Grenzen: Protokoll des Containers hoechstens 2 x 10 MB (json-file
+ *     schreibt sonst ohne Ende auf die Speicherkarte), CPU hoechstens
+ *     Kerne - 1 (mindestens 1), Speicher je Dienst (sp_ct_speicher_mb()),
+ *     hoechstens 256 Prozesse. Fuer einen anderen Rechner ohne CPU- und
+ *     Speichergrenze - dessen Ausstattung kennt das Plugin nicht.
+ *   - llama.cpp: LLAMA_CACHE=/data, sonst laedt -hf nach /root/.cache im
+ *     Container (common/hf-cache.cpp: LLAMA_CACHE vor HF_HOME und
+ *     ~/.cache), der Modellordner bleibt leer, und jedes Neuanlegen laedt
+ *     Gigabyte neu. Dazu -t Kerne - 1.
+ *   - Wortwecker: kein --preload-model mehr. openWakeWord 2.x laedt das Modell
+ *     auf Anfrage des Dienstes (Detect mit Namen) und nimmt den Schalter nur
+ *     noch als "Deprecated" entgegen (wyoming-openwakeword 2.1.0,
+ *     __main__.py).
+ *   - Whisper: --initial-prompt mit den Zielnamen (sp_whisper_vorspann()).
+ *   - Abbilder mit festem Tag (modelle.json), nicht mehr latest.
+ * Docker NG kennt die Container dieses Hauses am Label
+ * de.loxberry.plugin.folder (README Docker NG 1.3.10, Spalte "Plugin") -
+ * ein zusaetzliches compose-Label braucht es deshalb nicht.
  */
 function sp_ct_run_liste($dienst, $cfg = null, $emp = null, $fuer_extern = false)
 {
@@ -2527,27 +3467,44 @@ function sp_ct_run_liste($dienst, $cfg = null, $emp = null, $fuer_extern = false
     $modell = sp_ct_modell($dienst, $cfg, $emp);
     if ($modell === '') { return array(); }
     $ordner = $fuer_extern ? '/opt/sprachsteuerung/modelle' : $p['datadir'] . '/modelle';
-    $port = (int) $d['port'];
+    $intern = (int) $d['port'];
+    list(, $aussen) = sp_dienst_ziel($dienst, $cfg);
+    if ($aussen < 1 || $aussen > 65535) { $aussen = $intern; }
+    $kerne = sp_kerne();
+    $rest = max(1, $kerne - 1);
     $a = array('run', '-d', '--name', sp_container_name($dienst), '--restart=unless-stopped',
-               '-p', ($fuer_extern ? '' : '127.0.0.1:') . $port . ':' . $port,
-               '-v', $ordner . '/' . $dienst . ':/data');
+               '-p', ($fuer_extern ? '' : '127.0.0.1:') . $aussen . ':' . $intern,
+               '-v', $ordner . '/' . $dienst . ':/data',
+               '--log-opt', 'max-size=10m', '--log-opt', 'max-file=2',
+               '--pids-limit', '256');
     if (!$fuer_extern) {
+        $a[] = '--cpus=' . $rest;
+        $mb = sp_ct_speicher_mb($dienst, $modell);
+        if ($mb > 0) { $a[] = '--memory=' . $mb . 'm'; }
         $a[] = '--label';
         $a[] = SP_CT_LABEL_ORDNER . '=' . $p['plugin'];
         $a[] = '--label';
         $a[] = SP_CT_LABEL_NAME . '=' . SP_CT_NAME;
     }
+    if ($dienst === 'llm') {
+        array_push($a, '-e', 'LLAMA_CACHE=/data');
+    }
     $a[] = (string) $d['abbild'];
     if ($dienst === 'whisper') {
         $sprache = isset($cfg['sprache']) ? (string) $cfg['sprache'] : 'de';
         array_push($a, '--model', $modell, '--language', $sprache);
+        $vorspann = sp_whisper_vorspann();
+        if ($vorspann !== '') { array_push($a, '--initial-prompt', $vorspann); }
     } elseif ($dienst === 'piper') {
         array_push($a, '--voice', $modell);
     } elseif ($dienst === 'wakeword') {
-        array_push($a, '--preload-model', $modell);
+        // Nichts: das Weckwort waehlt der Dienst je Verbindung (siehe oben).
     } elseif ($dienst === 'llm') {
         // llama.cpp laedt das Modell selbst von HuggingFace, wenn -hf gesetzt ist.
-        array_push($a, '-hf', $modell, '--host', '0.0.0.0', '--port', (string) $port, '-c', '2048');
+        array_push($a, '-hf', $modell, '--host', '0.0.0.0', '--port', (string) $intern, '-c', '2048');
+        // Fuer einen anderen Rechner kennt das Plugin die Kerne nicht - dort
+        // waehlt llama.cpp selbst.
+        if (!$fuer_extern) { array_push($a, '-t', (string) $rest); }
     }
     return $a;
 }
@@ -2577,6 +3534,70 @@ function sp_container_befehl($dienst, $cfg = null, $emp = null, $fuer_extern = f
 }
 
 /**
+ * Passt der laufende EIGENE Container noch zu dem, was sp_ct_run_liste()
+ * heute anlegen wuerde? Rueckgabe: '' wenn ja (oder wenn es nichts zu
+ * vergleichen gibt: kein Container, fremder Container, docker stumm), sonst
+ * ein kurzer Satz, was abweicht - fuer den Hinweis "neu anlegen".
+ *
+ * Verglichen wird, was ein Neuanlegen aendern wuerde und was man spuert:
+ * Abbild (fester Tag seit 0.12.0), Modell bzw. Stimme, Sprache und der Port
+ * auf dem LoxBerry. Nicht verglichen werden Grenzen und der Whisper-Vorspann
+ * - sonst stuende der Hinweis nach jedem neuen Ziel da.
+ */
+function sp_ct_abweichung($dienst, $cfg = null, $emp = null)
+{
+    if (!in_array($dienst, sp_dienste(), true)) { return ''; }
+    if ($cfg === null) { $cfg = sp_config(); }
+    if ($emp === null) {
+        $hw = sp_hardware(false);
+        $emp = (isset($hw['empfehlung']) && is_array($hw['empfehlung'])) ? $hw['empfehlung'] : array();
+    }
+    if (!sp_ct_run_liste($dienst, $cfg, $emp, false)) { return ''; }
+    $f = sp_ct_finden($dienst);
+    if ($f['fehler'] !== '' || !$f['da'] || $f['eigen'] === '') { return ''; }
+    $info = sp_ct_inspect($f['id_voll']);
+    if ($info === null) { return ''; }
+    $teile = array();
+    $ist = isset($info['Config']['Image']) ? (string) $info['Config']['Image'] : '';
+    $soll = sp_ct_abbild($dienst);
+    if ($soll !== '' && sp_ct_abbild_norm($ist) !== sp_ct_abbild_norm($soll)) {
+        $teile[] = sprintf(sp_t('LIB012.ABW_ABBILD'), $ist !== '' ? $ist : '-', $soll);
+    }
+    $cmd = (isset($info['Config']['Cmd']) && is_array($info['Config']['Cmd'])) ? $info['Config']['Cmd'] : array();
+    $wert = function ($schalter) use ($cmd) {
+        foreach ($cmd as $i => $a) {
+            if ($a === $schalter && isset($cmd[$i + 1])) { return (string) $cmd[$i + 1]; }
+            if (is_string($a) && strpos($a, $schalter . '=') === 0) { return substr($a, strlen($schalter) + 1); }
+        }
+        return '';
+    };
+    $schalter = array('whisper' => '--model', 'piper' => '--voice', 'llm' => '-hf');
+    if (isset($schalter[$dienst])) {
+        $m_ist = $wert($schalter[$dienst]);
+        $m_soll = sp_ct_modell($dienst, $cfg, $emp);
+        if ($m_ist !== $m_soll) {
+            $teile[] = sprintf(sp_t('LIB012.ABW_MODELL'), $m_ist !== '' ? $m_ist : '-', $m_soll);
+        }
+    }
+    if ($dienst === 'whisper') {
+        $s_ist = $wert('--language');
+        $s_soll = isset($cfg['sprache']) ? (string) $cfg['sprache'] : 'de';
+        if ($s_ist !== $s_soll) {
+            $teile[] = sprintf(sp_t('LIB012.ABW_SPRACHE'), $s_ist !== '' ? $s_ist : '-', $s_soll);
+        }
+    }
+    $tab = sp_modelle();
+    $intern = isset($tab['dienste'][$dienst]['port']) ? (int) $tab['dienste'][$dienst]['port'] : 0;
+    list(, $aussen) = sp_dienst_ziel($dienst, $cfg);
+    $bind = isset($info['HostConfig']['PortBindings'][$intern . '/tcp'][0]['HostPort'])
+          ? (string) $info['HostConfig']['PortBindings'][$intern . '/tcp'][0]['HostPort'] : '';
+    if ($intern > 0 && $bind !== (string) $aussen) {
+        $teile[] = sprintf(sp_t('LIB012.ABW_PORT'), $bind !== '' ? $bind : '-', $aussen);
+    }
+    return implode('; ', $teile);
+}
+
+/**
  * Das Sprachmodell ist ausgeschaltet (llm_ein=0)? Dann legt der Knopf
  * "Sprachdienste einrichten" es NICHT an, auch wenn eines empfohlen ist - wer
  * es ausgeschaltet hat, bekommt keine 1 bis 5 GB heruntergeladen
@@ -2591,7 +3612,8 @@ function sp_ct_llm_aus($dienst, $cfg)
  * Was der Knopf "Sprachdienste einrichten" mit jedem Dienst tun wird -
  * ohne docker zu fragen, fuer die Anzeige vor dem Druecken.
  * Rueckgabe: je Dienst array(dienst, art, modell, host, port) mit art
- * 'einrichten' | 'ausgelagert' | 'ausgeschaltet' | 'kein_modell'.
+ * 'einrichten' | 'ausgelagert' | 'ausgeschaltet' | 'kein_modell' | 'nicht64'
+ * (32-Bit-Userland, seit 0.12.0).
  */
 function sp_ct_vorschau($cfg, $emp)
 {
@@ -2601,6 +3623,11 @@ function sp_ct_vorschau($cfg, $emp)
         $art = 'einrichten';
         if (!sp_ist_lokal($host)) {
             $art = 'ausgelagert';
+        } elseif (!sp_userland_64()) {
+            // Die Abbilder gibt es nur fuer amd64 und arm64 (Docker Hub,
+            // ghcr.io, geprueft am 03.10.2026) - auf einem 32-Bit-Userland
+            // holt docker eine Fassung, die es nicht gibt.
+            $art = 'nicht64';
         } elseif (sp_ct_llm_aus($d, $cfg)) {
             $art = 'ausgeschaltet';
         } elseif (!sp_ct_run_liste($d, $cfg, $emp, false)) {
@@ -2623,6 +3650,9 @@ function sp_ct_vorschau_satz($z)
     }
     if ($z['art'] === 'kein_modell') {
         return sprintf(sp_t('CT.P_KEIN_MODELL'), sp_ct_dname($z['dienst']));
+    }
+    if ($z['art'] === 'nicht64') {
+        return sprintf(sp_t('LIB012.CT_NICHT64'), sp_ct_dname($z['dienst']));
     }
     return sprintf(sp_t('CT.P_EINRICHTEN'), sp_ct_dname($z['dienst']), $z['modell'],
                    sp_ct_abbild($z['dienst']));
@@ -2703,6 +3733,12 @@ function sp_ct_vorgang_starten($auftrag, $dienst = '')
     $nein = sp_archiv_verweigert();
     if ($nein !== '') {
         return array(false, $nein);
+    }
+    /* 32-Bit-Userland (armhf auf einem aarch64-Kern): die Abbilder gibt es
+     * nur fuer amd64 und arm64. Gesperrt mit Begruendung, statt Gigabyte zu
+     * laden und dann an "no matching manifest" zu scheitern. */
+    if (!sp_userland_64()) {
+        return array(false, sp_t('LIB012.CT_NICHT64_SPERRE'));
     }
     if ($dienst !== '') {
         list($host, $port) = sp_dienst_ziel($dienst);
@@ -2830,11 +3866,31 @@ function sp_ct_anlegen($dienst, $cfg, $emp)
     if (!$liste) {
         return array(false, sprintf(sp_t('CT.P_KEIN_MODELL'), sp_ct_dname($dienst)));
     }
+    /* Ist der Port auf dem LoxBerry schon belegt (ein fremder Dienst, etwa
+     * Zigbee2MQTT auf 8080), scheitert docker run erst nach dem Anlegen mit
+     * "port is already allocated" bzw. "address already in use" - und laesst
+     * einen angelegten, aber nicht gestarteten Container zurueck. Vorher
+     * fragen und klar sagen, welcher Port in den Einstellungen zu aendern ist.
+     * Gefragt wird an 127.0.0.1: dort bindet der Container, und ein Dienst
+     * auf 0.0.0.0 antwortet dort ebenfalls. */
+    list(, $aussen) = sp_dienst_ziel($dienst, $cfg);
+    if (sp_port_offen('127.0.0.1', $aussen, 1.0)) {
+        return array(false, sprintf(sp_t('LIB012.CT_PORT_BELEGT'), sp_ct_dname($dienst), $aussen));
+    }
     $ordner = sp_paths()['datadir'] . '/modelle/' . $dienst;
     if (!is_dir($ordner)) {
         @mkdir($ordner, 0775, true);
     }
     list($rc, , $err) = sp_docker_ruf($liste, SP_CT_ZEIT_RUN);
+    /* Ein Kern ohne CFS-Bandbreite weist --cpus ab ("NanoCPUs can not be
+     * set"), bevor ein Container entsteht - Speicher- und Prozessgrenze
+     * verwirft docker dagegen nur mit einer Warnung. Dann einmal ohne
+     * CPU-Grenze. */
+    if ($rc !== 0 && !sp_ct_zeitablauf($rc) && (stripos($err, 'NanoCPUs') !== false || stripos($err, 'CFS') !== false)) {
+        $ohne = array_values(array_filter($liste, function ($x) { return strpos((string) $x, '--cpus=') !== 0; }));
+        sp_log('Container ' . sp_container_name($dienst) . ': der Kern kennt keine CPU-Grenze - angelegt ohne --cpus.');
+        list($rc, , $err) = sp_docker_ruf($ohne, SP_CT_ZEIT_RUN);
+    }
     if (sp_ct_zeitablauf($rc)) {
         return array(false, sprintf(sp_t('CT.RUN_ZEITABLAUF'), sp_container_name($dienst), SP_CT_ZEIT_RUN));
     }
@@ -2931,8 +3987,7 @@ function sp_container_log($dienst, $zeilen = 200)
     }
     list($host, $port) = sp_dienst_ziel($dienst);
     if (!sp_ist_lokal($host)) {
-        return 'Dieser Dienst laeuft auf ' . $host . ':' . $port . '.' . "\n"
-             . 'Sein Protokoll steht dort - hier gibt es keinen Container dazu.';
+        return sprintf(sp_t('LIB012.LOG_AUSGELAGERT'), $host . ':' . $port);
     }
     list($lage, $satz) = sp_docker_lage();
     if ($lage !== 'ok') {
@@ -2971,6 +4026,9 @@ function sp_ct_vorgang_ausfuehren($auftrag, $dienst = '')
     $berichte = array();
     $ok_d = array();
     try {
+        if (!sp_userland_64()) {
+            return sp_ct_vorgang_ende($stand, false, sp_t('LIB012.CT_NICHT64_SPERRE'));
+        }
         list($lage, $lagesatz) = sp_docker_lage();
         if ($lage !== 'ok') {
             return sp_ct_vorgang_ende($stand, false, $lagesatz);
@@ -3143,8 +4201,8 @@ function sp_ct_deinstallieren()
 /* ---------------- Die Ampel ---------------- */
 
 /**
- * Je Dienst: Abbild da / Container laeuft / Port antwortet (127.0.0.1:Port),
- * dazu eine Gesamtzeile. Werte 1 ja, 0 nein, -1 nicht feststellbar.
+ * Je Dienst: Abbild da / Container laeuft / Dienst antwortet (127.0.0.1:Port,
+ * seit 0.12.0 am Dienst erkannt - sp_dienst_erkennen()), dazu eine Gesamtzeile. Werte 1 ja, 0 nein, -1 nicht feststellbar.
  * Kostet docker-Aufrufe mit kurzen Grenzen - nur im offenen Reiter Dienste
  * oder Test rufen, und nicht, solange ein Vorgang laeuft.
  * $emp === null: die Empfehlung selbst holen (bin/hardware.py).
@@ -3162,11 +4220,21 @@ function sp_ct_ampel($cfg = null, $emp = null)
         list($host, $port) = sp_dienst_ziel($d, $cfg);
         $z = array('dienst' => $d, 'host' => $host, 'port' => $port, 'art' => 'lokal',
                    'modell' => sp_ct_modell($d, $cfg, $emp), 'abbild' => -1, 'container' => 'unbekannt',
-                   'laeuft' => -1, 'antwortet' => -1, 'grund' => '');
+                   'laeuft' => -1, 'antwortet' => -1, 'grund' => '', 'fremd' => 0, 'erkannt' => '');
+        // Seit 0.12.0 zaehlt nur der erkannte Dienst als "antwortet"
+        // (sp_dienst_erkennen()); 'fremd' = 1: auf dem Port antwortet etwas
+        // anderes, 'erkannt' sagt was.
+        $erkennen = function () use (&$z, $d) {
+            list($st, $grund) = sp_dienst_erkennen($d, $z['art'] === 'ausgelagert' ? $z['host'] : '127.0.0.1',
+                                                   $z['port']);
+            $z['antwortet'] = $st === 1 ? 1 : 0;
+            $z['fremd'] = $st === 2 ? 1 : 0;
+            $z['erkannt'] = $grund;
+        };
         if (!sp_ist_lokal($host)) {
             $z['art'] = 'ausgelagert';
             $z['container'] = '-';
-            $z['antwortet'] = sp_port_offen($host, $port) ? 1 : 0;
+            $erkennen();
         } elseif (sp_ct_llm_aus($d, $cfg)) {
             $z['art'] = 'ausgeschaltet';
             $z['container'] = '-';
@@ -3174,7 +4242,7 @@ function sp_ct_ampel($cfg = null, $emp = null)
             $z['art'] = 'nicht_vorgesehen';
             $z['container'] = '-';
         } else {
-            $z['antwortet'] = sp_port_offen('127.0.0.1', $port) ? 1 : 0;
+            $erkennen();
             if ($lage === 'ok') {
                 $z['abbild'] = sp_ct_abbild_da(sp_ct_abbild($d));
                 $f = sp_ct_finden($d);
@@ -3237,7 +4305,9 @@ function sp_ct_gesamt($a)
     foreach ($lokal as $d => $z) {
         $dn = sp_ct_dname($d);
         if ($a['lage'] === 'ok') {
-            if ($z['abbild'] === 0) {
+            // Ein laufender Container aus einem aelteren Abbild ist bereit; den
+            // neuen Tag nennt sp_ct_abweichung().
+            if ($z['abbild'] === 0 && $z['container'] !== 'laeuft') {
                 $fehlt[] = sprintf(sp_t('CT.G_ABBILD_FEHLT'), $dn);
             }
             if ($z['container'] === 'fehlt') {
@@ -3251,7 +4321,9 @@ function sp_ct_gesamt($a)
                 $fehlt[] = sprintf(sp_t('CT.G_UNBEKANNT'), $dn);
             }
         }
-        if ($z['antwortet'] !== 1) {
+        if ($z['antwortet'] !== 1 && !empty($z['fremd'])) {
+            $fehlt[] = $dn . ': ' . (string) $z['erkannt'];
+        } elseif ($z['antwortet'] !== 1) {
             $fehlt[] = sprintf(sp_t('CT.G_PORT_STUMM'), $dn, (int) $z['port']);
         }
     }
@@ -3274,16 +4346,28 @@ function sp_ct_gesamt($a)
 
 /* ---------------- Hardware und Empfehlung ---------------- */
 
+/** Zeitgrenzen der Programmaufrufe: hardware.py misst hoechstens rund 150 s (siehe dort). */
+define('SP_ZEIT_MESSEN', 170);
+define('SP_ZEIT_HARDWARE', 30);
+define('SP_ZEIT_TROCKEN', 60);
+define('SP_ZEIT_SELBSTTEST', 120);
+
+/** Der Python-Interpreter: der der virtuellen Umgebung, sonst python3 aus dem Pfad. */
+function sp_python()
+{
+    $p = sp_paths();
+    return is_file($p['bindir'] . '/venv/bin/python3') ? $p['bindir'] . '/venv/bin/python3' : 'python3';
+}
+
 function sp_hardware($messen = false)
 {
     $p = sp_paths();
-    $py = is_file($p['bindir'] . '/venv/bin/python3') ? $p['bindir'] . '/venv/bin/python3' : 'python3';
     $skript = $p['bindir'] . '/hardware.py';
     if (!is_file($skript)) { return array(); }
-    $ausgabe = array();
-    @exec(escapeshellcmd($py) . ' ' . escapeshellarg($skript)
-          . ($messen ? ' --messen' : '') . ' 2>/dev/null', $ausgabe);
-    $d = json_decode(implode("\n", $ausgabe), true);
+    $cmd = array(sp_python(), $skript);
+    if ($messen) { $cmd[] = '--messen'; }
+    list(, $aus, ) = sp_prozess_ruf($cmd, $messen ? SP_ZEIT_MESSEN : SP_ZEIT_HARDWARE);
+    $d = json_decode(trim($aus), true);
     return is_array($d) ? $d : array();
 }
 
@@ -3297,9 +4381,12 @@ function sp_selbsttest_ausgabe()
              . '       Erwartet: ' . $py . "\n                 " . $skript . "\n"
              . '       Abhilfe: Plugin neu installieren.';
     }
-    $ausgabe = array();
-    @exec(escapeshellcmd($py) . ' ' . escapeshellarg($skript) . ' --selbsttest 2>&1', $ausgabe);
-    return implode("\n", $ausgabe);
+    list($rc, $aus, $err) = sp_prozess_ruf(array($py, $skript, '--selbsttest'), SP_ZEIT_SELBSTTEST);
+    $text = rtrim(rtrim($aus) . ($err !== '' ? "\n" . $err : ''));
+    if (sp_ct_zeitablauf($rc)) {
+        $text .= "\n[FEHL] " . sprintf(sp_t('LIB012.ZEITABLAUF'), '--selbsttest', SP_ZEIT_SELBSTTEST);
+    }
+    return $text;
 }
 
 /**
@@ -3309,24 +4396,31 @@ function sp_selbsttest_ausgabe()
  * und sendet nichts. Ein Trockenlauf, der einen anderen Weg nimmt, prueft den
  * anderen Weg. Er braucht auch keinen laufenden Dienst: gerade dann will man
  * wissen, welche Regel greifen wuerde.
+ *
+ * SEIT 0.12.0 (I1) als "--trocken=<satz>" in EINEM Argument (und
+ * "--raum=<raum>"). Bis 0.11.15 standen Schalter und Satz getrennt; der Dienst
+ * suchte seine Schalter in der ganzen Argumentliste, und ein Testsatz
+ * "--mqtt-leeren" raeumte die zurueckbehaltenen Themen im Broker ab. Dazu
+ * eine Zeitgrenze: ein haengender Abruf hielt die Seite fest.
  */
 function sp_trockenlauf($satz, $raum = '')
 {
     $p = sp_paths();
-    $py = is_file($p['bindir'] . '/venv/bin/python3') ? $p['bindir'] . '/venv/bin/python3' : 'python3';
     $skript = $p['bindir'] . '/sprachsteuerung_dienst.py';
-    if (!is_file($skript)) { return array(0, 'sprachsteuerung_dienst.py fehlt.', array()); }
-    $ausgabe = array();
-    $befehl = escapeshellcmd($py) . ' ' . escapeshellarg($skript)
-            . ' --trocken ' . escapeshellarg((string) $satz);
+    if (!is_file($skript)) { return array(0, sp_t('LIB012.TROCKEN_FEHLT'), array()); }
+    $cmd = array(sp_python(), $skript, '--trocken=' . (string) $satz);
     if (trim((string) $raum) !== '') {
-        $befehl .= ' --raum ' . escapeshellarg((string) $raum);
+        $cmd[] = '--raum=' . (string) $raum;
     }
-    @exec($befehl . ' 2>&1', $ausgabe);
-    $d = json_decode(implode("\n", $ausgabe), true);
+    list($rc, $aus, $err) = sp_prozess_ruf($cmd, SP_ZEIT_TROCKEN);
+    $d = json_decode(trim($aus), true);
     if (!is_array($d)) {
-        return array(0, 'Der Trockenlauf lieferte keine verwertbare Antwort: '
-                      . implode(' ', array_slice($ausgabe, 0, 3)), array());
+        if (sp_ct_zeitablauf($rc)) {
+            return array(0, sprintf(sp_t('LIB012.ZEITABLAUF'), '--trocken', SP_ZEIT_TROCKEN), array());
+        }
+        $zeilen = preg_split('/\r?\n/', trim($aus . "\n" . $err));
+        return array(0, sprintf(sp_t('LIB012.TROCKEN_UNVERWERTBAR'),
+                                implode(' ', array_slice($zeilen, 0, 3))), array());
     }
     return array(!empty($d['ok']) ? 1 : 0,
                  (string) (isset($d['antwort']) ? $d['antwort'] : ''), $d);
@@ -3350,46 +4444,108 @@ function sp_trockenlauf($satz, $raum = '')
 function sp_endpunkt_probe()
 {
     $p = sp_paths();
-    $basis = 'http://' . sp_hostname() . '/plugins/' . $p['plugin'] . '/index.php';
+    /* Der Selbstaufruf geht an 127.0.0.1 und den Webport des LoxBerry, nicht
+     * an den Namen aus der Adresszeile (bis 0.11.15 sp_hostname()): hinter
+     * einem Tunnel oder einer Weiterleitung zeigt der woandershin, und das
+     * Aktionstoken ginge mit. */
+    $basis = 'http://127.0.0.1:' . sp_webport() . '/plugins/' . $p['plugin'] . '/index.php';
     $token = sp_token();
-    $hol = function ($url) {
-        // Auch hier keine Weiterleitung: in der Adresse steht das
-        // Aktionstoken, und es soll nirgendwo sonst ankommen.
-        $ctx = stream_context_create(array('http' => array(
-            'timeout' => 5, 'ignore_errors' => true,
-            'follow_location' => 0, 'max_redirects' => 1,
-            'header' => "User-Agent: LoxBerry-Sprachsteuerung-Selbsttest\r\n")));
-        $rumpf = @file_get_contents($url, false, $ctx);
-        $code = 0;
-        // PHP 8.5: $http_response_header ist veraltet; der Name steht deshalb
-        // nicht im Quelltext (Verfallsmeldung schon beim Uebersetzen).
-        if (function_exists('http_get_last_response_headers')) {
-            $kz = http_get_last_response_headers();
-        } else {
-            $kn = 'http_response_header';
-            $kz = isset($$kn) ? $$kn : null;
-        }
-        if (is_array($kz)) {
-            foreach ($kz as $z) {
-                if (preg_match('#^HTTP/\S+\s+(\d{3})#', $z, $t)) { $code = (int) $t[1]; }
-            }
-        }
-        return array($code, (string) $rumpf);
-    };
-    list($code, $rumpf) = $hol($basis . '?selftest=1&token=' . urlencode($token));
-    if ($code === 0) {
+    // Auch hier keine Weiterleitung: in der Adresse steht das Aktionstoken,
+    // und es soll nirgendwo sonst ankommen.
+    $kopf = array('User-Agent: LoxBerry-Sprachsteuerung-Selbsttest');
+    $a = sp_http_holen($basis . '?selftest=1&token=' . urlencode($token), array('kopf' => $kopf, 'zeit' => 5));
+    if ($a['code'] === 0) {
         return array(-1, sp_t('TEST.A_ENDPUNKT_STUMM'));
     }
-    if ($code !== 200 || strpos($rumpf, 'SELFTEST;OK=1') === false) {
-        return array(0, sprintf(sp_t('TEST.A_ENDPUNKT_FEHL'), $code,
-                                sp_e(substr(trim($rumpf), 0, 80))));
+    if ($a['code'] !== 200 || strpos($a['rumpf'], 'SELFTEST;OK=1') === false) {
+        return array(0, sprintf(sp_t('TEST.A_ENDPUNKT_FEHL'), $a['code'],
+                                sp_e(substr(trim($a['rumpf']), 0, 80))));
     }
     // Gegenprobe: ein falsches Token MUSS abgewiesen werden.
-    list($code2, ) = $hol($basis . '?selftest=1&token=' . urlencode($token . 'x'));
-    if ($code2 !== 403) {
-        return array(0, sprintf(sp_t('TEST.A_ENDPUNKT_OFFEN'), $code2));
+    $b = sp_http_holen($basis . '?selftest=1&token=' . urlencode($token . 'x'), array('kopf' => $kopf, 'zeit' => 5));
+    if ($b['code'] !== 403) {
+        return array(0, sprintf(sp_t('TEST.A_ENDPUNKT_OFFEN'), $b['code']));
     }
     return array(1, sp_t('TEST.A_ENDPUNKT_OK'));
+}
+
+/**
+ * Eine Adresse abrufen (GET, Weiterleitungen werden NICHT verfolgt).
+ * Rueckgabe: array('code' => HTTP-Status oder 0, 'kopf' => Kopfzeilen,
+ * 'rumpf' => hoechstens $opt['max'] Bytes, 'fehler' => Text).
+ *
+ * WARUM fopen() und stream_get_meta_data(): bis 0.11.15 lasen
+ * sp_endpunkt_probe() und sp_lox_struktur_holen() den Status aus
+ * $http_response_header - ueber eine variable Variable, damit der Name nicht
+ * im Quelltext steht (PHP 8.5 meldet ihn als veraltet). Innerhalb einer
+ * Closure bzw. ueber eine variable Variable ist diese Variable aber nicht
+ * zu greifen: unter PHP < 8.4 kam IMMER null heraus (gemessen), der Status
+ * war 0 - die Endpunkt-Probe meldete stets "keine Antwort", der
+ * Loxone-Import scheiterte immer. wrapper_data der Datenstrom-Metadaten
+ * traegt dieselben Kopfzeilen, in jeder Fassung von 7.4 bis 8.5 und ohne
+ * Verfallsmeldung.
+ *
+ * $opt: 'kopf' (Liste von Kopfzeilen), 'zeit' (s, Vorgabe 5), 'max'
+ * (Bytes, Vorgabe 1 MB), 'ssl' (Optionen des ssl-Kontexts).
+ */
+function sp_http_holen($url, array $opt = array())
+{
+    $erg = array('code' => 0, 'kopf' => array(), 'rumpf' => '', 'fehler' => '');
+    $zeit = isset($opt['zeit']) ? max(1, (float) $opt['zeit']) : 5.0;
+    $max = isset($opt['max']) ? max(1, (int) $opt['max']) : 1048576;
+    $kopf = isset($opt['kopf']) && is_array($opt['kopf']) ? $opt['kopf'] : array();
+    $kopf[] = 'Connection: close';
+    $ktx = array('http' => array(
+        'method' => 'GET', 'timeout' => $zeit, 'ignore_errors' => true,
+        'follow_location' => 0, 'max_redirects' => 1, 'protocol_version' => 1.1,
+        'header' => implode("\r\n", $kopf) . "\r\n"));
+    if (isset($opt['ssl']) && is_array($opt['ssl'])) { $ktx['ssl'] = $opt['ssl']; }
+    $fp = @fopen($url, 'rb', false, stream_context_create($ktx));
+    if ($fp === false) {
+        $f = error_get_last();
+        $erg['fehler'] = is_array($f) && isset($f['message']) ? (string) $f['message'] : 'fopen';
+        return $erg;
+    }
+    $meta = stream_get_meta_data($fp);
+    $zeilen = (isset($meta['wrapper_data']) && is_array($meta['wrapper_data'])) ? $meta['wrapper_data'] : array();
+    foreach ($zeilen as $z) {
+        if (!is_string($z)) { continue; }
+        // Stuenden mehrere Statuszeilen da (100 Continue), zaehlt die letzte.
+        if (preg_match('#^HTTP/\S+\s+(\d{3})#', $z, $t)) {
+            $erg['code'] = (int) $t[1];
+            $erg['kopf'] = array();
+        } else {
+            $erg['kopf'][] = $z;
+        }
+    }
+    stream_set_timeout($fp, (int) ceil($zeit));
+    $ende = microtime(true) + $zeit;
+    $rumpf = '';
+    while (!feof($fp) && strlen($rumpf) < $max && microtime(true) < $ende) {
+        $t = fread($fp, min(65536, $max - strlen($rumpf)));
+        if ($t === false) { break; }
+        if ($t === '') {
+            $m = stream_get_meta_data($fp);
+            if (!empty($m['timed_out'])) { break; }
+            continue;
+        }
+        $rumpf .= $t;
+    }
+    fclose($fp);
+    $erg['rumpf'] = $rumpf;
+    return $erg;
+}
+
+/** Eine Kopfzeile aus sp_http_holen() (ohne Ruecksicht auf die Schreibweise), sonst ''. */
+function sp_http_kopf(array $a, $name)
+{
+    foreach ($a['kopf'] as $z) {
+        $teile = explode(':', (string) $z, 2);
+        if (count($teile) === 2 && strtolower(trim($teile[0])) === strtolower($name)) {
+            return trim($teile[1]);
+        }
+    }
+    return '';
 }
 
 /**
@@ -3544,7 +4700,7 @@ function sp_mitschnitt_schalten($sekunden)
     $cfg = sp_config();
     $sekunden = max(0, min(1800, (int) $sekunden));
     $cfg['mitschnitt_bis'] = $sekunden > 0 ? time() + $sekunden : 0;
-    if (!sp_config_speichern($cfg)) { return array(0, 'Nicht gespeichert.'); }
+    if (!sp_config_speichern($cfg)) { return array(0, sp_t('LIB012.NICHT_GESPEICHERT')); }
     if ($sekunden > 0) {
         sp_log('Mitschnitt fuer ' . $sekunden . ' s eingeschaltet.');
         return array(1, sprintf(sp_t('LOG.MITSCHNITT_AN'), $sekunden));
@@ -3599,44 +4755,92 @@ function sp_lox_arten()
 /**
  * Die Strukturdatei holen und Vorschlaege daraus bauen.
  *
+ * $host ist entweder eine Adresse (dann gelten $benutzer und $kennwort, wie
+ * bis 0.11.15) oder - seit 0.12.0 - die NUMMER eines in LoxBerry
+ * eingetragenen Miniservers (Zahl, "ms:2" oder "ms://2"). Dann kommen
+ * Adresse, Port, https und Anmeldung aus der general.json; die Zugangsdaten
+ * werden nie zurueckgegeben, nie angezeigt und nie gespeichert. Mit einer
+ * Nummer traegt jeder Vorschlag dazu url_lesen = "ms://<nr>/jdev/sps/io/
+ * <uuid>/state" - der Dienst setzt dort die Zugangsdaten selbst ein.
+ *
  * Rueckgabe: array(ok, Meldung, Vorschlaege)
  */
-function sp_lox_struktur_holen($host, $benutzer, $kennwort)
+function sp_lox_struktur_holen($host, $benutzer = '', $kennwort = '')
 {
-    $host = trim((string) $host);
-    if ($host === '' || !preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-:_]{0,80}$/', $host)) {
-        return array(0, sp_t('LOXIMP.FEHLER_HOST'), array());
+    $msnr = 0;
+    if (is_int($host)) {
+        $msnr = $host;
+    } elseif (preg_match('#^\s*(?:ms:(?://)?)?([0-9]{1,3})\s*\z#i', (string) $host, $t)) {
+        $msnr = (int) $t[1];
     }
-    $url = 'http://' . $host . '/data/LoxAPP3.json';
-    $kopf = "User-Agent: LoxBerry-Sprachsteuerung-Plugin/0.10\r\n"
-          . "Accept: application/json\r\n";
-    if ($benutzer !== '') {
-        // Die Zugangsdaten gehen in den KOPF, nicht in die Adresse: eine
-        // Adresse landet im Protokoll des Webservers, ein Kopf nicht.
-        $kopf .= 'Authorization: Basic ' . base64_encode($benutzer . ':' . $kennwort) . "\r\n";
-    }
-    // KEINE Weiterleitung: der Authorization-Kopf ginge sonst an ein
-    // Ziel, das die Gegenstelle bestimmt.
-    $ctx = stream_context_create(array('http' => array(
-        'timeout' => 15, 'ignore_errors' => true, 'header' => $kopf,
-        'follow_location' => 0, 'max_redirects' => 1)));
-    $roh = @file_get_contents($url, false, $ctx);
-    $code = 0;
-    // PHP 8.5: $http_response_header ist veraltet; der Name steht deshalb
-    // nicht im Quelltext (Verfallsmeldung schon beim Uebersetzen).
-    if (function_exists('http_get_last_response_headers')) {
-        $kz = http_get_last_response_headers();
+    $verify_aus = false;
+    if ($msnr > 0) {
+        $alle = sp_lb_miniserver_roh();
+        if (!isset($alle[$msnr])) {
+            return array(0, sprintf(sp_t('LIB012.LOX_MS_FEHLT'), $msnr), array());
+        }
+        $ms = $alle[$msnr];
+        $host = $ms['ip'];
+        $benutzer = $ms['benutzer'];
+        $kennwort = $ms['kennwort'];
+        $schema = $ms['https'] ? 'https' : 'http';
+        $port = $ms['https'] ? $ms['porthttps'] : $ms['port'];
+        /* Das Zertifikat eines Miniservers laesst sich in aller Regel nicht
+         * pruefen: es ist auf den Namen bei Loxone (dyndns.loxonecloud.com
+         * bzw. die Seriennummer) ausgestellt, nicht auf die IP im Heimnetz,
+         * mit der LoxBerry ihn anspricht. Die Pruefung wird deshalb NUR fuer
+         * die IP des in LoxBerry eingetragenen Miniservers abgeschaltet - eine
+         * Adresse, die der Anwender dort selbst hinterlegt hat. */
+        $verify_aus = true;
     } else {
-        $kn = 'http_response_header';
-        $kz = isset($$kn) ? $$kn : null;
-    }
-    if (is_array($kz)) {
-        foreach ($kz as $z) {
-            if (preg_match('#^HTTP/\S+\s+(\d{3})#', $z, $t)) { $code = (int) $t[1]; }
+        $host = trim((string) $host);
+        if ($host === '' || !preg_match('/^[A-Za-z0-9][A-Za-z0-9\.\-:_]{0,80}$/', $host)) {
+            return array(0, sp_t('LOXIMP.FEHLER_HOST'), array());
+        }
+        $schema = 'http';
+        $port = 0;
+        // Steht dieselbe Adresse als Miniserver in LoxBerry, gilt dasselbe
+        // wie oben (eingetragene IP, Zertifikat nicht pruefbar).
+        foreach (sp_lb_miniserver_roh() as $m) {
+            if (strcasecmp($m['ip'], preg_replace('/:\d+\z/', '', $host)) === 0) { $verify_aus = true; }
         }
     }
-    if ($roh === false || $code === 0) {
-        return array(0, sprintf(sp_t('LOXIMP.FEHLER_STUMM'), sp_e($host)), array());
+    $ziel_host = preg_replace('/:\d+\z/', '', $host);
+    $hostport = (strpos($host, ':') !== false && $port === 0) ? $host
+              : $host . (($port > 0 && !($schema === 'http' && $port === 80) && !($schema === 'https' && $port === 443))
+                         ? ':' . $port : '');
+    $url = $schema . '://' . $hostport . '/data/LoxAPP3.json';
+    $kopf = array('User-Agent: LoxBerry-Sprachsteuerung-Plugin/0.12', 'Accept: application/json');
+    if ((string) $benutzer !== '') {
+        // Die Zugangsdaten gehen in den KOPF, nicht in die Adresse: eine
+        // Adresse landet im Protokoll des Webservers, ein Kopf nicht.
+        $kopf[] = 'Authorization: Basic ' . base64_encode($benutzer . ':' . $kennwort);
+    }
+    $ssl = $verify_aus ? array('verify_peer' => false, 'verify_peer_name' => false, 'allow_self_signed' => true)
+                       : array();
+    $opt = array('kopf' => $kopf, 'zeit' => 15, 'max' => 16 * 1048576, 'ssl' => $ssl);
+    $a = sp_http_holen($url, $opt);
+    /* Eine Weiterleitung wird EINMAL verfolgt - und nur von http nach https
+     * auf DENSELBEN Rechner (Miniserver mit "nur https"). Jede andere ginge
+     * mit dem Authorization-Kopf an ein Ziel, das die Gegenstelle bestimmt;
+     * deshalb verfolgt sp_http_holen() selbst keine. */
+    if (in_array($a['code'], array(301, 302, 307, 308), true)) {
+        $wohin = sp_http_kopf($a, 'Location');
+        $teile = $wohin !== '' ? parse_url($wohin) : false;
+        if ($schema === 'http' && is_array($teile) && isset($teile['scheme'], $teile['host'])
+            && strtolower($teile['scheme']) === 'https'
+            && strcasecmp(trim($teile['host'], '[]'), trim($ziel_host, '[]')) === 0) {
+            $url = 'https://' . $teile['host'] . (isset($teile['port']) ? ':' . (int) $teile['port'] : '')
+                 . '/data/LoxAPP3.json';
+            $a = sp_http_holen($url, $opt);
+        } else {
+            return array(0, sprintf(sp_t('LIB012.LOX_WEITERLEITUNG'), $a['code']), array());
+        }
+    }
+    $roh = $a['rumpf'];
+    $code = $a['code'];
+    if ($code === 0) {
+        return array(0, sprintf(sp_t('LOXIMP.FEHLER_STUMM'), sp_e($ziel_host)), array());
     }
     if ($code === 401) {
         return array(0, sp_t('LOXIMP.FEHLER_401'), array());
@@ -3661,33 +4865,67 @@ function sp_lox_struktur_holen($host, $benutzer, $kennwort)
         $name = trim((string) (isset($c['name']) ? $c['name'] : ''));
         if ($name === '') { continue; }
         $raum = isset($c['room'], $raeume[$c['room']]) ? $raeume[$c['room']] : '';
-        $schluessel = sp_lox_schluessel($raum . '_' . $name);
-        if ($schluessel === '' || isset($vorschlaege[$schluessel])) { continue; }
-        $alias = array();
-        foreach (array($name, trim($raum . ' ' . $name), trim($name . ' ' . $raum)) as $a) {
-            $a = trim($a);
-            if ($a !== '' && !in_array($a, $alias, true)) { $alias[] = $a; }
+        $basis = sp_lox_schluessel($raum . '_' . $name);
+        if ($basis === '') { continue; }
+        /* Zwei Bausteine gleichen Namens im selben Raum ergaben bis 0.11.15
+         * denselben Schluessel, und der zweite fiel STILL weg. Jetzt bekommt
+         * er eine Nummer (_2, _3 ...) - in Reihenfolge der Strukturdatei. */
+        $schluessel = $basis;
+        for ($n = 2; isset($vorschlaege[$schluessel]); $n++) {
+            $schluessel = $basis . '_' . $n;
         }
-        $vorschlaege[$schluessel] = array(
+        $alias = array();
+        foreach (array($name, trim($raum . ' ' . $name), trim($name . ' ' . $raum)) as $al) {
+            $al = trim($al);
+            if ($al !== '' && !in_array($al, $alias, true)) { $alias[] = $al; }
+        }
+        // Ohne Raum kein fuehrender Schraegstrich ("/licht" bis 0.11.15).
+        $thema = implode('/', array_filter(array(sp_lox_schluessel($raum), sp_lox_schluessel($name)), 'strlen'));
+        if ($schluessel !== $basis) { $thema .= '_' . substr($schluessel, strlen($basis) + 1); }
+        $uuid_s = (is_string($uuid) && preg_match('/^[0-9A-Fa-f\-]{8,64}\z/', $uuid)) ? $uuid
+                : ((isset($c['uuidAction']) && is_string($c['uuidAction'])
+                    && preg_match('/^[0-9A-Fa-f\-]{8,64}\z/', $c['uuidAction'])) ? $c['uuidAction'] : '');
+        $v = array(
             'schluessel' => $schluessel,
             'name'       => $raum !== '' ? $name . ' (' . $raum . ')' : $name,
             'alias'      => $alias,
-            'thema'      => sp_lox_schluessel($raum) . '/' . sp_lox_schluessel($name),
+            'thema'      => $thema,
             'raum'       => $raum,
             'art'        => $arten[$typ],
             'typ'        => $typ,
+            'uuid'       => $uuid_s,
         );
+        if ($msnr > 0 && $uuid_s !== '') {
+            $v['url_lesen'] = 'ms://' . $msnr . '/jdev/sps/io/' . $uuid_s . '/state';
+        }
+        $vorschlaege[$schluessel] = $v;
     }
     ksort($vorschlaege);
     return array(1, sprintf(sp_t('LOXIMP.GEFUNDEN'), count($vorschlaege),
                             count($d['controls'])), $vorschlaege);
 }
 
-/** Aus einem Anzeigenamen einen Schluessel machen - dieselbe Einebnung wie im Dienst. */
+/**
+ * Aus einem Anzeigenamen einen Schluessel machen - dieselbe Einebnung wie
+ * einebnen() in bin/verstehen.py: Umlaute und ss ausschreiben (auch die
+ * grossen), klein schreiben, Akzente weg, alles andere wird "_".
+ *
+ * Bis 0.11.15 stand strtolower() VOR der Ersetzung: strtolower arbeitet
+ * byteweise und laesst Ä/Ö/Ü stehen, die Tabelle kannte nur die kleinen -
+ * aus "Übergang" wurde "bergang", aus "Ölheizung" "lheizung".
+ */
 function sp_lox_schluessel($text)
 {
-    $t = strtolower(trim((string) $text));
-    $t = strtr($t, array('ä' => 'ae', 'ö' => 'oe', 'ü' => 'ue', 'ß' => 'ss'));
+    $t = trim((string) $text);
+    $t = strtr($t, array("\xC3\xA4" => 'ae', "\xC3\xB6" => 'oe', "\xC3\xBC" => 'ue',
+                         "\xC3\x84" => 'ae', "\xC3\x96" => 'oe', "\xC3\x9C" => 'ue',
+                         "\xC3\x9F" => 'ss', "\xE1\xBA\x9E" => 'ss'));
+    $t = function_exists('mb_strtolower') ? mb_strtolower($t, 'UTF-8') : strtolower($t);
+    if (class_exists('Normalizer', false)) {
+        $n = Normalizer::normalize($t, Normalizer::FORM_KD);
+        if (is_string($n)) { $t = (string) preg_replace('/\p{Mn}+/u', '', $n); }
+    }
+    $t = strtolower($t);
     $t = preg_replace('/[^a-z0-9]+/', '_', $t);
     return trim((string) $t, '_');
 }
