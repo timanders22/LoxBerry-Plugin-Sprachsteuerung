@@ -4641,7 +4641,8 @@ def selbsttest() -> int:
 
 
 def satzproben(v) -> dict:
-    """Jede Regel gegen einen erzeugten Beispielsatz fahren.
+    """Jede Regel gegen einen erzeugten Beispielsatz fahren - und den Satz
+    danach in Abwandlungen, wie sie wirklich gesprochen werden.
 
     Es wird NICHTS geschaltet. Geprueft wird zweierlei: ob der Satz ueberhaupt
     trifft - und ob DIESELBE Regel trifft, aus der er gebaut wurde.
@@ -4654,29 +4655,60 @@ def satzproben(v) -> dict:
     'wohnzimmer' findet. Der vorgemerkte Befehl wurde damit SOFORT
     ausgefuehrt - und die Probe war trotzdem gruen, weil irgendetwas getroffen
     hatte. Eine Pruefung, die nur 'es trifft' misst, beruhigt.
+
+    Seit 0.12.0 kommen Abwandlungen dazu, gebaut aus der ersten Schaltregel
+    und den Zielen der Satzdatei: andere Wortstellung der Zeitangabe,
+    'eineinhalb stunden', 'einer halben stunde', Zahlwoerter, eine Uhrzeit,
+    eine Verneinung, zwei Ziele mit 'und', ein Zielname als Teil eines
+    Wortes. Ein einziger kanonischer Satz je Regel hatte all das nie
+    gesehen - und genau dort schaltete die Anlage sofort oder das falsche
+    Ziel (Befunde H1, H4, M5 vom 03.10.2026).
+
+    'fehl' sind nur GEFAEHRLICHE Befunde: es wuerde sofort, falsch oder
+    trotz 'nicht' geschaltet. Was die Satzdatei bloss nicht versteht - die
+    Anlage fragt dann nach -, steht unter 'hinweise' und zaehlt nicht als
+    getroffen.
     """
     ok = 0
     fehl = []
+    hinweise = []
     gesamt = 0
     beispielziel = next((z for z in v.ziele.values() if z["namen"]), None)
+    zielwort = beispielziel["namen"][0] if beispielziel else "x"
+    alle_muster = " ".join(str(r.get("muster") or "") for _, r in v.regeln).lower()
+    englisch = (len(re.findall(r"\b(?:turn|switch|dim|set|off|on|the)\b", alle_muster))
+                > len(re.findall(r"\b(?:schalte|mach|dimme|stelle|aus|an|ein)\b", alle_muster)))
+    praep_woerter = ("in", "nach", "binnen", "innerhalb", "von", "fuer", "auf", "ueber",
+                     "after", "within", "for", "of")
+
+    def bauen(muster, ziel_text, dauer_text=None, wert_text="50"):
+        # Aus dem Muster einen Satz bauen: erste Alternative, Platzhalter mit
+        # brauchbaren Werten. {dauer} ohne 'in'/'nach' davor bekommt sein
+        # Verhaeltniswort mit - so verlangt es verstehen.py.
+        satz = re.sub(r"\[([^\]]*)\]", lambda t: t.group(1).split("|")[0], muster)
+        satz = satz.replace("{ziel}", ziel_text).replace("{wert}", wert_text)
+        if "{dauer}" in satz:
+            davor = satz.split("{dauer}", 1)[0].split()
+            if dauer_text is None:
+                dauer_text = "10 minutes" if englisch else "10 minuten"
+                if not davor or davor[-1] not in praep_woerter:
+                    dauer_text = ("after " if englisch else "nach ") + dauer_text
+            satz = satz.replace("{dauer}", dauer_text, 1)
+        satz = satz.replace("{rest}", "irgendwas")
+        satz = re.sub(r"\{[a-z]+\}", "irgendwas", satz)
+        return re.sub(r"\s+", " ", satz).strip()
+
     for _, regel in v.regeln:
         muster = str(regel.get("muster") or "")
         if not muster:
             continue
-        gesamt += 1
-        satz = muster
-        # Aus dem Muster einen Satz bauen: erste Alternative, Platzhalter mit
-        # brauchbaren Werten.
-        satz = re.sub(r"\[([^\]]*)\]", lambda t: t.group(1).split("|")[0], satz)
-        satz = satz.replace("{ziel}", beispielziel["namen"][0] if beispielziel else "x")
-        satz = satz.replace("{wert}", "50").replace("{dauer}", "10 minuten")
-        satz = satz.replace("{rest}", "irgendwas")
-        satz = re.sub(r"\{[a-z]+\}", "irgendwas", satz)
-        satz = re.sub(r"\s+", " ", satz).strip()
+        satz = bauen(muster, zielwort)
         if not satz:
             continue
+        gesamt += 1
         erg = v.erkennen(satz)
-        if not (erg.get("ok") or erg.get("grund") in ("ziel_unbekannt", "ziel_fehlt")):
+        if not (erg.get("ok") or erg.get("grund") in ("ziel_unbekannt", "ziel_fehlt",
+                                                      "wert_bereich")):
             fehl.append("%r ergibt %r -> %s" % (muster, satz, erg.get("grund")))
             continue
         getroffen = str(erg.get("muster") or "")
@@ -4686,7 +4718,118 @@ def satzproben(v) -> dict:
                         % (muster, getroffen, satz))
             continue
         ok += 1
-    return {"ok": ok, "gesamt": gesamt, "fehl": fehl}
+
+    # ---- Abwandlungen ----
+    # Grundlage: die erste Schaltregel mit {ziel} und ohne {dauer}/{wert},
+    # bevorzugt eine Aus-Regel. Ohne eine solche Regel und ohne Ziel gibt es
+    # nichts abzuwandeln.
+    schaltregeln = [r for _, r in v.regeln
+                    if "{ziel}" in str(r.get("muster") or "")
+                    and "{dauer}" not in str(r.get("muster") or "")
+                    and "{wert}" not in str(r.get("muster") or "")
+                    and str(r.get("absicht") or "") == "schalten"]
+    schaltregeln.sort(key=lambda r: 0 if str(r.get("aktion") or "") == "aus" else 1)
+    if not schaltregeln or beispielziel is None:
+        return {"ok": ok, "gesamt": gesamt, "fehl": fehl, "hinweise": hinweise}
+    grund_muster = str(schaltregeln[0].get("muster") or "")
+    grundsatz = bauen(grund_muster, zielwort)
+    schluessel = beispielziel["schluessel"]
+
+    def probe(satz, pruefung, vorgabe=""):
+        nonlocal ok, gesamt
+        gesamt += 1
+        erg = v.erkennen(satz, vorgabe)
+        befund = pruefung(erg)
+        if befund is None:
+            ok += 1
+        elif befund[0] == "fehl":
+            fehl.append(befund[1])
+        else:
+            hinweise.append(befund[1])
+
+    # Zeitangaben an zwei Stellen des Satzes. Erwartet: vorgemerkt mit der
+    # richtigen Dauer. Nachfragen (dauer_unklar) ist ehrlich, aber ein Loch
+    # in der Satzdatei; sofort schalten ist ein Fehler.
+    if englisch:
+        zeiten = (("in an hour and a half", 5400), ("in half an hour", 1800),
+                  ("in ten minutes", 600), ("at 10 pm", 0))
+        stellen = (lambda s, z: s + " " + z, lambda s, z: z + " " + s)
+    else:
+        zeiten = (("in eineinhalb stunden", 5400), ("in einer halben stunde", 1800),
+                  ("in zehn minuten", 600), ("um 22 uhr", 0))
+        stellen = (lambda s, z: " ".join(s.split()[:-1] + [z, s.split()[-1]]),
+                   lambda s, z: " ".join(s.split()[:1] + [z] + s.split()[1:]))
+    for zeit, sekunden in zeiten:
+        for stelle in stellen:
+            satz = stelle(grundsatz, zeit)
+
+            def zeitpruefung(erg, satz=satz, zeit=zeit, sekunden=sekunden):
+                if erg.get("ok") and not erg.get("dauer_s"):
+                    return ("fehl", "Zeitangabe verschluckt: %r wuerde SOFORT schalten "
+                                    "(Regel %r) - '%s' faellt weg." % (satz, erg.get("muster"), zeit))
+                if erg.get("ok") and sekunden and erg.get("dauer_s") != sekunden:
+                    return ("fehl", "Zeitangabe falsch gelesen: %r ergibt %s Sekunden statt %d."
+                                    % (satz, erg.get("dauer_s"), sekunden))
+                if erg.get("ok"):
+                    return None
+                return ("hinweis", "Wortstellung nicht verstanden: %r -> %s (die Anlage "
+                                   "fragt nach). Eine Regel mit {dauer} an dieser Stelle "
+                                   "fehlt." % (satz, erg.get("grund")))
+            probe(satz, zeitpruefung)
+
+    # Verneinung: darf NIE schalten.
+    if englisch:
+        satz = "don't " + grundsatz
+    else:
+        satz = " ".join(grundsatz.split()[:-1] + ["nicht", grundsatz.split()[-1]])
+    probe(satz, lambda erg, satz=satz: None if not erg.get("ok") else (
+        "fehl", "Verneinung ueberhoert: %r schaltet trotzdem (Regel %r)."
+                % (satz, erg.get("muster"))))
+
+    # Zwei Ziele mit 'und': schaltete bis 0.11.15 nur eines.
+    zweites = next((z for z in v.ziele.values()
+                    if z["namen"] and z["schluessel"] != schluessel), None)
+    if zweites is not None:
+        satz = bauen(grund_muster, "%s %s %s" % (zielwort, "and" if englisch else "und",
+                                                zweites["namen"][0]))
+        probe(satz, lambda erg, satz=satz: None if not erg.get("ok") else (
+            "fehl", "Zwei Ziele in einem Satz: %r schaltet nur %s." % (satz, erg.get("zielname"))))
+
+    # Zielname als Teil eines Wortes: darf dieses Ziel NICHT treffen.
+    for ziel in list(v.ziele.values())[:40]:
+        if not ziel["namen"]:
+            continue
+        wort = "sonnen" + ziel["namen"][0].replace(" ", "")
+        satz = bauen(grund_muster, wort)
+        probe(satz, lambda erg, satz=satz, ziel=ziel: None
+              if not (erg.get("ok") and erg.get("ziel") == ziel["schluessel"]) else (
+                  "fehl", "Teilwort trifft: in %r wird %r als Ziel %s erkannt."
+                          % (satz, ziel["namen"][0], ziel["schluessel"])))
+
+    # 'das licht' ohne Raum: die Vorgabe des Mikrofons gilt.
+    satz = bauen(grund_muster, "the light" if englisch else "das licht")
+    probe(satz, lambda erg, satz=satz: None
+          if erg.get("ok") and erg.get("ziel") == schluessel else (
+              "hinweis", "Raumvorgabe greift nicht: %r mit Raum %s -> %s."
+                         % (satz, schluessel, erg.get("zielname") or erg.get("grund"))),
+          vorgabe=schluessel)
+
+    # Zahlwoerter in der ersten Regel mit {wert}.
+    wertregel = next((str(r.get("muster") or "") for _, r in v.regeln
+                      if "{wert}" in str(r.get("muster") or "")), "")
+    if wertregel:
+        for wort, zahl in ((("fifty", 50), ("twenty one point five", 21.5))
+                           if englisch else
+                           (("fuenfzig", 50), ("einundzwanzig komma fuenf", 21.5))):
+            satz = bauen(wertregel, zielwort, wert_text=wort)
+            probe(satz, lambda erg, satz=satz, zahl=zahl: None
+                  if (erg.get("ok") and erg.get("wert") == zahl)
+                  or erg.get("grund") == "wert_bereich" else (
+                      ("fehl", "Zahlwort falsch gelesen: %r ergibt %r statt %s."
+                               % (satz, erg.get("wert"), zahl)) if erg.get("ok") else
+                      ("hinweis", "Zahlwort nicht verstanden: %r -> %s."
+                                  % (satz, erg.get("grund")))))
+    return {"ok": ok, "gesamt": gesamt, "fehl": fehl, "hinweise": hinweise}
 
 
 def main() -> int:
