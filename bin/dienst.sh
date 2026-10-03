@@ -212,6 +212,51 @@ ordner_anlegen() {
     mkdir -p "$PDATA" "$PLOG" 2>/dev/null
 }
 
+# Die Startdatei kappen, wenn sie groesser als $1 Bytes ist; es bleiben die
+# letzten $2 Bytes. Sie liegt auf einer Ramdisk, und niemand rotiert sie.
+#
+# IN PLACE, nicht mit mv: der laufende Dienst haelt start.log ueber seine
+# Standardausgabe offen (">>", also O_APPEND), ebenso die Cron-Zeile des
+# Waechters ueber "2>>". Bis 0.11.15 tauschte starten() die Datei mit mv aus;
+# ein Schreiber mit offenem Deskriptor schrieb danach in die geloeschte alte
+# Datei weiter - unsichtbar und bis zum naechsten Neustart Platz auf der
+# Ramdisk belegend. "cat > f" kuerzt dagegen dieselbe Datei; wer mit O_APPEND
+# schreibt, haengt danach am neuen Ende an. Ein Satz, der genau zwischen tail
+# und cat geschrieben wird, kann fehlen - das ist hinnehmbar.
+startlog_kappen() {   # $1 Grenze in Bytes, $2 was stehen bleibt
+    [ -f "$STARTLOG" ] || return 0
+    [ "$(wc -c < "$STARTLOG" 2>/dev/null || echo 0)" -gt "$1" ] || return 0
+    tail -c "$2" "$STARTLOG" > "$STARTLOG.kappen" 2>/dev/null \
+        && cat "$STARTLOG.kappen" > "$STARTLOG" 2>/dev/null
+    rm -f "$STARTLOG.kappen" 2>/dev/null
+    return 0
+}
+
+# Der Dienst startet mit niedrigerer Rechen- und Plattenprioritaet (0.12.0):
+# auf einem Raspberry Pi teilt er sich die Kerne mit dem MQTT-Gateway und der
+# Miniserver-Kommunikation anderer Plugins, und die sollen nicht warten, weil
+# hier gerade ein Satz verarbeitet wird. Die schwere Arbeit (Whisper, Piper,
+# Sprachmodell) laeuft ohnehin in den Containern.
+#
+# nice und ionice ersetzen sich per exec durch das naechste Programm - der
+# Vorgang behaelt die Nummer aus $!, und /proc/<pid>/cmdline zeigt danach
+# wieder genau "python3 <dienstpfad>". Die Erkennung (laeuft(), preupgrade.sh,
+# postinstall.sh, uninstall) bleibt damit unveraendert gueltig.
+#
+# ionice bewusst mit "-c2 -n7" (niedrigste Stufe der gewoehnlichen Klasse),
+# NICHT "-c3" (nur im Leerlauf): mit dem Planer BFQ bekommt ein Vorgang der
+# Klasse 3 keinen Plattenzugriff, solange ein anderer ununterbrochen liest
+# oder schreibt - etwa "docker pull" eines Abbilds von mehreren Gigabyte. Der
+# Dienst schriebe dann sein Protokoll nicht mehr, und mit ihm stuende die
+# Verarbeitung der Mikrofone. Fehlt ionice (kein util-linux), nur nice.
+sp_prio_vorsatz() {
+    SP_VORSATZ=""
+    command -v nice >/dev/null 2>&1 && SP_VORSATZ="nice -n 10"
+    if command -v ionice >/dev/null 2>&1 && ionice -c2 -n7 true >/dev/null 2>&1; then
+        SP_VORSATZ="$SP_VORSATZ ionice -c2 -n7"
+    fi
+}
+
 laeuft() {
     [ -f "$PID" ] || return 1
     P=$(cat "$PID" 2>/dev/null)
@@ -294,14 +339,14 @@ starten() {
     touch "$SOLL"
     # Ausgabe geht in die Logdatei. Das Python-Skript protokolliert deshalb
     # NICHT zusaetzlich nach stdout - sonst stuende jede Zeile doppelt darin.
-    # Die Startdatei kappen, bevor etwas dazukommt: sie liegt auf einer
-    # Ramdisk und niemand rotiert sie.
-    if [ -f "$STARTLOG" ] && [ "$(wc -c < "$STARTLOG" 2>/dev/null || echo 0)" -gt 65536 ]; then
-        tail -c 16384 "$STARTLOG" > "$STARTLOG.neu" 2>/dev/null \
-            && mv "$STARTLOG.neu" "$STARTLOG"
-    fi
+    # Die Startdatei kappen, bevor etwas dazukommt (startlog_kappen).
+    startlog_kappen 65536 16384
     # 8<&-: der Dienst erbt die Startsperre nicht (siehe startsperre_nehmen).
-    nohup "$PY" "$SKRIPT" >> "$STARTLOG" 2>&1 8<&- &
+    # $SP_VORSATZ ist absichtlich ungequotet: "nice -n 10 ionice -c2 -n7"
+    # sind mehrere Woerter, und leer faellt er ganz weg.
+    sp_prio_vorsatz
+    # shellcheck disable=SC2086
+    nohup $SP_VORSATZ "$PY" "$SKRIPT" >> "$STARTLOG" 2>&1 8<&- &
     echo $! > "$PID"
     sleep 1
     if laeuft; then
@@ -320,6 +365,17 @@ starten() {
 }
 
 anhalten() {
+    # Erst die Startsperre, dann alles andere (0.12.0). Bis 0.11.15 hielt
+    # 'stop' ohne Sperre an: hatte der Waechter den Sollmerker schon gesehen
+    # und stand er gerade in starten(), entfernte stop den Merker, fand noch
+    # keinen Dienst ("laeuft nicht") - und eine Sekunde spaeter lief der vom
+    # Waechter gestartete. Der Knopf "Anhalten" war dann wirkungslos. Mit der
+    # Sperre wartet stop, bis der Waechter fertig ist, und haelt dessen Dienst
+    # an. Bekommt stop sie in 15 s nicht, haelt es trotzdem an: ein Stopp, der
+    # ausfaellt, ist schlimmer als der seltene Wettlauf. restart haelt die
+    # Sperre schon (SP_SPERRE_GEHALTEN), dann ist das hier ohne Wirkung.
+    startsperre_nehmen \
+        || echo "Ein anderer Start dieses Plugins laeuft seit ueber 15 Sekunden - es wird trotzdem angehalten."
     rm -f "$SOLL"
     if ! laeuft; then
         rm -f "$PID"
@@ -371,6 +427,14 @@ case "$1" in
         # Bekommt ein Waechter die Sperre in 15 s nicht, tut er nichts -
         # der naechste kommt in einer Minute.
         startsperre_nehmen || exit 0
+        #
+        # start.log waechst auch bei laufendem Dienst: seine Standard- und
+        # Fehlerausgabe gehen dorthin, dazu die Fehlerausgabe der Cron-Zeile.
+        # starten() kappt nur beim Start - ein Dienst, der wochenlang laeuft
+        # und dabei Warnungen ausgibt, fuellte die Ramdisk. Deshalb kappt der
+        # Waechter bei jedem Lauf ab 256 KiB auf die letzten 32 KiB, in place
+        # (startlog_kappen; unter der Sperre, damit nicht zwei zugleich).
+        startlog_kappen 262144 32768
         #
         # Die Marke wird HIER noch einmal geprueft, obwohl starten() sie
         # ebenfalls prueft: sonst schriebe der Waechter waehrend jeder

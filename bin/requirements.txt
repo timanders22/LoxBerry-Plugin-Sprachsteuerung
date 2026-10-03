@@ -1,0 +1,5 @@
+# Sprachsteuerung lokal - Pflichtpakete der virtuellen Umgebung (pip -r).
+# Feste Fassungen: der Dienst ist gegen genau diese geprueft. postinstall.sh
+# installiert nur neu, wenn sich diese Datei (oder die Python-Fassung) aendert.
+# wyoming 1.10.2: Requires-Python >=3.8, reines Python (py3-none-any).
+wyoming==1.10.2

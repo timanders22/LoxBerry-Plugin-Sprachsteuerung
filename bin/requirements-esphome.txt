@@ -1,0 +1,7 @@
+# Sprachsteuerung lokal - freiwillige Pakete fuer ESPHome-Mikrofone (pip -r).
+# Fehlt es, laufen die Wyoming-Satelliten trotzdem. postinstall.sh versucht es
+# erst ab Python 3.11 (Requires-Python von aioesphomeapi 46.6.0); Raeder fuer
+# cp311 und cp313 auf aarch64, armv7l und x86_64 liegen auf PyPI.
+# 46.6.0 kennt APIClient.is_connected und subscribe_voice_assistant mit
+# handle_announcement_finished.
+aioesphomeapi==46.6.0

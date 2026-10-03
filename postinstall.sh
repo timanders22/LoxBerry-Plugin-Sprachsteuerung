@@ -12,6 +12,15 @@
 # ein systemweites pip3 install auf Debian 12/13 nicht zu - deshalb die venv.
 # JEDER Rueckgabewert wird geprueft.
 #
+# Seit 0.12.0 mit festen Fassungen aus bin/requirements.txt (Pflicht) und
+# bin/requirements-esphome.txt (freiwillig), und pip laeuft nur noch, wenn es
+# noetig ist: die venv uebersteht das Update (preupgrade.sh legt sie neben den
+# Datenordner, hier kommt sie zurueck), und erst wenn sie fehlt, nicht laedt
+# oder die Pruefsumme der Anforderungen sich geaendert hat, wird installiert.
+#
+# Dieses Skript laeuft als loxberry (plugininstall.pl: "sudo -n -u loxberry"),
+# nicht als root - alles, was es anlegt, gehoert damit loxberry.
+#
 # ZU DEN MELDUNGSTAGS: Eine Fehlerlage bekommt GENAU EIN <FAIL>; die Saetze
 # danach, die erklaeren, was zu tun ist, sind <INFO>. Mehrere <FAIL> in Folge
 # sind fuer den Betrachter kein staerkeres Signal, sondern nur laenger - und
@@ -74,10 +83,11 @@ SPERRE="$BASE/data/plugins/$PFOLDER.upgrade_laeuft"
 MARKE_GILT=""
 [ -f "$SPERRE" ] && MARKE_GILT=ja
 # Die Marke muss weg, BEVOR der Waechter den Dienst wieder starten darf -
-# und zwar auf JEDEM Ausgang dieses Skripts. Es steigt an sechs Stellen mit
-# 'exit 1' aus (Architektur, Python, venv, pip, Vorgabenliste); wuerde die
-# Marke nur am Ende entfernt, bliebe der Dienst nach einer gescheiterten
-# Installation eine Stunde gesperrt, ohne dass irgendwo stuende, warum.
+# und zwar auf JEDEM Ausgang dieses Skripts. Es steigt an mehreren Stellen
+# mit 'exit 1' aus (Architektur, Python, venv, pip, Anforderungsliste,
+# Vorgabenliste); wuerde die Marke nur am Ende entfernt, bliebe der Dienst
+# nach einer gescheiterten Installation eine Stunde gesperrt, ohne dass
+# irgendwo stuende, warum.
 # Deshalb ein trap: er laeuft auch dann, wenn weiter unten abgebrochen wird.
 trap 'rm -f "$SPERRE" 2>/dev/null' EXIT
 
@@ -107,7 +117,10 @@ sp_ist_dienst() {   # $1 Prozessnummer, $2 Dienstpfad
         # am 25.09.2026 in WSL, Pruefung-Sprachsteuerung-0.11.10, Fall D4).
         IFS= read -r a2 && exit 1
         case "${a0##*/}" in python|python3|python3.*) ;; *) exit 1 ;; esac
-        [ "$a1" = "$2" ]
+        # Auch gegen den physischen Pfad (0.12.0): bin/dienst.sh startet mit
+        # 'pwd -P'. Ist die Wurzel ein Verweis (etwa /opt/loxberry), fand
+        # der Vergleich mit dem zusammengesetzten Pfad den Dienst nicht.
+        [ "$a1" = "$2" ] || { [ -n "$SP_DIENST_P" ] && [ "$a1" = "$SP_DIENST_P" ]; }
     }
 }
 sp_dienste_suchen() {  # $1 Dienstpfad, $2 Benutzernummer
@@ -118,9 +131,16 @@ sp_dienste_suchen() {  # $1 Dienstpfad, $2 Benutzernummer
     return 0
 }
 # Der Dienst gehoert loxberry - bin/dienst.sh steigt dafuer eigens ab
-# (Zeile 41). Dieses Skript laeuft als root; "id -u" allein faende den Dienst
-# deshalb am Geraet gar nicht.
+# (Zeile 41). Dieses Skript laeuft ebenfalls als loxberry (der Installer ruft
+# es mit "sudo -n -u loxberry"); bis 0.11.15 stand hier, es laufe als root.
+# "id -u loxberry" zuerst bleibt trotzdem richtig: von Hand mit sudo
+# aufgerufen, faende "id -u" allein den Dienst nicht. Wo es den Benutzer
+# nicht gibt (Pruefstand), gilt der eigene.
 SP_DIENST="$PBIN/sprachsteuerung_dienst.py"
+# Derselbe Pfad physisch, wie ihn bin/dienst.sh ('pwd -P') dem Dienst
+# mitgibt - siehe sp_ist_dienst().
+SP_PBIN_P=$(cd "$PBIN" 2>/dev/null && pwd -P)
+SP_DIENST_P="${SP_PBIN_P:+$SP_PBIN_P/sprachsteuerung_dienst.py}"
 SP_UID=$(id -u loxberry 2>/dev/null || id -u)
 if [ -n "$MARKE_GILT" ]; then
     [ -x "$PBIN/dienst.sh" ] && "$PBIN/dienst.sh" stop >/dev/null 2>&1
@@ -230,7 +250,9 @@ for f in sprachsteuerung.json saetze.json; do
         echo "<INFO> Die Zweitschrift von $f traegt keinen Inhalt - daraus wird nichts zurueckgespielt."
         continue
     fi
-    REST=$(tr -d '[:space:]' < "$CF" 2>/dev/null)
+    # 2>/dev/null VOR der Umleitung: fehlt die Zieldatei (nach purge die
+    # Regel), meldet sonst die Schale "No such file" ins Protokoll.
+    REST=$(tr -d '[:space:]' 2>/dev/null < "$CF")
     if [ -n "$REST" ] && [ "$REST" != "{}" ] && [ "$REST" != "[]" ]; then
         cp -p "$CF" "$CF.kaputt" 2>/dev/null && chmod 600 "$CF.kaputt" 2>/dev/null
     fi
@@ -363,6 +385,41 @@ if [ -d "$UMZUG" ]; then
         echo "<INFO> Bitte den Ordner von Hand nach $PDATA/modelle verschieben."
     fi
 fi
+# Die vier Einhaengeordner der Container vorbeugend als loxberry anlegen
+# (0.12.0) - erst HIER, nach der Rueckholung: das rmdir oben verlangt einen
+# leeren Ordner. Fehlt der Ordner beim "docker run -v .../modelle/<dienst>",
+# legt ihn der Docker-Dienst als root an; was die Container hineinschreiben,
+# gehoert ohnehin root. purge_installation loescht als loxberry und liess
+# beides bei der Deinstallation liegen - Gigabyte. Ein eigener Ordner
+# erlaubt loxberry wenigstens, die Eintraege direkt darin zu entfernen; den
+# Rest raeumt uninstall/uninstall als root ab.
+for SP_D in whisper piper wakeword llm; do
+    mkdir -p "$PDATA/modelle/$SP_D" 2>/dev/null
+done
+
+# ---------- Die virtuelle Python-Umgebung zurueckholen ----------
+# Gegenstueck zu preupgrade.sh (0.12.0): purge_installation hat
+# bin/plugins/<x>/ samt venv geloescht; die venv lag daneben unter
+# data/plugins/<x>.venv_umzug. Sie kommt an GENAU denselben Pfad zurueck -
+# die Skripte in venv/bin tragen ihn als Shebang. Ob sie taugt, entscheidet
+# weiter unten die Ladeprobe; hier wird nur verschoben.
+# Wie bei den Modellen auch ohne Marke: eine liegengebliebene venv derselben
+# Wurzel und desselben Ordners passt an genau diesen Pfad, und die Ladeprobe
+# verwirft sie, wenn nicht.
+VENV_UMZUG="$BASE/data/plugins/$PFOLDER.venv_umzug"
+if [ -d "$VENV_UMZUG" ] && [ ! -L "$VENV_UMZUG" ]; then
+    if [ -e "$VENV" ] || [ -L "$VENV" ]; then
+        # Kommt nur vor, wenn hier schon eine venv liegt (das Paket bringt
+        # keine mit, purge hat bin/ geleert): sie gilt, die alte geht weg.
+        rm -rf "${VENV_UMZUG:?}" 2>/dev/null
+        echo "<INFO> Es lag schon eine virtuelle Umgebung im Plugin-Ordner - die beiseitegelegte wurde verworfen."
+    elif mv "$VENV_UMZUG" "$VENV" 2>/dev/null; then
+        echo "<OK> Die virtuelle Python-Umgebung ist ueber das Update gerettet."
+    else
+        echo "<INFO> Die virtuelle Python-Umgebung liess sich nicht zurueckholen ($VENV_UMZUG)"
+        echo "<INFO> - sie wird neu angelegt."
+    fi
+fi
 
 # ---------- Architektur ----------
 ARCH=$(uname -m)
@@ -405,27 +462,130 @@ laden_pruefen() {
     return 1
 }
 
-if [ ! -x "$VENV/bin/python3" ] || ! VENVFEHLER=$("$VENV/bin/python3" -c 'import sys' 2>&1); then
-    if [ -n "${VENVFEHLER:-}" ]; then
+# ---------- Die virtuelle Umgebung ----------
+# Seit 0.12.0 stehen die Pakete mit FESTEN Fassungen in bin/requirements.txt
+# (Pflicht: wyoming) und bin/requirements-esphome.txt (freiwillig:
+# aioesphomeapi). Bis 0.11.15 stand hier "wyoming>=1.5" und
+# "aioesphomeapi>=24": jede Installation holte die jeweils neueste Fassung -
+# auch eine, gegen die der Dienst nie geprueft wurde.
+#
+# pip laeuft nur, wenn es noetig ist: die venv fehlt, laedt wyoming nicht,
+# oder die Pruefsumme der Anforderungen (Inhalt der Liste plus Python-Fassung)
+# weicht von der ab, die nach der letzten erfolgreichen Installation in der
+# venv abgelegt wurde. Sonst kein Netz, kein pip - ein Update ohne Netz geht
+# damit durch, und eine Selbstaktualisierung laedt nicht jedes Mal neu.
+#
+# Scheitert pip, waehrend eine funktionierende alte venv da ist, bleibt sie
+# in Gebrauch: eine <WARNING>, kein Abbruch. Erst wenn danach wyoming nicht
+# laedt, ist es ein <FAIL>. Bis 0.11.15 endete jedes gescheiterte pip mit
+# exit 1, und der Dienst starb danach am fehlenden Paket.
+REQ="$PBIN/requirements.txt"
+REQ_ESP="$PBIN/requirements-esphome.txt"
+STEMPEL="$VENV/.sp_anforderungen"
+STEMPEL_ESP="$VENV/.sp_anforderungen_esphome"
+PYVER=$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)
+
+if [ ! -f "$REQ" ]; then
+    echo "<FAIL> bin/requirements.txt fehlt nach der Installation."
+    echo "<INFO> Ohne diese Liste ist nicht festgelegt, welche Pakete der Dienst braucht."
+    echo "<INFO> Das Plugin bitte erneut installieren."
+    exit 1
+fi
+
+# Die Pruefsumme einer Anforderungsliste. Die Python-Fassung gehoert dazu:
+# eine venv fuer 3.11 traegt ihre Pakete unter lib/python3.11 und ist fuer
+# 3.13 leer. Leer zurueck, wenn sha256sum fehlt - dann gilt nichts als
+# unveraendert (siehe die Vergleiche unten: nur eine NICHT leere Summe zaehlt).
+sp_pruefsumme() {   # $1 Datei
+    { cat "$1" 2>/dev/null; echo "python=$PYVER"; } | sha256sum 2>/dev/null | cut -d' ' -f1
+}
+
+# Taugt die vorhandene venv zum System-Python? pyvenv.cfg nennt die Fassung,
+# mit der sie angelegt wurde. Nach einem Wechsel des Debian (12 -> 13,
+# Python 3.11 -> 3.13) zeigt venv/bin/python3 auf das NEUE Python, waehrend
+# die Pakete unter lib/python3.11 liegen - der Aufruf gelaenge, die Pakete
+# fehlten. Deshalb wird die Fassung verglichen, nicht nur der Aufruf probiert.
+VENVFEHLER=""
+VENV_TAUGT=""
+if [ -x "$VENV/bin/python3" ]; then
+    if VENVFEHLER=$("$VENV/bin/python3" -c 'import sys' 2>&1); then
+        VENV_CFGVER=$(sed -n 's/^version[[:space:]]*=[[:space:]]*\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' \
+                      "$VENV/pyvenv.cfg" 2>/dev/null | head -n 1)
+        if [ -n "$VENV_CFGVER" ] && [ -n "$PYVER" ] && [ "$VENV_CFGVER" != "$PYVER" ]; then
+            echo "<INFO> Die vorhandene virtuelle Umgebung gehoert zu Python $VENV_CFGVER, das System hat"
+            echo "<INFO> jetzt Python $PYVER - sie wird neu angelegt."
+        else
+            VENV_TAUGT=ja
+        fi
+    fi
+fi
+if [ -z "$VENV_TAUGT" ]; then
+    if [ -n "$VENVFEHLER" ]; then
         echo "<INFO> Die vorhandene virtuelle Umgebung antwortet nicht und wird neu angelegt:"
         echo "$VENVFEHLER" | sed 's/^/<INFO>     /'
     fi
     rm -rf "$VENV"
-    if ! "$PY" -m venv "$VENV"; then
+    # Auf Debian fehlt ohne das Paket python3-venv (genauer python3.11-venv
+    # bzw. python3.13-venv) das Modul ensurepip: "python3 -m venv" bricht ab
+    # und hinterlaesst eine venv ohne pip. Die Meldung nennt deshalb das
+    # Paket passend zur Python-Fassung. Seit 0.12.0 installiert LoxBerry es
+    # ueber dpkg/apt vor diesem Skript mit.
+    if ! VENVAUSGABE=$("$PY" -m venv "$VENV" 2>&1); then
+        echo "$VENVAUSGABE" | tail -n 5 | sed 's/^/<INFO>     /'
         echo "<FAIL> Virtuelle Umgebung konnte nicht angelegt werden ($VENV)."
-        echo "<INFO> Fehlt das Paket python3-venv? (apt install python3-venv)"
+        echo "<INFO> Fehlt das Paket python3-venv? (apt install python3-venv python$PYVER-venv)"
+        rm -rf "$VENV"
         exit 1
     fi
     echo "<OK> Virtuelle Umgebung angelegt: $VENV"
 fi
-"$VENV/bin/python3" -m pip install --upgrade pip >/dev/null 2>&1 || \
-    echo "<INFO> pip liess sich nicht aktualisieren - weiter mit der vorhandenen Fassung."
 
-echo "<INFO> Installiere wyoming (benoetigt eine Internetverbindung) ..."
-if ! "$VENV/bin/python3" -m pip install --no-cache-dir "wyoming>=1.5"; then
-    echo "<FAIL> Das Paket wyoming liess sich nicht installieren."
-    echo "<INFO> Ohne dieses Paket kann der Dienst nicht mit den Sprachdiensten reden."
-    exit 1
+# pip in der venv sicherstellen - nur wenn wirklich installiert wird.
+sp_pip_bereit() {
+    "$VENV/bin/python3" -m pip --version >/dev/null 2>&1 && return 0
+    "$VENV/bin/python3" -m ensurepip --upgrade >/dev/null 2>&1 \
+        && "$VENV/bin/python3" -m pip --version >/dev/null 2>&1
+}
+SP_PIP_AKTUELL=""
+sp_pip_aktualisieren() {
+    [ -n "$SP_PIP_AKTUELL" ] && return 0
+    SP_PIP_AKTUELL=ja
+    "$VENV/bin/python3" -m pip install --upgrade pip >/dev/null 2>&1 || \
+        echo "<INFO> pip liess sich nicht aktualisieren - weiter mit der vorhandenen Fassung."
+}
+
+SOLL=$(sp_pruefsumme "$REQ")
+IST=$(cat "$STEMPEL" 2>/dev/null)
+WY_DA=""
+"$VENV/bin/python3" -c 'import wyoming' >/dev/null 2>&1 && WY_DA=ja
+if [ -n "$WY_DA" ] && [ -n "$SOLL" ] && [ "$IST" = "$SOLL" ]; then
+    echo "<OK> Die Pflichtpakete der virtuellen Umgebung sind vollstaendig und unveraendert - pip wird nicht gebraucht."
+else
+    if [ -z "$WY_DA" ]; then
+        echo "<INFO> In der virtuellen Umgebung fehlt wyoming - es wird installiert."
+    else
+        echo "<INFO> bin/requirements.txt hat sich geaendert - die Pakete werden angeglichen."
+    fi
+    if ! sp_pip_bereit; then
+        echo "<FAIL> In der virtuellen Umgebung fehlt pip, und ensurepip konnte es nicht nachinstallieren."
+        echo "<INFO> Fehlt das Paket python3-venv? (apt install python3-venv python$PYVER-venv)"
+        exit 1
+    fi
+    sp_pip_aktualisieren
+    echo "<INFO> Installiere die Pakete aus bin/requirements.txt (benoetigt eine Internetverbindung) ..."
+    if PIPAUSGABE=$("$VENV/bin/python3" -m pip install --no-cache-dir -r "$REQ" 2>&1); then
+        printf '%s\n' "$SOLL" > "$STEMPEL" 2>/dev/null
+    elif [ -n "$WY_DA" ] && "$VENV/bin/python3" -c 'import wyoming' >/dev/null 2>&1; then
+        echo "<WARNING> Die Pakete aus bin/requirements.txt liessen sich nicht installieren - die bisherige virtuelle Umgebung bleibt in Gebrauch:"
+        echo "$PIPAUSGABE" | tail -n 5 | sed 's/^/<INFO>     /'
+        echo "<INFO> Beim naechsten Update wird es erneut versucht (pip braucht dafuer eine Internetverbindung)."
+    else
+        echo "$PIPAUSGABE" | tail -n 8 | sed 's/^/<INFO>     /'
+        echo "<FAIL> Das Paket wyoming liess sich nicht installieren."
+        echo "<INFO> Ohne dieses Paket kann der Dienst nicht mit den Sprachdiensten reden."
+        echo "<INFO> pip braucht dafuer eine Internetverbindung - bitte pruefen und erneut installieren."
+        exit 1
+    fi
 fi
 if ! laden_pruefen wyoming "wyoming geladen."; then
     echo "<FAIL> wyoming ist installiert, laesst sich aber nicht laden."
@@ -434,21 +594,51 @@ if ! laden_pruefen wyoming "wyoming geladen."; then
 fi
 
 # aioesphomeapi ist NUR fuer ESPHome-Mikrofone noetig. Fehlt es, laufen die
-# Wyoming-Satelliten trotzdem - deshalb hier kein Abbruch.
-echo "<INFO> Installiere aioesphomeapi (nur fuer ESPHome-Mikrofone) ..."
-if ! PIPFEHLER=$("$VENV/bin/python3" -m pip install --no-cache-dir "aioesphomeapi>=24" 2>&1); then
-    echo "<INFO> aioesphomeapi liess sich nicht installieren:"
-    echo "$PIPFEHLER" | tail -n 5 | sed 's/^/<INFO>     /'
+# Wyoming-Satelliten trotzdem - deshalb hier kein Abbruch. Die festgelegte
+# Fassung verlangt Python 3.11 (Requires-Python auf PyPI); darunter wird sie
+# gar nicht erst versucht, statt pip mit "no matching distribution"
+# scheitern zu lassen.
+AIO=0
+if ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'; then
+    echo "<INFO> aioesphomeapi (nur fuer ESPHome-Mikrofone) braucht Python 3.11 oder neuer,"
+    echo "<INFO> hier laeuft Python $PYVER - es wird nicht installiert."
     AIO=1
-elif ! laden_pruefen aioesphomeapi "aioesphomeapi geladen."; then
-    # pip meldet Erfolg auch dann, wenn kein einziges abhaengiges Paket
-    # mitgekommen ist (Hausregel 12.09.2026: Wheel ohne Requires-Dist). Erst
-    # der Ladeversuch beantwortet die Frage, und seine Meldung nennt, welches
-    # Paket fehlt.
-    echo "<INFO> aioesphomeapi ist installiert, laesst sich aber nicht laden."
+elif [ ! -f "$REQ_ESP" ]; then
+    echo "<INFO> bin/requirements-esphome.txt fehlt - aioesphomeapi wird nicht installiert."
     AIO=1
 else
-    AIO=0
+    SOLL_ESP=$(sp_pruefsumme "$REQ_ESP")
+    IST_ESP=$(cat "$STEMPEL_ESP" 2>/dev/null)
+    AIO_DA=""
+    "$VENV/bin/python3" -c 'import aioesphomeapi' >/dev/null 2>&1 && AIO_DA=ja
+    if [ -n "$AIO_DA" ] && [ -n "$SOLL_ESP" ] && [ "$IST_ESP" = "$SOLL_ESP" ]; then
+        echo "<OK> aioesphomeapi ist vollstaendig und unveraendert - pip wird nicht gebraucht."
+    elif ! sp_pip_bereit; then
+        echo "<INFO> In der virtuellen Umgebung fehlt pip - aioesphomeapi wird nicht installiert."
+        [ -n "$AIO_DA" ] || AIO=1
+    else
+        sp_pip_aktualisieren
+        echo "<INFO> Installiere aioesphomeapi (nur fuer ESPHome-Mikrofone) ..."
+        if PIPFEHLER=$("$VENV/bin/python3" -m pip install --no-cache-dir -r "$REQ_ESP" 2>&1); then
+            printf '%s\n' "$SOLL_ESP" > "$STEMPEL_ESP" 2>/dev/null
+        elif [ -n "$AIO_DA" ]; then
+            echo "<INFO> aioesphomeapi liess sich nicht angleichen - die bisherige Fassung bleibt:"
+            echo "$PIPFEHLER" | tail -n 5 | sed 's/^/<INFO>     /'
+        else
+            echo "<INFO> aioesphomeapi liess sich nicht installieren:"
+            echo "$PIPFEHLER" | tail -n 5 | sed 's/^/<INFO>     /'
+            AIO=1
+        fi
+    fi
+    if [ "$AIO" = "0" ] && ! laden_pruefen aioesphomeapi "aioesphomeapi geladen."; then
+        # pip meldet Erfolg auch dann, wenn kein einziges abhaengiges Paket
+        # mitgekommen ist (Hausregel 12.09.2026: Wheel ohne Requires-Dist). Erst
+        # der Ladeversuch beantwortet die Frage, und seine Meldung nennt, welches
+        # Paket fehlt. Die Pruefsumme gilt dann nicht.
+        echo "<INFO> aioesphomeapi ist installiert, laesst sich aber nicht laden."
+        rm -f "$STEMPEL_ESP" 2>/dev/null
+        AIO=1
+    fi
 fi
 if [ "$AIO" != "0" ]; then
     echo "<INFO> Wyoming-Satelliten laufen trotzdem. ESPHome-Mikrofone (Atom Echo,"
@@ -462,8 +652,11 @@ echo "<INFO> Installierte Pakete in der virtuellen Umgebung:"
 "$VENV/bin/python3" -m pip list --format=freeze 2>/dev/null | sed 's/^/<INFO>     /'
 
 # ---------- Docker ----------
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    echo "<OK> Docker vorhanden und ansprechbar: $(docker --version 2>/dev/null)"
+# Mit Zeitgrenze (0.12.0): haengt der Docker-Dienst, haengt "docker info"
+# ohne Ende - und mit ihm die ganze Installation, bis jemand den Vorgang
+# abbricht (dieselbe Regel wie fuer jeden docker-Aufruf in sp_lib.php).
+if command -v docker >/dev/null 2>&1 && timeout -k 5 20 docker info >/dev/null 2>&1; then
+    echo "<OK> Docker vorhanden und ansprechbar: $(timeout -k 5 10 docker --version 2>/dev/null)"
 else
     echo "<INFO> Docker ist nicht installiert oder antwortet nicht."
     echo "<INFO> Ohne Docker kann das Plugin die Sprachdienste nicht selbst betreiben."
@@ -497,7 +690,13 @@ else
 fi
 
 chmod 755 "$PBIN/dienst.sh" "$PBIN/sprachsteuerung_dienst.py" "$PBIN/hardware.py" 2>/dev/null
-chown -R loxberry:loxberry "$PBIN" "$PDATA" "$PLOG" "$PCONFIG" 2>/dev/null
+# Bis 0.11.15 stand hier "chown -R loxberry:loxberry" ueber Plugin-, Daten-,
+# Protokoll- und Konfigurationsordner. Das Skript laeuft aber als loxberry:
+# was es anlegt, gehoert loxberry ohnehin, und was root gehoert (etwa von
+# Docker angelegte Modellordner), darf loxberry nicht umschreiben - der
+# Aufruf scheiterte dort still. Den Modellordner raeumt deshalb
+# uninstall/uninstall als root ab, und die Einhaengeordner legt dieses
+# Skript vorher selbst an (siehe oben).
 chmod 600 "$PCONFIG/sprachsteuerung.json"
 
 echo "<OK> Installation abgeschlossen."

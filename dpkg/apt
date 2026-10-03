@@ -1,0 +1,5 @@
+# Sprachsteuerung lokal - Debian-Pakete, die LoxBerry vor postinstall.sh
+# installiert (sbin/plugininstall.pl liest dpkg/apt, Zeilen mit # sind
+# Kommentar). python3-venv bringt ensurepip mit; ohne das bricht
+# "python3 -m venv" auf Debian 12 (Python 3.11) und 13 (Python 3.13) ab.
+python3-venv
