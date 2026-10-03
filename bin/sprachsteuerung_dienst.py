@@ -1249,7 +1249,13 @@ async def dienst_befragen(host: str, port: int, zeit: float = 8.0) -> dict:
             if Info.is_type(ereignis.type):
                 return {"ok": 1, "info": Info.from_event(ereignis).to_dict()}
         return {"ok": 0, "fehler": "Keine Auskunft innerhalb der Frist."}
-    except (OSError, asyncio.TimeoutError, ValueError) as err:
+    # IncompleteReadError: async_read_event faengt nur ValueError. Reisst die
+    # Verbindung mitten in einem Ereignis ab, kommt readexactly() mit einer
+    # EOFError-Unterart heraus - die ist kein OSError. KeyError/TypeError:
+    # eine Auskunft, der ein Pflichtfeld fehlt oder deren Feld die falsche
+    # Art hat, laesst Info.from_event() so scheitern.
+    except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError,
+            ValueError, KeyError, TypeError) as err:
         return {"ok": 0, "fehler": fehlertext(err)}
     finally:
         schreiber.close()
@@ -1268,11 +1274,299 @@ def info_namen(info: dict, art: str) -> list:
     return sorted(set(aus))
 
 
+def keepalive_setzen(schreiber, leerlauf: int = 30, abstand: int = 10,
+                     versuche: int = 3) -> None:
+    """TCP-Keepalive an einer offenen Verbindung einschalten.
+
+    WARUM: wyoming-satellite 1.0.0 beantwortet 'ping' nicht - die
+    Lebenszeichen-Pruefung in Satellit.lauf() kann bei ihm also nichts
+    feststellen. Bricht ein WLAN-Mikrofon weg, ohne dass TCP es meldet,
+    merkt es so wenigstens der Kern: nach rund leerlauf + abstand * versuche
+    Sekunden endet das Lesen mit einem OSError, und der Wiederanlauf greift.
+    TCP_KEEPIDLE und Verwandte gibt es nicht ueberall - was fehlt, bleibt
+    beim Wert des Systems.
+    """
+    sock = schreiber.get_extra_info("socket") if schreiber is not None else None
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for name, wert in (("TCP_KEEPIDLE", leerlauf), ("TCP_KEEPINTVL", abstand),
+                           ("TCP_KEEPCNT", versuche)):
+            opt = getattr(socket, name, None)
+            if opt is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, opt, wert)
+    except (OSError, AttributeError):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Audio rechnen - ohne audioop
+#
+# audioop ist in Python 3.13 entfernt. Alles hier geht ueber array und ist
+# auf 16 Bit, Mono, little-endian zugeschnitten - das Format, das Whisper,
+# der Wortwecker und die Sprachende-Erkennung bekommen.
+# ---------------------------------------------------------------------------
+def _pcm_werte(daten: bytes) -> "array.array":
+    """16-Bit-PCM (little-endian) als Zahlenfolge in der Byteordnung des Rechners."""
+    werte = array.array("h")
+    werte.frombytes(daten[:len(daten) - (len(daten) % 2)])
+    if sys.byteorder == "big":
+        werte.byteswap()
+    return werte
+
+
+def pcm_auf_16bit_mono(daten: bytes, breite: int, kanaele: int):
+    """Beliebiges ganzzahliges PCM auf 16 Bit Mono bringen. None: nicht machbar.
+
+    Bis 0.11.15 wurde aus dem audio-start nur die Rate uebernommen und
+    Whisper wie dem Wortwecker fest 'width=2, channels=1' gemeldet. Ein
+    Satellit mit Stereo oder 32 Bit lieferte damit Rauschen in doppelter
+    Laenge - erkannt wurde nichts, und gemeldet auch nicht.
+    Kanaele werden gemittelt; 8 Bit ist in WAV vorzeichenlos.
+    """
+    breite, kanaele = int(breite or 0), int(kanaele or 0)
+    if breite not in (1, 2, 3, 4) or kanaele < 1:
+        return None
+    if breite == 2 and kanaele == 1:
+        return daten
+    rahmen = breite * kanaele
+    n = len(daten) // rahmen
+    if breite == 2:
+        quelle = _pcm_werte(daten[:n * rahmen])
+        werte = list(quelle)
+    elif breite == 4:
+        quelle = array.array("i")
+        if quelle.itemsize != 4:
+            return None
+        quelle.frombytes(daten[:n * rahmen])
+        if sys.byteorder == "big":
+            quelle.byteswap()
+        werte = [w >> 16 for w in quelle]
+    elif breite == 3:
+        werte = [int.from_bytes(daten[i:i + 3], "little", signed=True) >> 8
+                 for i in range(0, n * rahmen, 3)]
+    else:
+        werte = [(b - 128) << 8 for b in daten[:n * rahmen]]
+    if kanaele > 1:
+        werte = [sum(werte[i:i + kanaele]) // kanaele
+                 for i in range(0, n * kanaele, kanaele)]
+    ziel = array.array("h", werte)
+    if sys.byteorder == "big":
+        ziel.byteswap()
+    return ziel.tobytes()
+
+
+def _rms(werte, von: int, bis: int) -> float:
+    if bis <= von:
+        return 0.0
+    return (sum(w * w for w in werte[von:bis]) / float(bis - von)) ** 0.5
+
+
+def pcm_spitzenpegel(rahmen: list, rate: int, fenster_s: float = 0.1) -> float:
+    """Der lauteste RMS-Wert ueber Fenster von 100 ms - 16 Bit Mono.
+
+    Nicht der Mittelwert ueber alles: ein kurzer Satz in fuenf Sekunden
+    Stille hat einen kleinen Gesamtpegel und ist trotzdem ein Satz.
+    """
+    werte = _pcm_werte(b"".join(rahmen))
+    schritt = max(1, int(max(1000, int(rate or 16000)) * fenster_s))
+    spitze = 0.0
+    for i in range(0, len(werte), schritt):
+        spitze = max(spitze, _rms(werte, i, min(len(werte), i + schritt)))
+    return spitze
+
+
+# Unter diesem Spitzenpegel geht nichts an Whisper. Whisper erfindet bei
+# Stille Saetze (siehe WHISPER_HALLUZINATIONEN) - und was nicht hinausgeht,
+# kann es nicht erfinden. Bewusst niedrig: es soll Stille und Rauschen
+# abhalten, keine leise Stimme. Bei 16 Bit liegt ein ruhiger Raum
+# erfahrungsgemaess bei 10 bis 100, Sprache aus einem Meter bei 1000 und mehr.
+# Am Geraet gemessen ist das NICHT.
+ASR_MIN_PEGEL = 200.0
+
+# Was Whisper bei Stille oder Rauschen gern 'hoert'. Es stammt aus den
+# Untertiteln, mit denen das Modell gelernt hat. Ein solcher Satz ist kein
+# Befehl - ihn an das Satzmuster und das Sprachmodell zu geben, hiesse
+# eine Antwort auf etwas, das niemand gesagt hat.
+# Teilstuecke, die so nur in Abspann und Untertitel stehen:
+WHISPER_HALLUZINATIONEN_TEIL = (
+    "untertitel im auftrag", "untertitelung im auftrag", "untertitelung des zdf",
+    "untertitel des zdf", "untertitel von stephanie geiges", "untertitel der amara",
+    "untertitelung aufgrund der amara", "amara.org", "zdf fuer funk", "zdf für funk",
+    "vielen dank fürs zuschauen", "vielen dank fuers zuschauen",
+    "danke fürs zuschauen", "danke fuers zuschauen", "thanks for watching",
+    "thank you for watching", "subtitles by the amara", "please subscribe",
+)
+# Ganze Saetze, die als Teil eines Befehls harmlos waeren, allein aber
+# typisch fuer Stille sind:
+WHISPER_HALLUZINATIONEN_GANZ = (
+    "vielen dank", "danke", "danke schön", "danke schoen", "tschüss", "tschuess",
+    "bis zum nächsten mal", "bis zum naechsten mal", "thank you", "thanks", "you",
+    "bye", "bye bye",
+)
+
+
+def whisper_halluzination(text: str) -> bool:
+    """Ist der Text eine bekannte Stille-Halluzination von Whisper?"""
+    klein = " ".join(str(text or "").lower().split())
+    # Nur Satzzeichen, Auslassungspunkte, Noten oder gar nichts.
+    if not re.sub(r"[\W_]+", "", klein):
+        return True
+    if any(teil in klein for teil in WHISPER_HALLUZINATIONEN_TEIL):
+        return True
+    kern = re.sub(r"[^\w\s]+", " ", klein)
+    kern = " ".join(kern.split())
+    return kern in WHISPER_HALLUZINATIONEN_GANZ
+
+
+# ---------------------------------------------------------------------------
+# Sprachende-Erkennung
+#
+# WARUM ES SIE SEIT 0.12.0 GIBT: bis 0.11.15 wurde ein Satz erst verarbeitet,
+# wenn das Mikrofon von sich aus aufhoerte - mit audio-stop (Wyoming) bzw.
+# handle_stop (ESPHome). Genau das tun die verbreiteten Geraete nicht:
+# wyoming-satellite 1.0.0 streamt nach dem Weckwort weiter, bis ihm der
+# SERVER eine Abschrift (transcript) schickt, und eine Voice PE hoert erst
+# auf, wenn der Server VOICE_ASSISTANT_STT_VAD_END meldet. Beide warten auf
+# den Server, der Server wartete auf sie - es kam nie ein Satz zustande.
+# Home Assistant entscheidet das Ende des Sprechens auf dem Server; dieses
+# Plugin jetzt auch.
+#
+# Reines Python, ohne Zusatzpaket: Pegel (RMS) in Fenstern von 30 ms gegen
+# eine Schwelle, die sich am Grundrauschen des Raums ausrichtet. Kein
+# neuronales Netz - es unterscheidet laut von leise, nicht Sprache von
+# Musik. Fuer 'jemand hat geredet und ist jetzt still' reicht das.
+# Am Geraet gemessen sind die Zahlen NICHT; sie sind gegen Attrappen
+# (Sinus und Rauschen, dann Stille) geprueft.
+# ---------------------------------------------------------------------------
+SPRACHE_FENSTER_S = 0.03     # Fensterlaenge
+SPRACHE_EICHEN_S = 0.25      # so lange wird nur das Grundrauschen gelernt
+SPRACHE_MIN_PEGEL = 200.0    # darunter ist nichts 'laut', egal wie still der Raum
+SPRACHE_FAKTOR = 3.0         # laut = mindestens dreifaches Grundrauschen (~10 dB)
+SPRACHE_BEGINN_S = 0.15      # so lange laut, bis es als Sprechen gilt
+SPRACHE_STILLE_S = 0.8       # so lange still nach dem Sprechen = Ende
+SPRACHE_MIN_S = 0.3          # kuerzer gesprochen ist ein Knacken, kein Satz
+SPRACHE_MAX_S = 15.0         # laenger am Stueck redet niemand mit dem Licht
+SPRACHE_WARTEN_S = 8.0       # so lange wird auf den Beginn gewartet
+
+
+class Sprachende:
+    """Verfolgt einen Audiostrom und sagt, wann gesprochen wurde und wann nicht mehr.
+
+    fuettern() liefert je Block:
+        ''         nichts Neues
+        'beginn'   jetzt wird gesprochen
+        'ende'     es wurde gesprochen, und jetzt ist es still
+        'zu_lang'  laenger als SPRACHE_MAX_S am Stueck - wird wie 'ende' behandelt
+        'nichts'   innerhalb der Wartezeit hat niemand angefangen
+    Erwartet 16 Bit Mono.
+    """
+
+    def __init__(self, rate: int, warten_s: float = SPRACHE_WARTEN_S) -> None:
+        self.rate = max(1000, int(rate or 16000))
+        self.fenster = max(1, int(self.rate * SPRACHE_FENSTER_S))
+        self.dauer = self.fenster / float(self.rate)
+        self.warten_s = float(warten_s)
+        self.rest = b""
+        self.rauschen = None
+        self.gesamt_s = 0.0
+        self.spricht = False
+        self.laut_s = 0.0
+        self.gesprochen_s = 0.0
+        self.stille_s = 0.0
+        self.seit_beginn_s = 0.0
+        self.fertig = ""
+
+    def _rauschen_lernen(self, pegel: float) -> None:
+        # Schnell nach unten, langsam nach oben: ein Satz direkt nach dem
+        # Weckwort darf die Schwelle nicht hochziehen, ein Luefter, der
+        # anlaeuft, soll sie aber mit der Zeit anheben.
+        if self.rauschen is None:
+            self.rauschen = pegel
+        elif pegel < self.rauschen:
+            self.rauschen = 0.7 * self.rauschen + 0.3 * pegel
+        else:
+            self.rauschen = 0.98 * self.rauschen + 0.02 * pegel
+
+    def fuettern(self, block: bytes) -> str:
+        if self.fertig:
+            return ""
+        daten = self.rest + bytes(block or b"")
+        bytes_je_fenster = 2 * self.fenster
+        nutzbar = len(daten) - (len(daten) % bytes_je_fenster)
+        self.rest = daten[nutzbar:]
+        werte = _pcm_werte(daten[:nutzbar])
+        meldung = ""
+        for i in range(0, len(werte), self.fenster):
+            pegel = _rms(werte, i, i + self.fenster)
+            self.gesamt_s += self.dauer
+            if self.gesamt_s <= SPRACHE_EICHEN_S:
+                # Eichen: das Minimum der ersten Fenster. Auch wenn sofort
+                # gesprochen wird, steckt zwischen zwei Silben ein leises
+                # Fenster - und ein lautes zieht das Minimum nicht hoch.
+                self.rauschen = pegel if self.rauschen is None else min(self.rauschen, pegel)
+                continue
+            schwelle = max(SPRACHE_MIN_PEGEL, (self.rauschen or 0.0) * SPRACHE_FAKTOR)
+            laut = pegel >= schwelle
+            if not self.spricht:
+                if laut:
+                    self.laut_s += self.dauer
+                    if self.laut_s >= SPRACHE_BEGINN_S:
+                        self.spricht = True
+                        self.gesprochen_s = self.seit_beginn_s = self.laut_s
+                        self.stille_s = 0.0
+                        meldung = "beginn"
+                else:
+                    # Eine einzelne leise Silbenpause setzt nicht ganz zurueck.
+                    self.laut_s = max(0.0, self.laut_s - self.dauer)
+                    self._rauschen_lernen(pegel)
+                    if self.gesamt_s >= self.warten_s:
+                        self.fertig = "nichts"
+                        return "nichts"
+                continue
+            self.seit_beginn_s += self.dauer
+            if laut:
+                self.gesprochen_s += self.dauer
+                self.stille_s = 0.0
+            else:
+                self.stille_s += self.dauer
+            if self.stille_s >= SPRACHE_STILLE_S:
+                if self.gesprochen_s >= SPRACHE_MIN_S:
+                    self.fertig = "ende"
+                    return "ende"
+                # Zu kurz fuer einen Satz - zurueck aufs Warten. Die
+                # Wartezeit laeuft dabei weiter, sie beginnt nicht neu.
+                self.spricht = False
+                self.laut_s = self.gesprochen_s = self.seit_beginn_s = 0.0
+            elif self.seit_beginn_s >= SPRACHE_MAX_S:
+                self.fertig = "zu_lang"
+                return "zu_lang"
+        return meldung
+
+
 async def spracherkennung(cfg: dict, rahmen: list, rate: int = 16000) -> dict:
-    """Audio -> Text ueber Whisper. rahmen ist eine Liste von PCM-Bloecken."""
+    """Audio -> Text ueber Whisper. rahmen ist eine Liste von PCM-Bloecken
+    in 16 Bit Mono.
+
+    Ein leerer Text mit 'grund' heisst: es wurde bewusst nichts erkannt -
+    zu leise (gar nicht erst an Whisper geschickt) oder eine bekannte
+    Halluzination (verworfen). Der Aufrufer bleibt dann still; es ist kein
+    Fehler der Spracherkennung.
+    """
     from wyoming.asr import Transcribe, Transcript
     from wyoming.audio import AudioChunk, AudioStart, AudioStop
+    try:
+        from wyoming.error import Error as WyFehler
+    except ImportError:                       # aeltere Fassungen des Pakets
+        WyFehler = None
     t0 = time.monotonic()
+    pegel = pcm_spitzenpegel(rahmen, rate)
+    if pegel < ASR_MIN_PEGEL:
+        mitschnitt(cfg, "ASR-", "zu leise (Spitzenpegel %d unter %d) - nicht gesendet"
+                   % (int(pegel), int(ASR_MIN_PEGEL)))
+        return {"ok": 1, "text": "", "grund": "zu_leise", "pegel": int(pegel),
+                "sekunden": round(time.monotonic() - t0, 2)}
     try:
         leser, schreiber = await wy_verbinden(cfg["whisper_host"], int(cfg["whisper_port"]))
     except (OSError, asyncio.TimeoutError) as err:
@@ -1297,17 +1591,46 @@ async def spracherkennung(cfg: dict, rahmen: list, rate: int = 16000) -> dict:
             ereignis = await wy_lesen(leser, max(1.0, ende - time.monotonic()))
             if ereignis is None:
                 return {"ok": 0, "fehler": "Spracherkennung hat die Verbindung geschlossen."}
+            if WyFehler is not None and WyFehler.is_type(ereignis.type):
+                # Whisper sagt, was schiefging (etwa ein Modell, das sich nicht
+                # laden laesst). Bis 0.11.15 ging das unter und es blieb bei
+                # 'Verbindung geschlossen'.
+                fehler = WyFehler.from_event(ereignis)
+                return {"ok": 0, "fehler": "Spracherkennung meldet: %s%s"
+                        % (fehler.text or "Fehler ohne Text",
+                           " (%s)" % fehler.code if fehler.code else "")}
             if Transcript.is_type(ereignis.type):
-                text = Transcript.from_event(ereignis).text or ""
+                text = (Transcript.from_event(ereignis).text or "").strip()
                 mitschnitt(cfg, "ASR<", text)
-                return {"ok": 1, "text": text.strip(),
-                        "sekunden": round(time.monotonic() - t0, 2)}
+                if text and whisper_halluzination(text):
+                    mitschnitt(cfg, "ASR-", "als Stille-Halluzination verworfen: " + text)
+                    return {"ok": 1, "text": "", "grund": "halluzination",
+                            "verworfen": text,
+                            "sekunden": round(time.monotonic() - t0, 2)}
+                aus = {"ok": 1, "text": text,
+                       "sekunden": round(time.monotonic() - t0, 2)}
+                if not text:
+                    aus["grund"] = "leer"
+                return aus
         return {"ok": 0, "fehler": "Spracherkennung: zu viele Ereignisse "
                                    "ohne Abschrift."}
-    except (OSError, asyncio.TimeoutError) as err:
+    # IncompleteReadError: siehe dienst_befragen().
+    except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError) as err:
         return {"ok": 0, "fehler": "Spracherkennung: " + fehlertext(err)}
     finally:
         schreiber.close()
+
+
+def erkennung_leer_text(erkannt: dict) -> str:
+    """Warum ein leerer Text leer ist - fuer die Meldung am Mikrofon."""
+    grund = str(erkannt.get("grund") or "")
+    if grund == "zu_leise":
+        return ("Nichts an die Spracherkennung geschickt: zu leise (Spitzenpegel %s)."
+                % erkannt.get("pegel", "?"))
+    if grund == "halluzination":
+        return ("Verworfen: '%s' ist ein Satz, den Whisper bei Stille erfindet."
+                % str(erkannt.get("verworfen") or "")[:80])
+    return "Es wurde nichts verstanden (leerer Text)."
 
 
 async def sprachausgabe(cfg: dict, text: str, stimme: str = "") -> dict:
@@ -1320,6 +1643,10 @@ async def sprachausgabe(cfg: dict, text: str, stimme: str = "") -> dict:
     """
     from wyoming.audio import AudioChunk, AudioStop
     from wyoming.tts import Synthesize
+    try:
+        from wyoming.error import Error as WyFehler
+    except ImportError:                       # aeltere Fassungen des Pakets
+        WyFehler = None
     t0 = time.monotonic()
     try:
         leser, schreiber = await wy_verbinden(cfg["piper_host"], int(cfg["piper_port"]))
@@ -1355,6 +1682,13 @@ async def sprachausgabe(cfg: dict, text: str, stimme: str = "") -> dict:
             ereignis = await wy_lesen(leser, max(1.0, ende - time.monotonic()))
             if ereignis is None:
                 return {"ok": 0, "fehler": "Sprachausgabe hat die Verbindung geschlossen."}
+            if WyFehler is not None and WyFehler.is_type(ereignis.type):
+                # Etwa eine Stimme, die es im Container nicht gibt - Piper
+                # sagt das, und es soll auch so ankommen.
+                fehler = WyFehler.from_event(ereignis)
+                return {"ok": 0, "fehler": "Sprachausgabe meldet: %s%s"
+                        % (fehler.text or "Fehler ohne Text",
+                           " (%s)" % fehler.code if fehler.code else "")}
             if AudioChunk.is_type(ereignis.type):
                 block = AudioChunk.from_event(ereignis)
                 rate, breite, kanaele = block.rate, block.width, block.channels
@@ -1368,14 +1702,21 @@ async def sprachausgabe(cfg: dict, text: str, stimme: str = "") -> dict:
                         "channels": kanaele, "sekunden": round(time.monotonic() - t0, 2)}
         return {"ok": 0, "fehler": "Sprachausgabe: zu viele Ereignisse ohne "
                                    "Abschluss."}
-    except (OSError, asyncio.TimeoutError) as err:
+    # IncompleteReadError: siehe dienst_befragen().
+    except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError) as err:
         return {"ok": 0, "fehler": "Sprachausgabe: " + fehlertext(err)}
     finally:
         schreiber.close()
 
 
-def wav_bauen(bloecke: list, rate: int, breite: int, kanaele: int) -> bytes:
-    """PCM-Bloecke in eine WAV-Datei fassen - fuer das Probehoeren im Browser."""
+def wav_aus_bloecken(bloecke: list, rate: int, breite: int, kanaele: int) -> bytes:
+    """PCM-Bloecke in eine WAV-Datei fassen - fuer das Probehoeren im Browser.
+
+    Hiess bis 0.11.15 wav_bauen - genau wie die Funktion fuer den
+    ESPHome-Ansageweg weiter unten. Die spaetere Definition ueberdeckte
+    diese, und der Aufruf in der Warteschlange (Aktion 'probe') endete mit
+    einem TypeError: Probehoeren ging nie.
+    """
     import struct
     daten = b"".join(bloecke)
     kopf = b"RIFF" + struct.pack("<I", 36 + len(daten)) + b"WAVEfmt "
@@ -1396,6 +1737,42 @@ def wav_bauen(bloecke: list, rate: int, breite: int, kanaele: int) -> bytes:
 # Angesprochen wird er genau dann, wenn der Satellit seine Verarbeitung bei
 # 'wake' beginnen laesst - dann hat er das Weckwort NICHT selbst erkannt.
 # ---------------------------------------------------------------------------
+# Gleichbedeutende Weckwortnamen. openWakeWord nennt das Modell ab 2.0
+# 'okay_nabu', davor 'ok_nabu' - die Vorgabe des Plugins ist der alte Name.
+# Ein Name, den der Container nicht kennt, heisst: es wird nie geweckt.
+WECKWORT_GLEICH = (("ok_nabu", "okay_nabu"),)
+# Was der Wortwecker an Weckwoertern meldet, je Adresse - fuenf Minuten
+# gemerkt, damit nicht vor jedem Lauf eine zweite Verbindung noetig ist.
+_WECKWORT_AUSKUNFT: dict = {}
+
+
+def _weckwort_kern(name: str) -> str:
+    """'Ok_Nabu_v0.1' -> 'ok_nabu': ohne Fassungsendung, klein."""
+    return re.sub(r"_v\d+(\.\d+)*$", "", str(name or "").strip().lower())
+
+
+def weckwort_gleich(a: str, b: str) -> bool:
+    """Meinen zwei Weckwortnamen dasselbe Modell?"""
+    ka, kb = _weckwort_kern(a), _weckwort_kern(b)
+    if not ka or not kb:
+        return False
+    if ka == kb:
+        return True
+    return any(ka in gruppe and kb in gruppe for gruppe in WECKWORT_GLEICH)
+
+
+def weckwort_waehlen(wort: str, vorhanden: list) -> str:
+    """Den Namen, den DIESER Wortwecker fuer das eingestellte Weckwort kennt.
+
+    Gibt es keine Auskunft oder keinen passenden Eintrag, bleibt es beim
+    eingestellten Namen - geraten wird nicht.
+    """
+    for name in (vorhanden or []):
+        if weckwort_gleich(wort, name):
+            return str(name)
+    return wort
+
+
 class Wortwecker:
     """Haelt eine Verbindung zum Wortwecker und meldet Treffer."""
 
@@ -1409,10 +1786,38 @@ class Wortwecker:
         # steht bei _bereit().
         self._lesen = None
 
+    async def _wort_abgleichen(self) -> None:
+        """ok_nabu / okay_nabu: den Namen nehmen, den der Container meldet.
+
+        Gefragt wird ueber eine eigene, kurze Verbindung (dienst_befragen) -
+        auf der Verbindung fuer das Audio waere eine Antwort mit einer
+        Zeitschranke zu lesen, und genau das bricht Lesevorgaenge mittendrin
+        ab (siehe _bereit()).
+        """
+        if not self.wort:
+            return
+        schluessel = (self.host, self.port)
+        gemerkt = _WECKWORT_AUSKUNFT.get(schluessel)
+        if gemerkt is None or time.monotonic() - gemerkt[0] > 300:
+            d = await dienst_befragen(self.host, self.port, 3.0)
+            namen = info_namen(d.get("info") or {}, "wake") if d.get("ok") else []
+            gemerkt = (time.monotonic(), namen)
+            # Nur eine Auskunft wird gemerkt, kein Fehlschlag - sonst bliebe
+            # ein einmal nicht erreichbarer Container fuenf Minuten beim
+            # falschen Namen.
+            if d.get("ok"):
+                _WECKWORT_AUSKUNFT[schluessel] = gemerkt
+        gewaehlt = weckwort_waehlen(self.wort, gemerkt[1])
+        if gewaehlt != self.wort:
+            _LOG.info("Wortwecker: eingestellt ist %s, der Container kennt es als %s.",
+                      self.wort, gewaehlt)
+            self.wort = gewaehlt
+
     async def oeffnen(self, rate: int) -> bool:
         from wyoming.audio import AudioStart
         from wyoming.wake import Detect
         try:
+            await self._wort_abgleichen()
             self.leser, self.schreiber = await wy_verbinden(self.host, self.port, 5.0)
             await wy_senden(self.schreiber,
                             Detect(names=[self.wort] if self.wort else None).event())
@@ -1422,6 +1827,14 @@ class Wortwecker:
         except (OSError, asyncio.TimeoutError, ImportError) as err:
             melde_gebremst("wake_offen", "Wortwecker %s:%d: %s"
                            % (self.host, self.port, fehlertext(err)), 900)
+            # Steht die Verbindung schon und scheiterte erst das Senden,
+            # muss sie hier zu - bis 0.11.15 blieb sie offen liegen, eine
+            # je Fehlversuch.
+            if self.schreiber is not None:
+                try:
+                    self.schreiber.close()
+                except OSError:
+                    pass
             self.leser = self.schreiber = None
             return False
 
@@ -1490,7 +1903,11 @@ class Wortwecker:
                 return False
             if Detection.is_type(ereignis.type):
                 return True
-        except (OSError, asyncio.TimeoutError) as err:
+        # IncompleteReadError kommt aus aufgabe.result() in _bereit(), wenn
+        # die Verbindung mitten in einem Ereignis abreisst - kein OSError,
+        # und bis 0.11.15 fiel er bis in Satellit.lauf() durch und kostete
+        # die Verbindung zum Mikrofon.
+        except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError) as err:
             melde_gebremst("wake_fuettern", "Wortwecker: " + fehlertext(err), 900)
             await self.schliessen()
         return False
@@ -2983,6 +3400,30 @@ def timer_liste() -> list:
 # ihn mit 'describe' ab und sagt ihm mit 'run-satellite', dass er bereit ist.
 # Der Satellit meldet sich danach mit 'run-pipeline' und schickt Audio.
 # ---------------------------------------------------------------------------
+# Saetze, deren Satellitenverbindung weg ist, waehrend sie noch liefen -
+# siehe Satellit.lauf(), finally. Der Verweis haelt sie am Leben.
+_SATELLIT_AUFGABEN = set()
+
+
+def _satellit_fertig(aufgabe) -> None:
+    _SATELLIT_AUFGABEN.discard(aufgabe)
+    if aufgabe.cancelled():
+        return
+    fehler = aufgabe.exception()
+    if fehler is not None:
+        melde_gebremst("sat_aufgabe",
+                       "Satellit: die Verarbeitung eines Satzes ist gescheitert: "
+                       + fehlertext(fehler), 3600)
+
+
+# Nach dem Abspielen einer Antwort so lange nicht zuhoeren. Der Satellit
+# spielt in Echtzeit, waehrend das Audio laengst verschickt ist, und sein
+# Mikrofon hoert den eigenen Lautsprecher - ohne diese Sperre waere die
+# eigene Rueckfrage die erste 'Antwort' auf sie. Zuschlag fuer Puffer und
+# Nachhall; am Geraet gemessen ist er NICHT.
+SATELLIT_NACHHALL_S = 0.8
+
+
 class Satellit:
     def __init__(self, eintrag: dict, cfg: dict, v) -> None:
         self.name = str(eintrag.get("name") or eintrag.get("host") or "Satellit")
@@ -3011,52 +3452,163 @@ class Satellit:
                 "gemeldet": bool(self.info)}
 
     async def lauf(self) -> None:
+        """Eine Verbindung zum Satelliten, vom Aufbau bis zum Abriss.
+
+        WAS SICH IN 0.12.0 GEAENDERT HAT: bis 0.11.15 wurde ein Satz nur bei
+        audio-stop verarbeitet. wyoming-satellite 1.0.0 schickt das nicht -
+        weder nach eigenem Weckwort noch beim Dauerstrom; er streamt, bis
+        der Server eine Abschrift (transcript) schickt. Die kam nie, also
+        auch nie ein Satz, und der Satellit kehrte nie zu seiner
+        Weckworterkennung zurueck. Jetzt entscheidet der Dienst das Ende
+        des Sprechens selbst (Sprachende), schickt die Abschrift - auch eine
+        leere, wenn nichts verstanden wurde - und erst danach die Antwort.
+        audio-stop wird weiter verstanden.
+
+        Verarbeitet wird in einer eigenen Aufgabe, und gelesen wird
+        weiter: der Satellit streamt waehrenddessen, und was nicht gelesen
+        wird, staut sich im Netz und kaeme danach als altes Audio herein.
+        """
+        from wyoming.asr import Transcript
         from wyoming.audio import AudioChunk, AudioStart, AudioStop
+        from wyoming.event import async_read_event
         from wyoming.info import Describe, Info
         from wyoming.satellite import RunSatellite
         from wyoming.pipeline import RunPipeline
+        from wyoming.wake import Detection
         try:
             from wyoming.ping import Ping, Pong
         except ImportError:                       # aeltere Fassungen des Pakets
             Ping = Pong = None
+        try:
+            from wyoming.vad import VoiceStarted, VoiceStopped
+        except ImportError:                       # aeltere Fassungen des Pakets
+            VoiceStarted = VoiceStopped = None
 
         leser, schreiber = await wy_verbinden(self.host, self.port)
+        keepalive_setzen(schreiber)
         self.zustand = "verbunden"
         self.seit = time.time()
         self.schreiber = schreiber
         wecker = None
+        # Der laufende Lesevorgang - er wird nie mit einer Zeitschranke
+        # abgebrochen, sondern nur angesehen (siehe Wortwecker._bereit()).
+        lesen = None
+        # Die laufende Verarbeitung eines Satzes und der Lauf, zu dem sie gehoert.
+        arbeit = None
+        arbeit_lauf = 0
         try:
             await wy_senden(schreiber, Describe().event())
             await wy_senden(schreiber, RunSatellite().event())
 
             rahmen: list = []
+            gesammelt = 0
             rate = 16000
             sammelt = False
             wartet_auf_weckwort = False
+            # Wo der Satellit seine Pipeline beginnen liess ('wake' oder
+            # 'asr'); leer, sobald er sie mit audio-stop selbst beendet hat.
+            beginn = ""
+            lauf_nr = 0
+            ende = None
+            nachfrage = False
+            stumm_bis = 0.0
             ohne_regung = 0
+            pong_gesehen = False
             # Bis 0.9.11 stand hier eine Lesefrist von 3600 Sekunden. Bricht
             # ein WLAN-Mikrofon weg, ohne dass TCP es meldet, zeigte die
             # Oberflaeche bis zu einer STUNDE 'verbunden', und der vorhandene
             # Wiederanlauf griff so lange nicht.
             frist = 30.0
+
+            def zuhoeren(warten_s: float = SPRACHE_WARTEN_S) -> None:
+                nonlocal rahmen, gesammelt, sammelt, ende
+                rahmen, gesammelt, sammelt = [], 0, True
+                ende = Sprachende(rate, warten_s)
+                self.zustand = "hoert"
+
+            def nach_dem_satz() -> None:
+                nonlocal rahmen, gesammelt, sammelt, ende, nachfrage, wartet_auf_weckwort
+                rahmen, gesammelt, sammelt, ende, nachfrage = [], 0, False, None, False
+                # Beim Weckwort auf dem Server (start_stage 'wake') streamt
+                # der Satellit nach dem Satz einfach weiter und schickt KEIN
+                # neues run-pipeline. Bis 0.11.15 wurde danach nie wieder
+                # auf das Weckwort gehoert - jetzt geht es dorthin zurueck.
+                wartet_auf_weckwort = beginn == "wake"
+                self.zustand = "wartet_weckwort" if wartet_auf_weckwort else "wartet"
+
+            def verarbeiten_starten() -> None:
+                nonlocal arbeit, arbeit_lauf, rahmen, gesammelt, sammelt, ende
+                arbeit = asyncio.ensure_future(
+                    self.verarbeiten(schreiber, rahmen, rate, nachfragen=bool(beginn)))
+                arbeit_lauf = lauf_nr
+                rahmen, gesammelt, sammelt, ende = [], 0, False, None
+                self.zustand = "verarbeitet"
+
             while _LAUF:
-                try:
-                    ereignis = await wy_lesen(leser, frist)
-                except asyncio.TimeoutError:
+                if lesen is None:
+                    lesen = asyncio.ensure_future(async_read_event(leser))
+                warten = {lesen} if arbeit is None else {lesen, arbeit}
+                fertig, _ = await asyncio.wait(warten, timeout=frist,
+                                               return_when=asyncio.FIRST_COMPLETED)
+                if not fertig:
                     if Ping is None:
                         continue          # ohne Ping bleibt es beim Warten
-                    ohne_regung += 1
-                    if ohne_regung >= 3:
-                        self.letzte_meldung = ("Keine Antwort auf drei Lebenszeichen - "
-                                               "Verbindung wird neu aufgebaut.")
-                        break
+                    # Scharf erst, wenn einmal ein pong kam: wyoming-satellite
+                    # 1.0.0 beantwortet ping nicht, und bis 0.11.15 wurde er
+                    # deshalb alle rund 90 s getrennt und neu verbunden. Fuer
+                    # ihn bleibt das TCP-Keepalive (keepalive_setzen()).
+                    if pong_gesehen:
+                        ohne_regung += 1
+                        if ohne_regung >= 3:
+                            self.letzte_meldung = ("Keine Antwort auf drei Lebenszeichen - "
+                                                   "Verbindung wird neu aufgebaut.")
+                            break
                     await wy_senden(schreiber, Ping().event())
                     continue
+
+                if arbeit is not None and arbeit in fertig:
+                    try:
+                        ausgang = arbeit.result() or {}
+                    except Exception as err:  # noqa: BLE001
+                        ausgang = {}
+                        melde_gebremst("sat_aufgabe",
+                                       "Satellit %s: die Verarbeitung eines Satzes ist "
+                                       "gescheitert: %s" % (self.name, fehlertext(err)), 3600)
+                    arbeit = None
+                    stumm_bis = max(stumm_bis, float(ausgang.get("stumm_bis") or 0.0))
+                    if arbeit_lauf == lauf_nr:
+                        if ausgang.get("rueckfrage") and beginn:
+                            # Rueckfrage: gleich weiter zuhoeren, ohne neues
+                            # Weckwort - die Antwort ist 'ja' oder 'nein'.
+                            # Moeglich, weil der Satellit noch streamt: bei
+                            # eigenem Weckwort hat er keine Abschrift bekommen
+                            # (verarbeiten() haelt sie zurueck), beim Weckwort
+                            # auf dem Server streamt er ohnehin.
+                            frist_s = int(self.cfg.get("bestaetigung_s") or 0) or SPRACHE_WARTEN_S
+                            wartet_auf_weckwort = False
+                            zuhoeren(min(SPRACHE_WARTEN_S, max(2.0, float(frist_s))))
+                            nachfrage = True
+                        else:
+                            if ausgang.get("rueckfrage") and not ausgang.get("abschrift"):
+                                # Der Satellit hat inzwischen selbst beendet
+                                # (audio-stop) - die zurueckgehaltene Abschrift
+                                # geht jetzt hinaus.
+                                await wy_senden(schreiber, Transcript(
+                                    text=str(ausgang.get("satz") or "")).event())
+                            nach_dem_satz()
+                    # Sonst hat inzwischen ein neues run-pipeline begonnen,
+                    # und dessen Zustand gilt.
+
+                if lesen not in fertig:
+                    continue
+                aufgabe, lesen = lesen, None
+                ereignis = aufgabe.result()
                 if ereignis is None:
                     break
                 ohne_regung = 0
                 typ = ereignis.type
                 if Pong is not None and Pong.is_type(typ):
+                    pong_gesehen = True
                     continue
                 if Info.is_type(typ):
                     try:
@@ -3069,25 +3621,53 @@ class Satellit:
                     # 'wake', hat er das Weckwort NICHT selbst erkannt - dann
                     # muss der Wortwecker ran.
                     p = RunPipeline.from_event(ereignis)
-                    beginn = str(getattr(p, "start_stage", "") or "")
+                    # .value, nicht str(): PipelineStage ist ein str-Enum, und
+                    # str() ergibt dort 'PipelineStage.WAKE'. Bis 0.11.15 stand
+                    # hier str(...) - der Vergleich mit 'wake' war nie wahr,
+                    # und der Wortwecker wurde nie gefragt.
+                    stufe = getattr(p, "start_stage", "") or ""
+                    beginn = str(getattr(stufe, "value", stufe) or "")
+                    lauf_nr += 1
+                    nachfrage = False
+                    # Eine Verbindung zum Wortwecker aus dem vorigen Lauf wird
+                    # geschlossen, nicht nur vergessen - bis 0.11.15 blieb
+                    # sie je neuem run-pipeline offen liegen.
+                    if wecker is not None:
+                        await wecker.schliessen()
+                        wecker = None
                     wartet_auf_weckwort = beginn == "wake"
-                    rahmen, sammelt = [], not wartet_auf_weckwort
-                    self.zustand = "hoert" if sammelt else "wartet_weckwort"
+                    if wartet_auf_weckwort:
+                        rahmen, gesammelt, sammelt, ende = [], 0, False, None
+                        self.zustand = "wartet_weckwort"
+                    else:
+                        zuhoeren()
                     # Die Verbindung zum Wortwecker wird ERST beim ersten
                     # Audioblock geoeffnet: vorher steht die Abtastrate nicht
                     # fest, und der Wortwecker bekommt sie im audio-start.
-                    wecker = None
                     _LOG.info("Satellit %s: Verarbeitung angefordert (ab %s).",
                               self.name, beginn or "asr")
                 elif AudioStart.is_type(typ):
                     start = AudioStart.from_event(ereignis)
-                    rate = start.rate
-                    if not wartet_auf_weckwort:
-                        rahmen, sammelt = [], True
-                        self.zustand = "hoert"
+                    rate = start.rate or rate
+                    if not wartet_auf_weckwort and arbeit is None and not nachfrage:
+                        zuhoeren()
                 elif AudioChunk.is_type(typ):
                     block = AudioChunk.from_event(ereignis)
-                    rate = block.rate
+                    rate = block.rate or rate
+                    # Breite und Kanaele aus dem Block selbst, nicht nur die
+                    # Rate - siehe pcm_auf_16bit_mono().
+                    audio = pcm_auf_16bit_mono(block.audio, block.width, block.channels)
+                    if audio is None:
+                        self.letzte_meldung = (
+                            "Der Satellit liefert %s Byte je Abtastwert in %s Kanaelen - "
+                            "das laesst sich nicht auf 16 Bit Mono bringen."
+                            % (block.width, block.channels))
+                        melde_gebremst("format_" + self.name, "Satellit %s: %s"
+                                       % (self.name, self.letzte_meldung), 3600)
+                        continue
+                    if arbeit is not None:
+                        # Waehrend ein Satz verarbeitet wird, hoert niemand zu.
+                        continue
                     # 'oder nicht mehr offen': hat der Wortwecker die
                     # Verbindung geschlossen, wird sie hier neu aufgebaut,
                     # statt bis zum Ende der Aufnahme wirkungslos zu bleiben.
@@ -3108,100 +3688,190 @@ class Satellit:
                                    "wake")
                             wecker = None
                             wartet_auf_weckwort = False
-                            sammelt = True
-                            self.zustand = "hoert"
+                            zuhoeren()
                     if wartet_auf_weckwort and wecker is not None:
-                        if await wecker.fuettern(block.audio, rate):
+                        if await wecker.fuettern(audio, rate):
                             _LOG.info("Satellit %s: Weckwort erkannt.", self.name)
+                            wort = wecker.wort
                             await wecker.schliessen()
                             wecker = None
                             wartet_auf_weckwort = False
-                            rahmen, sammelt = [], True
-                            self.zustand = "hoert"
+                            # Dem Satelliten sagen, dass das Weckwort fiel -
+                            # wyoming-satellite spielt dann seinen Weckton
+                            # und schaltet seine Anzeige.
+                            await wy_senden(schreiber, Detection(name=wort or None).event())
+                            zuhoeren()
                         continue
-                    if sammelt:
-                        rahmen.append(block.audio)
-                        # Notbremse: mehr als 30 Sekunden nimmt niemand am Stueck auf.
-                        if len(rahmen) * len(block.audio) > rate * 2 * 30:
-                            sammelt = False
+                    if not sammelt or time.monotonic() < stumm_bis:
+                        continue
+                    rahmen.append(audio)
+                    gesammelt += len(audio)
+                    meldung = ende.fuettern(audio) if ende is not None else ""
+                    if meldung == "beginn":
+                        if VoiceStarted is not None:
+                            await wy_senden(schreiber, VoiceStarted().event())
+                    elif meldung in ("ende", "zu_lang") or gesammelt > rate * 2 * 30:
+                        # Notbremse dazu: mehr als 30 Sekunden nimmt niemand
+                        # am Stueck auf - auch ohne Sprachende-Meldung.
+                        if meldung == "zu_lang" or gesammelt > rate * 2 * 30:
                             melde_gebremst("zu_lang_" + self.name,
-                                           f"Satellit {self.name}: mehr als 30 s Audio am "
-                                           "Stueck - abgeschnitten. Erkennt der Satellit das "
-                                           "Ende des Sprechens nicht?")
+                                           "Satellit %s: mehr als %d s am Stueck gesprochen "
+                                           "- abgeschnitten und verarbeitet."
+                                           % (self.name, int(SPRACHE_MAX_S)))
+                        if VoiceStopped is not None:
+                            await wy_senden(schreiber, VoiceStopped().event())
+                        verarbeiten_starten()
+                    elif meldung == "nichts":
+                        # Niemand hat angefangen. Die leere Abschrift schickt
+                        # wyoming-satellite zurueck zur Weckworterkennung.
+                        self.letzte_meldung = ("Auf die Rueckfrage kam keine Antwort."
+                                               if nachfrage else
+                                               "Nach dem Weckwort wurde nichts gesagt.")
+                        await wy_senden(schreiber, Transcript(text="").event())
+                        nach_dem_satz()
                 elif AudioStop.is_type(typ):
                     if wecker is not None:
                         await wecker.schliessen()
                         wecker = None
                     wartet_auf_weckwort = False
-                    if rahmen:
-                        await self.verarbeiten(schreiber, rahmen, rate)
-                    rahmen, sammelt = [], False
-                    self.zustand = "wartet"
+                    # Der Satellit hat seine Pipeline selbst beendet. Ein
+                    # neuer Lauf beginnt mit einem neuen run-pipeline.
+                    beginn = ""
+                    nachfrage = False
+                    if arbeit is None and sammelt and rahmen:
+                        verarbeiten_starten()
+                    elif arbeit is None:
+                        rahmen, gesammelt, sammelt, ende = [], 0, False, None
+                        self.zustand = "wartet"
         finally:
+            if lesen is not None:
+                lesen.cancel()
+            if arbeit is not None and not arbeit.done():
+                # NICHT abbrechen: der Satz kann in satz_im_faden() stecken.
+                # Dessen Faden laeuft ohnehin weiter, ein Abbruch gaebe nur
+                # die Satzsperre frei, waehrend er noch arbeitet.
+                _SATELLIT_AUFGABEN.add(arbeit)
+                arbeit.add_done_callback(_satellit_fertig)
             if wecker is not None:
                 await wecker.schliessen()
             self.zustand = "getrennt"
             self.schreiber = None
             schreiber.close()
 
-    async def verarbeiten(self, schreiber, rahmen: list, rate: int) -> None:
+    async def verarbeiten(self, schreiber, rahmen: list, rate: int,
+                          nachfragen: bool = True) -> dict:
+        """Audio -> Abschrift an den Satelliten -> Satz -> Antwort.
+
+        Rueckgabe fuer lauf(): {'rueckfrage', 'stumm_bis', 'abschrift',
+        'satz'}. 'abschrift' sagt, ob die Abschrift schon hinaus ist.
+
+        Die Abschrift (transcript) geht IMMER hinaus, auch leer: sie ist fuer
+        wyoming-satellite das Zeichen, dass der Server fertig zugehoert hat.
+        Ohne sie streamt er endlos. Zurueckgehalten wird sie nur bei einer
+        Rueckfrage, die der Satellit selbst spricht - dann soll er weiter
+        streamen, damit 'ja' ohne neues Weckwort ankommt.
+        """
+        from wyoming.asr import Transcript
         from wyoming.audio import AudioChunk, AudioStart, AudioStop
+        try:
+            from wyoming.error import Error as WyFehler
+        except ImportError:                       # aeltere Fassungen des Pakets
+            WyFehler = None
+        aus = {"rueckfrage": False, "stumm_bis": 0.0, "abschrift": False, "satz": ""}
 
-        cfg = config()
-        # Raum und Zone stehen in der Konfiguration und koennen sich geaendert
-        # haben, seit dieser Satellit gebaut wurde.
-        eintrag = satellit_eintrag(cfg, self.name)
-        if eintrag:
-            self.raum = str(eintrag.get("raum") or "")
-            self.zone = str(eintrag.get("zone") or "")
+        async def abschrift(text: str) -> None:
+            await wy_senden(schreiber, Transcript(text=text).event())
+            aus["abschrift"] = True
 
-        erkannt = await spracherkennung(cfg, rahmen, rate)
-        if not erkannt.get("ok"):
-            self.letzte_meldung = erkannt.get("fehler", "")
-            _LOG.error("Satellit %s: %s", self.name, self.letzte_meldung)
-            melden(3, "Die Spracherkennung antwortet nicht: " + self.letzte_meldung,
-                   "whisper")
-            return
-        satz = erkannt["text"]
-        self.letzter_satz = satz
-        if not satz:
-            self.letzte_meldung = "Es wurde nichts verstanden (leerer Text)."
-            return
+        try:
+            cfg = config()
+            # Raum und Zone stehen in der Konfiguration und koennen sich
+            # geaendert haben, seit dieser Satellit gebaut wurde.
+            eintrag = satellit_eintrag(cfg, self.name)
+            if eintrag:
+                self.raum = str(eintrag.get("raum") or "")
+                self.zone = str(eintrag.get("zone") or "")
 
-        erg = await satz_im_faden(satz, cfg, self.v, self.name, self.raum, self.zone)
-        self.letzte_meldung = erg.get("antwort", "")
+            erkannt = await spracherkennung(cfg, rahmen, rate)
+            if not erkannt.get("ok"):
+                self.letzte_meldung = erkannt.get("fehler", "")
+                _LOG.error("Satellit %s: %s", self.name, self.letzte_meldung)
+                melden(3, "Die Spracherkennung antwortet nicht: " + self.letzte_meldung,
+                       "whisper")
+                if WyFehler is not None:
+                    await wy_senden(schreiber, WyFehler(
+                        text=str(self.letzte_meldung)[:200], code="stt-failed").event())
+                await abschrift("")
+                return aus
+            satz = erkannt["text"]
+            self.letzter_satz = satz
+            if not satz:
+                # Zu leise, Halluzination verworfen oder leer: still bleiben.
+                self.letzte_meldung = erkennung_leer_text(erkannt)
+                await abschrift("")
+                return aus
+            aus["satz"] = satz
+            # Eine Rueckfrage gibt es nur bei eingeschalteter Bestaetigung.
+            # Ohne sie geht die Abschrift sofort hinaus - der Satellit
+            # quittiert dann, waehrend der Satz noch verarbeitet wird.
+            if not (nachfragen and int(cfg.get("bestaetigung_s") or 0) > 0):
+                await abschrift(satz)
 
-        # Ab 0.9.1 entscheidet zusaetzlich der Antwortweg. Bei 'loxone' bleibt
-        # der Satellit still, weil die Ansage bereits ueber den Music Server
-        # gelaufen ist - sonst hoerte man sie im selben Raum zweimal.
-        # Ausnahme (Ansage-1): die zusaetzliche Ansage ist aus, oder
-        # Chromecast4lox/Alexa-NG hat sie nicht angenommen - dann bleibt der
-        # bisherige Weg (satelliten_sprechen()).
-        if (not cfg.get("antwort_sprechen") or not erg.get("antwort")
-                or not satelliten_sprechen(cfg, erg.get("ausgabe"))):
-            return
-        # Die Ruhezeit gilt auch fuer den Lautsprecher des Mikrofons - er steht
-        # in aller Regel im selben Zimmer wie ein Bett.
-        still, grund = ruhe_aktiv(cfg)
-        if still:
-            melde_gebremst("sat_ruhe", "Antwort am Mikrofon unterdrueckt: " + grund, 3600)
-            return
-        gesprochen = await sprachausgabe(cfg, erg["antwort"],
-                                         (cfg.get("tts") or {}).get("stimme", ""))
-        if not gesprochen.get("ok"):
-            _LOG.error("Satellit %s: %s", self.name, gesprochen.get("fehler"))
-            melden(3, "Die Sprachausgabe antwortet nicht: %s"
-                      % gesprochen.get("fehler"), "piper")
-            return
-        await wy_senden(schreiber, AudioStart(rate=gesprochen["rate"],
-                                              width=gesprochen["width"],
-                                              channels=gesprochen["channels"]).event())
-        for block in gesprochen["bloecke"]:
-            await wy_senden(schreiber, AudioChunk(rate=gesprochen["rate"],
+            erg = await satz_im_faden(satz, cfg, self.v, self.name, self.raum, self.zone)
+            self.letzte_meldung = erg.get("antwort", "")
+
+            # Ab 0.9.1 entscheidet zusaetzlich der Antwortweg. Bei 'loxone' bleibt
+            # der Satellit still, weil die Ansage bereits ueber den Music Server
+            # gelaufen ist - sonst hoerte man sie im selben Raum zweimal.
+            # Ausnahme (Ansage-1): die zusaetzliche Ansage ist aus, oder
+            # Chromecast4lox/Alexa-NG hat sie nicht angenommen - dann bleibt der
+            # bisherige Weg (satelliten_sprechen()).
+            spricht = bool(cfg.get("antwort_sprechen") and erg.get("antwort")
+                           and satelliten_sprechen(cfg, erg.get("ausgabe")))
+            if spricht:
+                # Die Ruhezeit gilt auch fuer den Lautsprecher des Mikrofons - er
+                # steht in aller Regel im selben Zimmer wie ein Bett.
+                still, grund = ruhe_aktiv(cfg)
+                if still:
+                    melde_gebremst("sat_ruhe", "Antwort am Mikrofon unterdrueckt: " + grund,
+                                   3600)
+                    spricht = False
+            # Weiter zuhoeren nur, wenn die Rueckfrage auch HIER zu hoeren ist.
+            rueckfrage = (spricht and erg.get("grund") == "rueckfrage"
+                          and not aus["abschrift"])
+            if not rueckfrage and not aus["abschrift"]:
+                await abschrift(satz)
+            if not spricht:
+                return aus
+            gesprochen = await sprachausgabe(cfg, erg["antwort"],
+                                             (cfg.get("tts") or {}).get("stimme", ""))
+            if not gesprochen.get("ok"):
+                _LOG.error("Satellit %s: %s", self.name, gesprochen.get("fehler"))
+                melden(3, "Die Sprachausgabe antwortet nicht: %s"
+                          % gesprochen.get("fehler"), "piper")
+                if not aus["abschrift"]:
+                    await abschrift(satz)
+                return aus
+            await wy_senden(schreiber, AudioStart(rate=gesprochen["rate"],
                                                   width=gesprochen["width"],
-                                                  channels=gesprochen["channels"],
-                                                  audio=block).event())
-        await wy_senden(schreiber, AudioStop().event())
+                                                  channels=gesprochen["channels"]).event())
+            for block in gesprochen["bloecke"]:
+                await wy_senden(schreiber, AudioChunk(rate=gesprochen["rate"],
+                                                      width=gesprochen["width"],
+                                                      channels=gesprochen["channels"],
+                                                      audio=block).event())
+            await wy_senden(schreiber, AudioStop().event())
+            byterate = max(1, int(gesprochen["rate"]) * int(gesprochen["width"])
+                           * int(gesprochen["channels"]))
+            dauer = sum(len(b) for b in gesprochen["bloecke"]) / float(byterate)
+            aus["stumm_bis"] = time.monotonic() + dauer + SATELLIT_NACHHALL_S
+            aus["rueckfrage"] = rueckfrage
+            return aus
+        except (OSError, asyncio.TimeoutError) as err:
+            self.letzte_meldung = "Verbindung zum Satelliten: " + fehlertext(err)
+            melde_gebremst("sat_senden_" + self.name,
+                           "Satellit %s: %s" % (self.name, self.letzte_meldung), 900)
+            return aus
 
 
 async def satellit_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
@@ -3286,6 +3956,11 @@ class EsphomeMikrofon:
         self.ansage_fertig = None
         self.gespraech = ""
         self.lauf_offen = False
+        # Zaehlt die Laeufe (je VoiceAssistantRequest start=true eins).
+        # Eine Satzverarbeitung merkt sich ihre Nummer und schweigt, sobald
+        # ein neuer Lauf begonnen hat - bis 0.11.15 schickte ihr finally ein
+        # RUN_END mitten in den naechsten Lauf (etwa nach einer Rueckfrage).
+        self.laufnummer = 0
 
     def abbild(self) -> dict:
         return {"name": self.name, "art": "esphome", "host": self.host,
@@ -3416,8 +4091,14 @@ def esphome_ansageformat(entitaeten) -> dict:
             "bytes": int(getattr(f, "sample_bytes", 0) or 0) or 2}
 
 
-def ansage_ablegen(pcm: bytes, format_: dict = None) -> tuple:
+def ansage_ablegen(pcm: bytes, rate: int, format_: dict = None) -> tuple:
     """Die Antwort als WAV unter einer abrufbaren Adresse ablegen.
+
+    pcm ist 16-Bit-Mono mit der Abtastrate 'rate'. Nennt das Geraet eine
+    eigene Rate (format_), wird darauf umgerechnet - und der Kopf traegt
+    immer die Rate, die das PCM WIRKLICH hat. Bis 0.11.15 kam hier PCM mit
+    16000 Hz an, und der Kopf trug die Rate des Geraets: bei 48000 Hz lief
+    die Antwort dreimal zu schnell.
 
     Rueckgabe (url, pfad) - oder ('', None), wenn der Ort nicht beschreibbar
     ist. Abgelegt wird im UNANGEMELDETEN Baum, weil das Geraet sich nicht
@@ -3440,11 +4121,11 @@ def ansage_ablegen(pcm: bytes, format_: dict = None) -> tuple:
                 pass
         name = secrets.token_hex(16) + ".wav"
         ziel = ordner / name
-        # Die Rate kommt vom GERAET, wenn es eine nennt - siehe
-        # esphome_ansageformat(). ESPHOME_RATE ist die Vorgabe fuer den
-        # API-Strom und nur der Rueckfall fuer diesen Weg.
-        ziel.write_bytes(wav_bauen(pcm, int((format_ or {}).get("rate")
-                                            or ESPHOME_RATE)))
+        # Die Zielrate kommt vom GERAET, wenn es eine nennt - siehe
+        # esphome_ansageformat(). Sonst bleibt das PCM, wie es ist.
+        rate = int(rate or ESPHOME_RATE)
+        zielrate = int((format_ or {}).get("rate") or 0) or rate
+        ziel.write_bytes(wav_bauen(pcm_umrechnen(pcm, rate, zielrate), zielrate))
         return "http://%s/plugins/%s/ansagen/%s" % (eigene_adresse(), PNAME, name), ziel
     except OSError as err:
         melde_gebremst("ansage_ablegen",
@@ -3516,15 +4197,20 @@ async def esphome_ereignis(mikro: "EsphomeMikrofon", art, daten=None) -> None:
                        3600)
 
 
-async def esphome_lauf_beenden(mikro: "EsphomeMikrofon") -> None:
+async def esphome_lauf_beenden(mikro: "EsphomeMikrofon", nummer=None) -> None:
     """RUN_END - und zwar genau einmal je Lauf.
 
     Ohne dieses Ereignis haelt sich das Geraet fuer dauerhaft mitten in einer
     Pipeline: der Leuchtring dreht weiter, und es kommt nicht in den
     Ruhezustand zurueck. Bis 0.10.3 ging ueberhaupt kein Ereignis zurueck.
+
+    'nummer' ist der Lauf, den der Aufrufer meint. Hat inzwischen ein neuer
+    begonnen, bleibt es still - sonst beendete das RUN_END den neuen.
     """
     from aioesphomeapi import VoiceAssistantEventType as VE
     if not getattr(mikro, "lauf_offen", False):
+        return
+    if nummer is not None and nummer != getattr(mikro, "laufnummer", 0):
         return
     mikro.lauf_offen = False
     await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_RUN_END)
@@ -3562,8 +4248,10 @@ async def esphome_sprechen(mikro: "EsphomeMikrofon", cfg: dict, text: str) -> tu
                        "wird Mono mit 16 Bit"
                        % (gesprochen.get("channels"), gesprochen.get("width")))
     rate = int(gesprochen.get("rate") or ESPHOME_RATE)
-    pcm = b"".join(pcm_umrechnen(b, rate, ESPHOME_RATE)
-                   for b in gesprochen["bloecke"])
+    # Erst zusammenfuegen, dann umrechnen: je Block umgerechnet (so bis
+    # 0.11.15) fehlt an jeder Blockgrenze ein Zwischenwert.
+    roh = b"".join(gesprochen["bloecke"])
+    pcm = pcm_umrechnen(roh, rate, ESPHOME_RATE)
 
     # Die Adresse muss NICHTLEER sein, sonst steigt die Firmware im
     # TTS_END-Zweig aus - vor dem Zustandswechsel, in dem der
@@ -3571,7 +4259,10 @@ async def esphome_sprechen(mikro: "EsphomeMikrofon", cfg: dict, text: str) -> tu
     # sie wirklich ab; eines mit blossem Lautsprecher reicht sie nur an
     # seinen Ausloeser durch.
     hat_spieler = esphome_kann(mikro, VF.ANNOUNCE)
-    url, datei = ansage_ablegen(pcm, getattr(mikro, "ansageformat", None))
+    # Abgelegt wird das PCM von Piper mit SEINER Rate; umgerechnet wird
+    # dort auf die Rate, die das Geraet nennt (siehe ansage_ablegen()).
+    url, datei = ansage_ablegen(roh, rate, getattr(mikro, "ansageformat", None)
+                                if hat_spieler else None)
     if not url:
         if hat_spieler:
             return False, ("das Geraet holt die Antwort ueber eine Adresse, und "
@@ -3645,6 +4336,19 @@ async def esphome_audio_takten(klient, pcm: bytes) -> None:
             await asyncio.sleep(rest)
 
 
+# Mehr als 30 Sekunden Audio werden je Lauf nicht gesammelt (16 kHz, 16 Bit).
+# Die Sprachende-Erkennung endet laengstens nach SPRACHE_MAX_S; diese Grenze
+# haelt nur den Speicher, falls sie nichts meldet.
+ESPHOME_PUFFER_MAX = 30 * ESPHOME_RATE * 2
+
+
+def esphome_verbunden(klient) -> bool:
+    """Steht die Verbindung noch? is_connected - ohne die Eigenschaft
+    (aeltere Fassungen) entscheidet allein der on_stop-Rueckruf."""
+    wert = getattr(klient, "is_connected", None)
+    return True if wert is None else bool(wert)
+
+
 async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
     name = str(eintrag.get("name") or eintrag.get("host"))
     mikro = EsphomeMikrofon(eintrag)
@@ -3664,7 +4368,16 @@ async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
                           int(eintrag.get("port") or 6053),
                           str(eintrag.get("passwort") or "") or None,
                           noise_psk=str(eintrag.get("schluessel") or "") or None)
-        puffer: dict = {"rahmen": [], "laeuft": False}
+        puffer: dict = {"rahmen": [], "laeuft": False, "ende": None, "bytes": 0}
+        # Wird gesetzt, sobald die Bibliothek die Verbindung als beendet
+        # meldet (on_stop von connect()). Bis 0.11.15 stand hier eine
+        # Sekundenschleife auf 'klient.connected' - das Attribut gibt es
+        # nicht (es heisst is_connected), und der AttributeError trennte
+        # jede Verbindung nach rund fuenf Sekunden.
+        getrennt = asyncio.Event()
+
+        async def bei_trennung(erwartet: bool = False):
+            getrennt.set()
 
         # ALLE DREI SIND KOROUTINEN. Die Bibliothek reicht ihr Ergebnis an
         # create_eager_task() bzw. _create_background_task() weiter;
@@ -3681,7 +4394,15 @@ async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
             conversation_id, flags, audio_settings, wake_word_phrase.
             """
             from aioesphomeapi import VoiceAssistantEventType as VE
+            mikro.laufnummer = int(getattr(mikro, "laufnummer", 0)) + 1
             puffer["rahmen"] = []
+            puffer["bytes"] = 0
+            # Das Ende des Sprechens entscheidet der SERVER (siehe
+            # Sprachende) - wie in Home Assistant, fuer das die Firmware
+            # gebaut ist. Das Flag USE_VAD wird dafuer nicht abgefragt:
+            # Home Assistant tut es auch nicht, und ein Geraet mit
+            # Weckwort hoert ohne STT_VAD_END nie auf.
+            puffer["ende"] = Sprachende(ESPHOME_RATE)
             puffer["laeuft"] = True
             mikro.zustand = "hoert"
             mikro.gespraech = str(gespraech or "")
@@ -3710,6 +4431,15 @@ async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
             if mikro.ansage_fertig is not None:
                 mikro.ansage_fertig.set()
 
+        def satz_starten(rahmen: list) -> None:
+            # Der Verweis wird FESTGEHALTEN: eine Aufgabe, auf die
+            # niemand zeigt, darf der Muellsammler mitten im Lauf
+            # einziehen, und eine Ausnahme darin endet unsichtbar.
+            aufgabe = asyncio.ensure_future(
+                esphome_satz(mikro, rahmen, holen_v, mikro.laufnummer))
+            _ESPHOME_AUFGABEN.add(aufgabe)
+            aufgabe.add_done_callback(_esphome_fertig)
+
         async def hoeren(daten: bytes, daten2: bytes = None):
             """Ein Audioblock vom Geraet.
 
@@ -3717,45 +4447,82 @@ async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
             audio.data2). Der zweite Kanal ist fuer Geraete mit
             MULTI_CHANNEL_AUDIO; Whisper bekommt einen Kanal, also bleibt
             er liegen. Bis 0.10.3 nahm diese Funktion EIN Argument.
+
+            SEIT 0.12.0 entscheidet hier die Sprachende-Erkennung, wann
+            Schluss ist. Ein Geraet mit Weckwort hoert erst auf, wenn der
+            Server VOICE_ASSISTANT_STT_VAD_END schickt (Firmware: Wechsel
+            nach STOP_MICROPHONE/AWAITING_RESPONSE) - bis 0.11.15 kam das
+            nie, der Puffer wuchs ohne Grenze, und es entstand nie ein Satz.
             """
-            if puffer["laeuft"]:
-                puffer["rahmen"].append(bytes(daten))
+            from aioesphomeapi import VoiceAssistantEventType as VE
+            if not puffer["laeuft"]:
+                return
+            block = bytes(daten)
+            puffer["rahmen"].append(block)
+            puffer["bytes"] += len(block)
+            meldung = puffer["ende"].fuettern(block) if puffer["ende"] else ""
+            if meldung == "beginn":
+                await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_STT_VAD_START)
+            elif meldung in ("ende", "zu_lang") or puffer["bytes"] >= ESPHOME_PUFFER_MAX:
+                # Die Grenze von 30 s ist die Notbremse fuer den Speicher;
+                # sie greift nur, wenn die Sprachende-Erkennung nichts meldet.
+                rahmen = puffer["rahmen"]
+                puffer.update(rahmen=[], laeuft=False, ende=None, bytes=0)
+                mikro.zustand = "verbunden"
+                await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_STT_VAD_END)
+                satz_starten(rahmen)
+            elif meldung == "nichts":
+                # Niemand hat angefangen zu sprechen. Still beenden: das
+                # Mikrofon geht aus (VAD_END), ein leeres STT_END, RUN_END.
+                puffer.update(rahmen=[], laeuft=False, ende=None, bytes=0)
+                mikro.zustand = "verbunden"
+                mikro.letzte_meldung = "Nach dem Weckwort wurde nichts gesagt."
+                await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_STT_VAD_END)
+                await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_STT_END, {"text": ""})
+                await esphome_lauf_beenden(mikro, mikro.laufnummer)
 
         async def ende(abbruch: bool = False):
             """Das Geraet hoert auf zu senden.
 
-            Das Argument kommt aus zwei Quellen, im Quelltext der
-            Bibliothek nachgelesen: handle_stop(True) bei einer
-            Stopp-Anforderung des Geraets - also Abbruch -, und
-            handle_stop(False), wenn der Audiostrom regulaer endet. Am
-            Geraet ist das nicht gegengeprueft.
+            Das Argument kommt aus zwei Quellen, im Quelltext nachgelesen
+            (aioesphomeapi 46.6.0, Firmware voice_assistant.cpp):
+
+              True   VoiceAssistantRequest(start=false) - das schickt die
+                     Firmware NUR ueber signal_stop_(), und das ist ihr
+                     regulaeres Ende: Taste losgelassen (request_stop),
+                     Mikrofonkanal stockt, Fehler. 'Der Strom ist zu Ende',
+                     nicht 'verwirf alles'.
+              False  VoiceAssistantAudio(end=true) - in der Firmware setzt
+                     keine Stelle dieses Feld.
+
+            Bis 0.11.15 galt True als Abbruch und das Audio wurde verworfen:
+            ein Druckknopf-Mikrofon kam so nie zu einem Satz. Jetzt wird
+            verarbeitet, was da ist. Verworfen wird nur ein leerer Puffer -
+            und ein Stopp, der kommt, nachdem der Dienst selbst schon
+            beendet hat (Sprachende erkannt): dann ist laeuft schon False.
             """
             from aioesphomeapi import VoiceAssistantEventType as VE
-            puffer["laeuft"] = False
-            mikro.zustand = "verbunden"
+            if not puffer["laeuft"]:
+                return
             rahmen = puffer["rahmen"]
-            puffer["rahmen"] = []
+            puffer.update(rahmen=[], laeuft=False, ende=None, bytes=0)
+            mikro.zustand = "verbunden"
             # Der Text steht hier noch nicht fest - er kommt aus Whisper.
             # Die Firmware steigt bei leerem STT_END-Text aus; das kostet
             # nur einen Ausloeser, nicht den Lauf. Das gefuellte STT_END
             # schickt esphome_satz(), sobald der Text da ist.
-            if abbruch or not rahmen:
+            if not rahmen:
                 await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_STT_END,
                                        {"text": ""})
-                # Auch ein abgebrochener Lauf wird BEENDET - sonst dreht
-                # der Leuchtring weiter.
-                await esphome_lauf_beenden(mikro)
+                # Auch ein Lauf ohne Audio wird BEENDET - sonst dreht der
+                # Leuchtring weiter.
+                await esphome_lauf_beenden(mikro, mikro.laufnummer)
                 return
-            # Der Verweis wird FESTGEHALTEN: eine Aufgabe, auf die
-            # niemand zeigt, darf der Muellsammler mitten im Lauf
-            # einziehen, und eine Ausnahme darin endet unsichtbar.
-            aufgabe = asyncio.ensure_future(esphome_satz(mikro, rahmen, holen_v))
-            _ESPHOME_AUFGABEN.add(aufgabe)
-            aufgabe.add_done_callback(_esphome_fertig)
+            satz_starten(rahmen)
 
         from aioesphomeapi import VoiceAssistantFeature as VF
         try:
-            await klient.connect(login=True)
+            await klient.connect(on_stop=bei_trennung, login=True)
             # In EINEM Zug: Geraeteangaben UND Entitaeten. Aus letzteren
             # kommt das Ansageformat des Media Players (Punkt 2).
             entitaeten = []
@@ -3777,7 +4544,8 @@ async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
                     "esph_format_" + name,
                     "ESPHome %s meldet einen Media Player, aber kein Format, das "
                     "dieses Plugin erzeugen kann (es schreibt WAV). Die Ansage "
-                    "wird mit %d Hz Mono abgelegt." % (name, ESPHOME_RATE), 86400)
+                    "wird als WAV in Mono mit der Rate der Sprachausgabe "
+                    "abgelegt." % name, 86400)
             _LOG.info("ESPHome-Mikrofon %s verbunden: %s (Merkmale %d, Ansageformat %s)",
                       name, getattr(geraet, "name", "?"), mikro.merkmale,
                       mikro.ansageformat or "nicht gemeldet")
@@ -3804,8 +4572,16 @@ async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
                     mikro.letzte_meldung = ("Das Geraet meldet weder Lautsprecher noch "
                                             "Media Player - die Antwort kommt nur "
                                             "ueber Loxone.")
-            while _LAUF and klient.connected:
-                await asyncio.sleep(1)
+            # Gewartet wird auf die Trennung selbst; die Fuenf-Sekunden-
+            # Schranke ist nur dafuer da, _LAUF zu sehen.
+            while _LAUF and esphome_verbunden(klient) and not getrennt.is_set():
+                try:
+                    await asyncio.wait_for(getrennt.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    pass
+            if _LAUF:
+                mikro.letzte_meldung = "Verbindung getrennt - sie wird neu aufgebaut."
+                _LOG.info("ESPHome-Mikrofon %s: Verbindung getrennt.", name)
         except Exception as err:  # noqa: BLE001
             fehler_folge += 1
             mikro.zustand = "getrennt"
@@ -3828,61 +4604,91 @@ async def esphome_betreuen(eintrag: dict, cfg: dict, holen_v) -> None:
             await asyncio.sleep(1)
 
 
-async def esphome_satz(mikro: "EsphomeMikrofon", rahmen: list, holen_v) -> None:
+async def esphome_satz(mikro: "EsphomeMikrofon", rahmen: list, holen_v,
+                       nummer=None) -> None:
     """Audio -> Text -> Absicht -> Antwort, und dabei das Geraet mitnehmen.
 
     Das RUN_END steht im finally. Ohne es haelt sich das Geraet fuer
     dauerhaft mitten in einer Pipeline: der Leuchtring dreht weiter, und
     es kommt nicht in den Ruhezustand zurueck - auch dann nicht, wenn hier
     etwas schiefgeht. Bis 0.10.3 ging ueberhaupt kein Ereignis zurueck.
+
+    'nummer' ist der Lauf, zu dem dieser Satz gehoert. Beginnt inzwischen
+    ein neuer (das Geraet fragt nach einer Rueckfrage von selbst wieder
+    an), gehen keine Ereignisse dieses Satzes mehr hinaus - auch nicht das
+    RUN_END aus dem finally, das bis 0.11.15 den neuen Lauf beendete.
     """
     from aioesphomeapi import VoiceAssistantEventType as VE
+    from aioesphomeapi import VoiceAssistantFeature as VF
+    if nummer is None:
+        nummer = getattr(mikro, "laufnummer", 0)
+
+    def noch_dran() -> bool:
+        return getattr(mikro, "laufnummer", 0) == nummer
+
+    async def ereignis(art, daten=None) -> None:
+        if noch_dran():
+            await esphome_ereignis(mikro, art, daten)
+
     cfg = config()
     try:
-        erkannt = await spracherkennung(cfg, rahmen, 16000)
+        erkannt = await spracherkennung(cfg, rahmen, ESPHOME_RATE)
         if not erkannt.get("ok"):
             mikro.letzte_meldung = erkannt.get("fehler", "")
             _LOG.error("ESPHome %s: %s", mikro.name, mikro.letzte_meldung)
-            await esphome_ereignis(
-                mikro, VE.VOICE_ASSISTANT_ERROR,
+            await ereignis(
+                VE.VOICE_ASSISTANT_ERROR,
                 {"code": "stt-failed",
                  "message": str(mikro.letzte_meldung or "Spracherkennung")[:200]})
             return
         satz = erkannt["text"]
         mikro.letzter_satz = satz
         # Jetzt erst steht der Text fest - die Firmware braucht ihn.
-        await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_STT_END, {"text": satz})
+        await ereignis(VE.VOICE_ASSISTANT_STT_END, {"text": satz})
         if not satz:
-            mikro.letzte_meldung = "Es wurde nichts verstanden (leerer Text)."
+            # Zu leise, Halluzination verworfen oder leer: still bleiben.
+            mikro.letzte_meldung = erkennung_leer_text(erkannt)
             return
-        await esphome_ereignis(mikro, VE.VOICE_ASSISTANT_INTENT_START)
+        await ereignis(VE.VOICE_ASSISTANT_INTENT_START)
         erg = await satz_im_faden(satz, cfg, holen_v(), mikro.name,
                                   mikro.raum, mikro.zone)
-        await esphome_ereignis(
-            mikro, VE.VOICE_ASSISTANT_INTENT_END,
-            {"conversation_id": str(getattr(mikro, "gespraech", "") or ""),
-             "continue_conversation": "0"})
         mikro.letzte_meldung = erg.get("antwort", "")
 
         # Die Antwort kommt aus dem Geraet, in das hineingesprochen wurde.
         # Bis 0.10.3 kannte ansage_ausgeben() nur die Wyoming-Satelliten;
         # ein ESPHome-Geraet mit Lautsprecher bekam nie einen Ton.
         text = str(erg.get("antwort") or "").strip()
-        if (text and cfg.get("antwort_sprechen")
-                and satelliten_sprechen(cfg, erg.get("ausgabe"))):
+        spricht = bool(text and cfg.get("antwort_sprechen")
+                       and satelliten_sprechen(cfg, erg.get("ausgabe"))
+                       and (esphome_kann(mikro, VF.SPEAKER)
+                            or esphome_kann(mikro, VF.ANNOUNCE)))
+        if spricht:
             still, grund = ruhe_aktiv(cfg)
             if still:
                 melde_gebremst("esph_ruhe",
                                "Antwort am ESPHome-Mikrofon unterdrueckt: " + grund,
                                3600)
-            else:
-                ok, meldung = await esphome_sprechen(mikro, cfg, text)
-                if not ok and meldung:
-                    melde_gebremst("esph_tts_" + mikro.name,
-                                   "ESPHome %s: die Antwort blieb stumm (%s)."
-                                   % (mikro.name, meldung), 3600)
+                spricht = False
+        # Offene Rueckfrage (heikles Ziel): continue_conversation '1', dann
+        # oeffnet die Firmware nach dem Abspielen (RESPONSE_FINISHED) von
+        # selbst wieder das Mikrofon und fragt ohne Weckwort an - 'ja'
+        # braucht kein neues Weckwort. Nur, wenn die Rueckfrage auch auf
+        # diesem Geraet zu hoeren ist: ohne Wiedergabe kommt die Firmware
+        # nie nach RESPONSE_FINISHED, und das Flag bliebe bis zum
+        # naechsten Lauf stehen.
+        weiter = "1" if (spricht and erg.get("grund") == "rueckfrage") else "0"
+        await ereignis(
+            VE.VOICE_ASSISTANT_INTENT_END,
+            {"conversation_id": str(getattr(mikro, "gespraech", "") or ""),
+             "continue_conversation": weiter})
+        if spricht and noch_dran():
+            ok, meldung = await esphome_sprechen(mikro, cfg, text)
+            if not ok and meldung:
+                melde_gebremst("esph_tts_" + mikro.name,
+                               "ESPHome %s: die Antwort blieb stumm (%s)."
+                               % (mikro.name, meldung), 3600)
     finally:
-        await esphome_lauf_beenden(mikro)
+        await esphome_lauf_beenden(mikro, nummer)
 
 
 # ---------------------------------------------------------------------------
@@ -4128,8 +4934,8 @@ async def warteschlange(cfg: dict, holen_v) -> None:
                 else:
                     ziel = PDATA / "probe.wav"
                     try:
-                        ziel.write_bytes(wav_bauen(erg["bloecke"], erg["rate"],
-                                                   erg["width"], erg["channels"]))
+                        ziel.write_bytes(wav_aus_bloecken(erg["bloecke"], erg["rate"],
+                                                          erg["width"], erg["channels"]))
                         antwort_schreiben(kennung, 1, "Probe erzeugt.",
                                           {"datei": str(ziel),
                                            "sekunden": erg["sekunden"]})
