@@ -16,7 +16,7 @@ function sp_erreichbar($host, $port, $zeit = 3)
 {
     $fp = @fsockopen($host, (int) $port, $errno, $errstr, $zeit);
     if ($fp) { fclose($fp); return array(1, ''); }
-    return array(0, $errstr !== '' ? $errstr : ('Fehler ' . $errno));
+    return array(0, $errstr !== '' ? $errstr : sprintf(sp_t('UI012.FEHLER_NR'), (int) $errno));
 }
 
 function sp_pruefungen()
@@ -214,15 +214,31 @@ function sp_raum_bekannt($raum, $ziele)
     return false;
 }
 
-/** Rueckgabe: array(stand, Meldung) */
+/**
+ * Rueckgabe: array(stand, Meldung als HTML).
+ *
+ * F2 (0.12.0): die Meldung ist MASKIERT. Bis 0.11.15 reichte diese Funktion
+ * die Meldung des Dienstes roh weiter, und die Oberflaeche gab sie roh aus -
+ * darin stehen aber Texte, die nicht von hier stammen: Zielnamen aus einer
+ * eingespielten Sicherung oder dem Loxone-Import, Antwortzeilen fremder
+ * Geraete, der Text eines Sprachmodells. Ein Zielname wie
+ * <img src=x onerror=...> lief damit im angemeldeten Browser. Jetzt geht
+ * alles Fremde durch sp_e(); HTML entsteht nur hier, aus festen Teilen.
+ */
 function sp_test_aktion($aktion)
 {
-    $reinigen = function ($feld) {
-        $t = isset($_POST[$feld]) ? (string) $_POST[$feld] : '';
-        return trim(preg_replace('/[\x00-\x1F\x7F]/u', ' ', $t));
+    // F14: eine Liste (test_satz[]=) ist kein Text - Leerwert statt Warnung.
+    $feld_text = function ($feld) {
+        return isset($_POST[$feld]) && is_string($_POST[$feld]) ? $_POST[$feld] : '';
     };
-    $raum = isset($_POST['test_raum'])
-        ? trim(preg_replace('/[\x00-\x1F\x7F"\']/u', '', (string) $_POST['test_raum'])) : '';
+    $reinigen = function ($feld) use ($feld_text) {
+        return trim((string) preg_replace('/[\x00-\x1F\x7F]/u', ' ', $feld_text($feld)));
+    };
+    $raum = trim((string) preg_replace('/[\x00-\x1F\x7F"\']/u', '', $feld_text('test_raum')));
+    // Die Antwort des Dienstes: Stand bleibt, die Meldung wird maskiert.
+    $maskiert = function ($erg) {
+        return array(isset($erg[0]) ? $erg[0] : 0, sp_e(isset($erg[1]) ? (string) $erg[1] : ''));
+    };
 
     switch ($aktion) {
         case 'satz':
@@ -233,8 +249,8 @@ function sp_test_aktion($aktion)
              * nie zur Wirkung kamen. Sie vorzutaeuschen ist schlimmer, als sie
              * wegzulassen: wer sie liest, glaubt, der Reiter warte eine
              * Minute. */
-            return sp_befehl_absetzen(array('aktion' => 'satz', 'satz' => $text,
-                                            'raum' => $raum));
+            return $maskiert(sp_befehl_absetzen(array('aktion' => 'satz', 'satz' => $text,
+                                                      'raum' => $raum)));
 
         case 'trocken':
             /* Der Trockenlauf braucht KEINEN laufenden Dienst - gerade dann
@@ -243,15 +259,15 @@ function sp_test_aktion($aktion)
             $text = $reinigen('test_satz');
             if ($text === '') { return array(0, sp_t('TEST.M_SATZ_LEER')); }
             list($ok, $antwort, $d) = sp_trockenlauf($text, $raum);
-            if (!$d) { return array(0, $antwort); }
+            if (!$d) { return array(0, sp_e($antwort)); }
             $teile = array();
             foreach (array('absicht', 'aktion', 'ziel', 'zielname', 'wert', 'einheit',
                            'dauer_s', 'quelle', 'grund') as $k) {
-                if (isset($d[$k]) && $d[$k] !== '' && $d[$k] !== null) {
+                if (isset($d[$k]) && is_scalar($d[$k]) && $d[$k] !== '') {
                     $teile[] = sp_e($k) . '=<span class="sm-mono">' . sp_e($d[$k]) . '</span>';
                 }
             }
-            $themen = isset($d['themen']) && is_array($d['themen']) ? $d['themen'] : array();
+            $themen = isset($d['themen']) && is_array($d['themen']) ? array_filter($d['themen'], 'is_scalar') : array();
             return array($ok ? 1 : 0,
                 sprintf(sp_t('TEST.M_TROCKEN'), implode(', ', $teile),
                         sp_e($antwort), count($themen))
@@ -261,13 +277,12 @@ function sp_test_aktion($aktion)
             $text = $reinigen('test_ansage');
             if ($text === '') { return array(0, sp_t('TEST.M_ANSAGE_LEER')); }
             $befehl = array('aktion' => 'sprechen', 'text' => $text);
-            $zone = isset($_POST['test_zone'])
-                ? trim(preg_replace('/[^0-9~,]/', '', (string) $_POST['test_zone'])) : '';
+            $zone = trim((string) preg_replace('/[^0-9~,]/', '', $feld_text('test_zone')));
             if ($zone !== '') { $befehl['zone'] = $zone; }
-            return sp_befehl_absetzen($befehl);
+            return $maskiert(sp_befehl_absetzen($befehl));
 
         case 'neu_laden':
-            return sp_befehl_absetzen(array('aktion' => 'neu_laden'));
+            return $maskiert(sp_befehl_absetzen(array('aktion' => 'neu_laden')));
 
         case 'dienste':
             // Die Funktion liefert an vier von sechs Stellen nur zwei
@@ -276,18 +291,20 @@ function sp_test_aktion($aktion)
             // einzeln geholt.
             $sp_erg = sp_befehl_absetzen(array('aktion' => 'dienste'));
             $ok = $sp_erg[0];
-            $meldung = $sp_erg[1];
             $a = isset($sp_erg[2]) && is_array($sp_erg[2]) ? $sp_erg[2] : array();
-            if (!$ok || empty($a['dienste'])) { return array($ok, $meldung); }
+            if (!$ok || empty($a['dienste']) || !is_array($a['dienste'])) { return $maskiert($sp_erg); }
             $zeilen = array();
             foreach ($a['dienste'] as $name => $d) {
+                $d = is_array($d) ? $d : array();
                 if (!empty($d['ok'])) {
+                    $modelle = isset($d['modelle']) && is_array($d['modelle']) ? array_filter($d['modelle'], 'is_scalar') : array();
                     $zeilen[] = '<b>' . sp_e($name) . '</b>: '
-                              . ($d['modelle']
-                                 ? '<span class="sm-mono">' . sp_e(implode(', ', $d['modelle'])) . '</span>'
+                              . ($modelle
+                                 ? '<span class="sm-mono">' . sp_e(implode(', ', $modelle)) . '</span>'
                                  : sp_t('TEST.A_KEINE_MODELLE'));
                 } else {
-                    $zeilen[] = '<b>' . sp_e($name) . '</b>: ' . sp_e($d['fehler']);
+                    $zeilen[] = '<b>' . sp_e($name) . '</b>: '
+                              . sp_e(isset($d['fehler']) && is_scalar($d['fehler']) ? $d['fehler'] : '');
                 }
             }
             return array(1, implode('<br>', $zeilen));
