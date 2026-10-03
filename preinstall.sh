@@ -22,7 +22,9 @@
 # und der Sollmerker data/plugins/<ordner>.soll_laufen (er startete sonst den
 # Dienst ungefragt; F3) - geht nach <name>.alt, gemeldet mit genau einer
 # <WARNING>. Die heruntergeladenen Modelle (<ordner>.modelle_umzug) bleiben:
-# Downloads ohne Zugangsdaten, sie werden weiter benutzt.
+# Downloads ohne Zugangsdaten, sie werden weiter benutzt. Dasselbe gilt seit
+# 0.12.0 fuer die beiseitegelegte virtuelle Python-Umgebung
+# (<ordner>.venv_umzug); postinstall.sh prueft sie vor dem Gebrauch.
 #
 # Warum schon hier: zwischen dem Kopieren und postinstall.sh ist die
 # Oberflaeche schon da. sp_config() und sp_saetze() heilen eine fehlende

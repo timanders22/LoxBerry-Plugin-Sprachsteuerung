@@ -35,6 +35,38 @@ if [ "$(id -u)" != "0" ]; then
     exit 2
 fi
 
+# Die Wurzel nur fuer den Neustart-Hinweis unten (0.12.0). Ohne
+# config/system/general.json darunter wird er nicht gesetzt.
+ARGV5=$5
+BASE="${ARGV5:-$LBHOMEDIR}"
+
+# Den Neustart-Hinweis von LoxBerry setzen (0.12.0). Die neue Gruppe wirkt
+# erst nach einem Neustart; bisher stand das nur im Installationsprotokoll,
+# das danach niemand mehr liest. LoxBerry hat dafuer eine Schnittstelle:
+# reboot_required() in LoxBerry::System (libs/perllib/LoxBerry/System.pm;
+# ebenso in libs/phplib/loxberry_system.php). Sie haengt eine Zeile an
+# log/system_tmpfs/reboot.required an, und die Oberflaeche zeigt dann den
+# Hinweis "Neustart erforderlich" - derselbe Weg, den plugininstall.pl bei
+# REBOOT=true in plugin.cfg geht. Hier gezielt, nur wenn die Gruppe wirklich
+# neu gesetzt wurde, statt REBOOT=true bei jeder Aktualisierung.
+# Erst ueber die Bibliothek; fehlt sie, dieselbe Wirkung von Hand (eine Zeile
+# anhaengen, Eigentuemer loxberry, wie in reboot_required()).
+sp_neustart_vormerken() {   # $1 Text
+    [ -n "$BASE" ] && [ -f "$BASE/config/system/general.json" ] || return 1
+    # $ARGV[0] gehoert perl, nicht der Schale - daher die einfachen Anfuehrungszeichen.
+    # shellcheck disable=SC2016
+    if command -v perl >/dev/null 2>&1 && [ -f "$BASE/libs/perllib/LoxBerry/System.pm" ] \
+       && env "LBHOMEDIR=$BASE" "PERL5LIB=$BASE/libs/perllib" timeout -k 5 30 \
+              perl -e 'use LoxBerry::System; LoxBerry::System::reboot_required($ARGV[0]);' "$1" \
+              >/dev/null 2>&1; then
+        return 0
+    fi
+    [ -d "$BASE/log/system_tmpfs" ] || return 1
+    printf '%s\n' "$1" >> "$BASE/log/system_tmpfs/reboot.required" 2>/dev/null || return 1
+    chown loxberry:loxberry "$BASE/log/system_tmpfs/reboot.required" 2>/dev/null
+    return 0
+}
+
 if ! command -v docker >/dev/null 2>&1; then
     echo "<INFO> Docker ist nicht installiert - es gibt keine Gruppe einzurichten."
     echo "<INFO> Ohne Docker kann das Plugin die Sprachdienste nicht selbst betreiben."
@@ -66,6 +98,11 @@ if usermod -aG docker loxberry 2>/dev/null; then
     echo "<INFO>   sudo gpasswd -d loxberry docker"
     echo "<INFO> wieder zurueck und betreibt die Sprachdienste auf einem anderen"
     echo "<INFO> Rechner - das Plugin kann das, es braucht dann nur die Adressen."
+    if sp_neustart_vormerken "Sprachsteuerung lokal: Der Benutzer loxberry ist neu in der Gruppe docker - das wirkt erst nach einem Neustart."; then
+        echo "<INFO> Der Hinweis \"Neustart erforderlich\" ist in der LoxBerry-Oberflaeche gesetzt."
+    else
+        echo "<INFO> Bitte den LoxBerry bei Gelegenheit neu starten."
+    fi
 else
     echo "<INFO> Der Benutzer loxberry liess sich der Gruppe docker nicht hinzufuegen."
     echo "<INFO> Von Hand: sudo usermod -aG docker loxberry   (danach neu anmelden)"

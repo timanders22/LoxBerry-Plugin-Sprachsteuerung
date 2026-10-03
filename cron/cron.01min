@@ -4,4 +4,18 @@
 # Nur die NORMALE Ausgabe wird unterdrueckt. Die Fehlerausgabe gehoert in
 # die Startdatei des Plugins: ohne sie waeren ein fehlendes dienst.sh, ein
 # gescheiterter Abstieg und eine CRLF-Shebang lautlos (REGELN_2).
-"REPLACELBPBINDIR/dienst.sh" waechter >/dev/null 2>>REPLACELBPLOGDIR/start.log
+#
+# Den Protokollordner ZUERST anlegen (0.12.0). Die Umleitung "2>>" wird
+# ausgewertet, BEVOR dienst.sh startet - und dienst.sh legt den Ordner erst
+# selbst an. log/ liegt auf einer Ramdisk; fehlt der Ordner nach einem
+# Neustart, scheitert die Umleitung, und die Schale fuehrt den Befehl gar
+# nicht aus (dash, gemessen: Rueckgabe 2, dienst.sh lief nie). Der Waechter
+# holte den Dienst dann nie zurueck. Laesst sich start.log trotzdem nicht
+# schreiben, laeuft der Waechter ohne Fehlerprotokoll - lieber das als gar
+# nicht.
+mkdir -p "REPLACELBPLOGDIR" 2>/dev/null
+if [ -w "REPLACELBPLOGDIR/start.log" ] || touch "REPLACELBPLOGDIR/start.log" 2>/dev/null; then
+    "REPLACELBPBINDIR/dienst.sh" waechter >/dev/null 2>>"REPLACELBPLOGDIR/start.log"
+else
+    "REPLACELBPBINDIR/dienst.sh" waechter >/dev/null 2>/dev/null
+fi
