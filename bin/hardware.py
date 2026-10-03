@@ -224,9 +224,33 @@ def tabelle() -> dict:
 # ---------------------------------------------------------------------------
 # Hardware erkennen
 # ---------------------------------------------------------------------------
+def _cgroup_grenze_mb() -> int:
+    """Die Speichergrenze der cgroup dieses Prozesses in MB, oder 0.
+
+    /proc/meminfo nennt den Speicher des RECHNERS. Laeuft der LoxBerry in
+    einem Container oder einer begrenzten Dienstgruppe, ist die Grenze
+    kleiner - und eine Stufe nach MemTotal bekaeme Modelle, die beim Laden
+    vom OOM-Killer beendet werden. v2: /sys/fs/cgroup/memory.max ("max" =
+    keine Grenze), v1: memory/memory.limit_in_bytes (ohne Grenze eine
+    riesige Zahl, die das Minimum unten ohnehin verwirft).
+    """
+    for pfad in ("/sys/fs/cgroup/memory.max",
+                 "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            roh = Path(pfad).read_text().strip()
+        except OSError:
+            continue
+        if roh.isdigit() and int(roh) > 0:
+            return int(roh) // (1024 * 1024)
+    return 0
+
+
 def speicher_mb() -> tuple[int, int]:
     """(gesamt, verfuegbar) in Megabyte. Verfuegbar ist die ehrlichere Zahl:
-    was das Betriebssystem noch hergeben kann, ohne zu swappen."""
+    was das Betriebssystem noch hergeben kann, ohne zu swappen.
+
+    Seit 0.12.0 ist "gesamt" das Kleinere aus MemTotal und der cgroup-Grenze
+    (_cgroup_grenze_mb()); "verfuegbar" ebenso hoechstens die Grenze."""
     gesamt = verfuegbar = 0
     try:
         for zeile in Path("/proc/meminfo").read_text().splitlines():
@@ -236,7 +260,48 @@ def speicher_mb() -> tuple[int, int]:
                 verfuegbar = int(zeile.split()[1]) // 1024
     except (OSError, ValueError, IndexError):
         pass
+    grenze = _cgroup_grenze_mb()
+    if grenze and (not gesamt or grenze < gesamt):
+        gesamt = grenze
+        verfuegbar = min(verfuegbar, grenze) if verfuegbar else grenze
     return gesamt, verfuegbar
+
+
+def kerne() -> int:
+    """Die Kerne, die diesem Prozess zustehen.
+
+    os.cpu_count() zaehlt die Kerne des RECHNERS und uebersieht cpuset und
+    taskset - in einem begrenzten Container kaeme so "8" heraus, wo 2
+    erlaubt sind. sched_getaffinity(0) ist dieselbe Zahl, die nproc nennt;
+    die PHP-Seite (sp_kerne() in sp_lib.php) liest dafuer
+    Cpus_allowed_list.
+    """
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return os.cpu_count() or 1
+
+
+def userland_64bit() -> bool:
+    """Laufen die PROGRAMME mit 64 Bit - nicht nur der Kern?
+
+    platform.machine() nennt die Architektur des KERNS. Raspberry Pi OS
+    32 Bit laeuft auf einem Pi 4/5 mit aarch64-Kern und armhf-Programmen:
+    platform.machine() sagt "aarch64", Docker holt aber armhf-Abbilder - und
+    die gibt es fuer die Sprachdienste nicht. Massgeblich ist deshalb die
+    Zeigerbreite dieses Python (ein Programm des Userlands); dpkg sagt
+    dasselbe fuer die Paketarchitektur und ist der zweite Blick, wenn
+    Python selbst nicht stimmt (armhf-Python auf arm64-System waere
+    harmlos - dann sagt dpkg arm64).
+    """
+    if struct.calcsize("P") * 8 >= 64:
+        return True
+    try:
+        aus = subprocess.run(["dpkg", "--print-architecture"],
+                             capture_output=True, text=True, timeout=5)
+        return aus.returncode == 0 and aus.stdout.strip() in ("amd64", "arm64", "ppc64el", "s390x")
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def cpu_name() -> str:
@@ -262,7 +327,11 @@ def pi_modell() -> str:
 
 
 def gpu() -> str:
-    """Nur was sich ohne Rateanteil feststellen laesst."""
+    """Nur was sich ohne Rateanteil feststellen laesst.
+
+    Seit 0.12.0 NUR ZUR ANZEIGE: die Container sind CPU-Fassungen und werden
+    ohne --gpus angelegt (sp_ct_run_liste() in sp_lib.php); eine Grafikkarte
+    beschleunigt dort nichts und hebt die Stufe deshalb nicht mehr an."""
     if shutil.which("nvidia-smi"):
         try:
             aus = subprocess.run(["nvidia-smi", "--query-gpu=name",
@@ -281,8 +350,9 @@ def hardware() -> dict:
     gesamt, verfuegbar = speicher_mb()
     return {
         "architektur": platform.machine(),
-        "64bit": platform.machine() in ("x86_64", "aarch64", "arm64"),
-        "kerne": os.cpu_count() or 1,
+        # Das Userland, nicht der Kern (userland_64bit()).
+        "64bit": userland_64bit(),
+        "kerne": kerne(),
         "cpu": cpu_name(),
         "pi": pi_modell(),
         "speicher_mb": gesamt,
@@ -296,8 +366,13 @@ def empfehlung(hw: dict | None = None, tab: dict | None = None) -> dict:
     """Die passende Stufe waehlen.
 
     Massgeblich ist der GESAMTE Speicher, nicht der freie: der freie schwankt,
-    und ein Modell laedt man einmal. Ein GPU hebt eine Stufe an, weil das Modell
-    dann nicht im Arbeitsspeicher rechnet.
+    und ein Modell laedt man einmal.
+
+    Bis 0.11.15 hob eine Grafikkarte (nvidia-smi oder /dev/kfd) die Stufe an.
+    Die Container sind aber CPU-Fassungen ohne --gpus - mit 8 GB und einer
+    Grafikkarte bekam man das 7B-Modell der Stufe "gross", das dann im
+    Arbeitsspeicher rechnete, der dafuer nicht reicht. Die Grafikkarte wird
+    weiter angezeigt, gerechnet wird ohne sie.
     """
     hw = hw or hardware()
     tab = tab or tabelle()
@@ -306,18 +381,17 @@ def empfehlung(hw: dict | None = None, tab: dict | None = None) -> dict:
         return {}
     mb = int(hw.get("speicher_mb") or 0)
     gewaehlt = stufen[-1]
-    for i, stufe in enumerate(stufen):
+    for stufe in stufen:
         if mb >= int(stufe.get("ab_mb", 0)):
             gewaehlt = stufe
-            # Mit GPU eine Stufe hoeher, sofern es eine gibt.
-            if hw.get("gpu") and i > 0:
-                gewaehlt = stufen[i - 1]
             break
     erg = dict(gewaehlt)
     erg["begruendung"] = {
         "speicher_mb": mb,
         "schwelle_mb": int(gewaehlt.get("ab_mb", 0)),
-        "gpu_beruecksichtigt": bool(hw.get("gpu")),
+        # Nie mehr beruecksichtigt (siehe oben); erkannt steht daneben.
+        "gpu_beruecksichtigt": False,
+        "gpu_erkannt": bool(hw.get("gpu")),
     }
     # Ohne 64 Bit laeuft kein Sprachmodell sinnvoll, und faster-whisper auch nicht.
     if not hw.get("64bit"):
@@ -337,6 +411,47 @@ def empfehlung(hw: dict | None = None, tab: dict | None = None) -> dict:
 # virtuelle Umgebung fehlt. Das Format ist die JSONL-Kopfzeile aus der
 # Wyoming-Spezifikation, gefolgt von den Nutzdaten.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Zeitbudget fuer --messen
+#
+# Bis 0.11.15 hatte jede Messung eigene Grenzen: Verbindung 10 s, Antwort
+# 180 s (Whisper, Piper, Sprachmodell), 30 s (Wortwecker) - im schlimmsten
+# Fall rund 10 Minuten. Die Oberflaeche ruft --messen im Seitenaufbau und
+# bricht nach 170 s ab (SP_ZEIT_MESSEN in sp_lib.php); ein haengender Dienst
+# liess also die ganze Messung verloren gehen. Jetzt teilen sich alle
+# Messungen EINE Frist von 140 s, jede hat dazu eine eigene Obergrenze, und
+# jeder Lesevorgang bekommt nur noch die Restzeit. So bleibt ein Lauf samt
+# Start des Interpreters sicher unter 150 s.
+# ---------------------------------------------------------------------------
+MESS_FRIST_S = 140.0
+_mess_ende = 0.0
+
+
+class FristAbgelaufen(Exception):
+    """Die gemeinsame Frist der Messung ist um."""
+
+
+def frist_starten(sekunden: float = MESS_FRIST_S) -> None:
+    global _mess_ende
+    _mess_ende = time.monotonic() + sekunden
+
+
+def rest(obergrenze: float, ende: float | None = None) -> float:
+    """Restzeit fuer den naechsten Schritt: hoechstens obergrenze, hoechstens
+    bis zur eigenen Frist (ende) und zur gemeinsamen. Ist nichts mehr uebrig,
+    FristAbgelaufen."""
+    jetzt = time.monotonic()
+    grenzen = [obergrenze]
+    if _mess_ende:
+        grenzen.append(_mess_ende - jetzt)
+    if ende is not None:
+        grenzen.append(ende - jetzt)
+    r = min(grenzen)
+    if r < 0.5:
+        raise FristAbgelaufen()
+    return r
+
+
 def wy_senden(sock: socket.socket, typ: str, daten: dict | None = None,
               nutzlast: bytes | None = None) -> None:
     kopf = {"type": typ}
@@ -386,9 +501,10 @@ def messen_whisper(host: str, port: int, sekunden: float = 3.0) -> dict:
     audio = pruefton(sekunden)
     schnipsel = 1024 * 2 * 2      # 2048 Rahmen zu je 2 Byte
     try:
-        with socket.create_connection((host, port), timeout=10) as s:
+        with socket.create_connection((host, port), timeout=rest(5)) as s:
             datei = s.makefile("rb")
             t0 = time.monotonic()
+            ende = t0 + 50          # eigene Obergrenze dieser Messung
             wy_senden(s, "transcribe", {"language": "de"})
             wy_senden(s, "audio-start", {"rate": 16000, "width": 2, "channels": 1})
             for i in range(0, len(audio), schnipsel):
@@ -396,8 +512,8 @@ def messen_whisper(host: str, port: int, sekunden: float = 3.0) -> dict:
                           {"rate": 16000, "width": 2, "channels": 1},
                           audio[i:i + schnipsel])
             wy_senden(s, "audio-stop", {})
-            s.settimeout(180)
             while True:
+                s.settimeout(rest(50, ende))
                 ereignis = wy_lesen(datei)
                 if ereignis is None:
                     return {"ok": 0, "fehler": "Verbindung wurde ohne Antwort geschlossen."}
@@ -414,14 +530,15 @@ def messen_whisper(host: str, port: int, sekunden: float = 3.0) -> dict:
 def messen_piper(host: str, port: int, text: str = "Das Licht im Wohnzimmer ist eingeschaltet.") -> dict:
     """Misst den Weg Text -> Audio."""
     try:
-        with socket.create_connection((host, port), timeout=10) as s:
+        with socket.create_connection((host, port), timeout=rest(5)) as s:
             datei = s.makefile("rb")
             t0 = time.monotonic()
+            ende = t0 + 30
             wy_senden(s, "synthesize", {"text": text})
-            s.settimeout(180)
             bytes_gesamt = 0
             rate = 22050
             while True:
+                s.settimeout(rest(30, ende))
                 ereignis = wy_lesen(datei)
                 if ereignis is None:
                     return {"ok": 0, "fehler": "Verbindung wurde ohne Antwort geschlossen."}
@@ -456,8 +573,10 @@ def messen_llm(host: str, port: int, frage: str = "Antworte mit genau einem Wort
                  "Accept": "application/json"})
     t0 = time.monotonic()
     try:
-        with urllib.request.urlopen(anfrage, timeout=180) as antwort:
-            d = json.loads(antwort.read().decode("utf-8"))
+        with urllib.request.urlopen(anfrage, timeout=rest(45)) as antwort:
+            d = json.loads(antwort.read(1048576).decode("utf-8"))
+    except FristAbgelaufen:
+        raise
     except urllib.error.URLError as err:
         return {"ok": 0, "fehler": str(err.reason)}
     except (OSError, ValueError) as err:
@@ -557,12 +676,13 @@ def messen_wake(host: str, port: int) -> dict:
     verwalteten Diensten standen im Ergebnis, der vierte fehlte.
     """
     try:
-        with socket.create_connection((host, port), timeout=10) as s:
+        with socket.create_connection((host, port), timeout=rest(5)) as s:
             datei = s.makefile("rb")
             t0 = time.monotonic()
+            ende = t0 + 10
             wy_senden(s, "describe", {})
-            s.settimeout(30)
             while True:
+                s.settimeout(rest(10, ende))
                 ereignis = wy_lesen(datei)
                 if ereignis is None:
                     return {"ok": 0, "fehler": "Verbindung wurde ohne Antwort geschlossen."}
@@ -611,6 +731,10 @@ def messwerte_ablegen(messung: dict) -> str:
 
 
 def main() -> int:
+    # Die Frist laeuft ab dem Aufruf: auch die Erkennung (nvidia-smi bis 8 s,
+    # dpkg bis 5 s) zaehlt in die 140 s.
+    if "--messen" in sys.argv:
+        frist_starten()
     hw = hardware()
     emp = empfehlung(hw)
     if "--klartext" in sys.argv:
@@ -627,7 +751,11 @@ def main() -> int:
                                         ("wakeword", messen_wake, 10400),
                                         ("llm", messen_llm, 8080)):
             host, port = ziel(cfg, dienst, int(d.get(dienst, {}).get("port") or vorgabe))
-            wert = messer(host, port)
+            try:
+                wert = messer(host, port)
+            except FristAbgelaufen:
+                wert = {"ok": 0, "fehler": "Zeitgrenze der Messung erreicht (%d s gesamt) - "
+                                           "nicht gemessen." % int(MESS_FRIST_S)}
             # Wo gemessen wurde, gehoert ins Ergebnis: sonst sieht eine
             # Messung von einem anderen Rechner genauso aus wie eine hiesige.
             wert["host"] = host

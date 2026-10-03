@@ -22,6 +22,34 @@
     "eine Fehlerquelle."
   ],
 
+  "_hinweis_dienste": [
+    "ABBILDER MIT FESTEM TAG (seit 0.12.0). Bis 0.11.15 stand hier kein Tag",
+    "(= latest): jedes 'Abbild holen' konnte eine andere Fassung bringen,",
+    "und openWakeWord 2.0 hat dabei 'ok_nabu' in 'okay_nabu' umbenannt und",
+    "--preload-model abgeschafft. Die Tags sind am 03.10.2026 ueber die",
+    "Registry geprueft, jeweils fuer linux/amd64 UND linux/arm64 vorhanden:",
+    "  rhasspy/wyoming-whisper:3.8.1        (Docker Hub)",
+    "  rhasspy/wyoming-piper:2.5.2          (Docker Hub)",
+    "  rhasspy/wyoming-openwakeword:2.1.0   (Docker Hub)",
+    "  ghcr.io/ggml-org/llama.cpp:server-b11371 (ghcr.io, Manifestliste;",
+    "    am Pruefdatum dieselbe Kennung wie 'server')",
+    "Die Aufrufargumente in sp_ct_run_liste() (sp_lib.php) sind gegen den",
+    "Quelltext dieser Fassungen gelesen: --model/--language/--initial-prompt",
+    "(wyoming-faster-whisper 3.8.1), --voice (wyoming-piper 2.5.2), kein",
+    "Modellargument (wyoming-openwakeword 2.1.0), -hf/--host/--port/-c/-t und",
+    "LLAMA_CACHE (llama.cpp b11371). Ein 32-Bit-Userland bekommt keines.",
+    "",
+    "'port' ist der Port IM Container. Aussen gilt der eingestellte Port",
+    "(whisper_port ... in der Konfiguration).",
+    "",
+    "'speicher' ist die Speichergrenze des Containers (docker --memory):",
+    "basis_mb + faktor x datei_mb des gewaehlten Modells aus den Stufen;",
+    "ein Modell, das in keiner Stufe steht, rechnet mit der groessten Datei",
+    "dieses Dienstes. Beim Sprachmodell heisst das Modell + 1 GB. Ohne",
+    "'speicher' gibt es keine Grenze. Ein Kern ohne Speicher-cgroup (aeltere",
+    "Raspberry-Pi-Kerne) verwirft die Grenze mit einer Warnung."
+  ],
+
   "stufen": [
     {
       "name": "gross",
@@ -62,23 +90,27 @@
 
   "dienste": {
     "whisper": {
-      "abbild": "rhasspy/wyoming-whisper",
+      "abbild": "rhasspy/wyoming-whisper:3.8.1",
       "port": 10300,
+      "speicher": { "basis_mb": 1024, "faktor": 2 },
       "text": "DIENST.WHISPER"
     },
     "piper": {
-      "abbild": "rhasspy/wyoming-piper",
+      "abbild": "rhasspy/wyoming-piper:2.5.2",
       "port": 10200,
+      "speicher": { "basis_mb": 512, "faktor": 4 },
       "text": "DIENST.PIPER"
     },
     "wakeword": {
-      "abbild": "rhasspy/wyoming-openwakeword",
+      "abbild": "rhasspy/wyoming-openwakeword:2.1.0",
       "port": 10400,
+      "speicher": { "basis_mb": 512, "faktor": 0 },
       "text": "DIENST.WAKEWORD"
     },
     "llm": {
-      "abbild": "ghcr.io/ggml-org/llama.cpp:server",
+      "abbild": "ghcr.io/ggml-org/llama.cpp:server-b11371",
       "port": 8080,
+      "speicher": { "basis_mb": 1024, "faktor": 1 },
       "text": "DIENST.LLM"
     }
   }
