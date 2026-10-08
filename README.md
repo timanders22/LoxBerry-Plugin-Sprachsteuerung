@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.12.1
+Version 0.12.2
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,26 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.12.2
+
+Gemeinsames Sprachmodul 1.1.1 statt 1.1.0 (rein ergänzend). Gemessen unter PHP 7.4 und 8.5 und mit Python
+gegen Attrappen; nicht am Gerät.
+
+* **Music Server nur im Heimnetz – schon beim Speichern.** Eine Adresse außerhalb des Heimnetzes (etwa
+  `8.8.8.8` oder `ms.example.org`) oder eine Adressvorlage, die zu einem fremden Rechner führt (etwa
+  `http://example.com/{text}`), wird beim Speichern beanstandet und das Feld markiert; gespeichert wird
+  dann nichts. Dieselbe Regel gilt beim Zurückspielen einer Sicherung. Bis 0.12.1 ließ sich eine solche
+  Adresse speichern, abgewiesen wurde erst die Ansage. Ein leeres Feld bleibt erlaubt.
+* **Adressen auf `.intern` gelten als Heimnetz** (etwa `ms.intern` für den Music Server) – beim Senden der
+  Ansage und beim Lesen der Lautstärke für „Musik leiser“. Bis 0.12.1 ließ sich eine solche Adresse
+  speichern, die Ansage über den Music Server wurde aber vor dem Senden abgewiesen.
+* Eine leere Zonenliste wird von der Sprachausgabe wieder als „keine Angabe“ gelesen (wie vor 1.1.0); die
+  Oberfläche prüft das Feld weiter selbst.
+* Der befristete Mitschnitt nennt bei der Loxone-Audioausgabe die Adresse mit `{text}` an Stelle des
+  Ansagetexts und dessen Länge (seit 0.12.0, für 0.12.2 nachgemessen).
+
+**In Loxone:** nichts zu tun.
 
 ## Neu in 0.12.1
 

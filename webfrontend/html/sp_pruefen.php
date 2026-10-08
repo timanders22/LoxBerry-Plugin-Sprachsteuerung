@@ -234,7 +234,14 @@ function sp_wert_pruefen($pfad, $wert)
             return sp_pruef_laut($wert) ? '' : $kt(sp_t('UI013.M_SONOS_LAUT'));
 
         case 'tts.ip':
-            return (is_string($wert) && ($wert === '' || sp_pruef_host($wert))) ? '' : $kt(sp_t('EINST.FEHLER_TTS_IP'));
+            if (!is_string($wert) || ($wert !== '' && !sp_pruef_host($wert))) { return $kt(sp_t('EINST.FEHLER_TTS_IP')); }
+            /* F1 (0.12.2): die Adresse des Music Servers muss im Heimnetz liegen - dieselbe Regel, nach der
+             * die Bruecke beim Senden abweist (ansage_wert_pruefen() der Sprachausgabe 1.1.1). Bis 0.12.1
+             * liessen sich 8.8.8.8 oder ms.example.org speichern und zurueckspielen; abgewiesen wurde erst
+             * die Ansage. Leer bleibt erlaubt (keine Adresse, der Dienst meldet das). */
+            $g = '';
+            return ($wert === '' || ansage_wert_pruefen(array('ip' => $wert), $g) !== null) ? ''
+                : $kt(sp_t('UI013.FEHLER_TTS_IP_HEIMNETZ'));
 
         case 'tts.port':
             $z = sp_pruef_zahl($wert);
@@ -259,7 +266,11 @@ function sp_wert_pruefen($pfad, $wert)
                 : $kt(sprintf(sp_t('DIENST.FEHLER_MODELL'), sp_t('EINST.L_TTS_STIMME')));
 
         case 'tts.template':
-            return (is_string($wert) && ($wert === '' || sp_url_ok($wert))) ? '' : $kt(sp_t('EINST.FEHLER_TTS_VORLAGE'));
+            if (!is_string($wert) || ($wert !== '' && !sp_url_ok($wert))) { return $kt(sp_t('EINST.FEHLER_TTS_VORLAGE')); }
+            /* F1 (0.12.2): die Vorlage darf nur zu einem Rechner im Heimnetz fuehren - {ip}, {port} oder ein
+             * Name/eine Adresse im Heimnetz, ohne Benutzerdaten vor dem Rechner (ansage_vorlage_grund()). */
+            return ($wert === '' || ansage_vorlage_grund($wert) !== 'TTS_VORLAGE_HEIMNETZ') ? ''
+                : $kt(sp_t('UI013.FEHLER_TTS_VORLAGE_HEIMNETZ'));
 
         case 'tts.cc_praefix':
             return sp_cc_praefix_ok($wert) ? '' : $kt(sp_t('EINST.FEHLER_CC_PRAEFIX'));

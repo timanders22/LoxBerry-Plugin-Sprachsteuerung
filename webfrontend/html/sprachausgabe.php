@@ -115,6 +115,13 @@
  * zuerst geladene. Folge: Aenderungen an den Funktionen sind nur ergaenzend
  * (neue Funktion, neuer optionaler Parameter), nie umdeutend; wer eine neue
  * Funktion braucht, fragt ANSAGE_FASSUNG oder function_exists().
+ *
+ * Zwei Zweige, eine Fassung (1.1.1): 1.0.3 (Abfahrts-Assistent) und 1.1.0
+ * (Sprachsteuerung) entstanden getrennt aus 1.0.2. 1.1.1 ist 1.1.0 und dazu,
+ * was eine Linie mit einem 1.0.3-Aufruf braucht: ansage_vorlage_grund() und
+ * ansage_url_heimnetz() als Huellen um ansage_url_grund(), der Fehlertext bei
+ * Netzfehlern (ansage_http_grund_id(), dritter Parameter), eine leere
+ * Zonenliste in ansage_zonen_ok() und die Endung .intern.
  */
 
 /* Kein Endpunkt (Regeln/03): die Datei liegt meist im unangemeldeten Baum
@@ -133,7 +140,7 @@ if (PHP_SAPI !== 'cli') {
 
 if (!defined('ANSAGE_FASSUNG')) {
 
-define('ANSAGE_FASSUNG', '1.1.0');
+define('ANSAGE_FASSUNG', '1.1.1');
 
 /** Hoechstlaenge eines Ansagetexts in Zeichen (Schnittstelle Alexa-NG/Chromecast: 1-1000). */
 define('ANSAGE_TEXT_MAX', 1000);
@@ -267,6 +274,11 @@ function ansage_geraet_ok($g)
  * ein Name, der nur aus Ziffern und Punkten besteht oder mit 0x beginnt, nie
  * ein Name. IPv6 nur in Klammern, so wie sie in einer Adresse steht - eine
  * nackte IPv6 ergaebe mit ":<port>" dahinter eine kaputte Adresse.
+ *
+ * [::1] gilt (anders als in 1.0.3) als Heimnetz: es ist die Loopback-Adresse,
+ * dieselbe Maschine wie 127.0.0.1 und localhost, die schon immer galten. Eine
+ * Ansage dorthin verlaesst den LoxBerry nicht; die Regel "nicht ins Internet"
+ * bleibt gewahrt. 1.0.3 wies sie nur ab, weil es IPv6 gar nicht kannte.
  */
 function ansage_heimnetz_host($h)
 {
@@ -283,7 +295,11 @@ function ansage_heimnetz_host($h)
     if (preg_match('/^[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\z/', $h)) {
         return true;    // ein Name ohne Punkt loest nur im Heimnetz auf
     }
-    if (preg_match('/^[a-z0-9](?:[a-z0-9.\-]{0,251}[a-z0-9])?\.(local|lan|home|fritz\.box|home\.arpa|internal|intranet)\z/', $h)) {
+    /* .intern (seit 1.1.1 wieder, wie 1.0.3): der Abfahrts-Assistent liess es schon
+     * vor der gemeinsamen Fassung zu; eine dort gespeicherte Adresse wie ms.intern
+     * darf beim Umstieg nicht stumm werden. 1.1.0 war aus 1.0.2 entstanden und
+     * kannte die Endung nicht. */
+    if (preg_match('/^[a-z0-9](?:[a-z0-9.\-]{0,251}[a-z0-9])?\.(local|lan|home|fritz\.box|home\.arpa|internal|intranet|intern)\z/', $h)) {
         return true;
     }
     return false;
@@ -352,13 +368,52 @@ function ansage_url_grund($url)
 }
 
 /**
+ * Huelle fuer Linien mit einem 1.0.3-Aufruf (Abfahrts-Assistent, termin_say.php):
+ * taugt die FERTIGE Adresse zum Senden? true/false wie in 1.0.3, geprueft mit
+ * ansage_url_grund(). Einzige Abweichung von 1.0.3: [::1] und andere IPv6 im
+ * Heimnetz gelten (1.0.3 kannte kein IPv6). Neue Linien rufen ansage_url_grund()
+ * - die Kennung sagt, WARUM eine Adresse nicht taugt.
+ */
+function ansage_url_heimnetz($url)
+{
+    return ansage_url_grund($url) === '';
+}
+
+/**
+ * Huelle fuer Linien mit einem 1.0.3-Aufruf (Abfahrts-Assistent,
+ * abfahrt_wert_pruefen()): taugt eine Adressvorlage? Rueckgabe wie in 1.0.3:
+ * '', TTS_VORLAGE_HTTP (kein http/https, kaputt) oder TTS_VORLAGE_HEIMNETZ
+ * (Rechner nicht im Heimnetz, Benutzerdaten vor dem Rechner). Geprueft wird wie
+ * in ansage_wert_pruefen() die Adresse nach dem Einsetzen; dazu die Regel aus
+ * 1.0.3, dass zwischen :// und dem Pfad nur {ip} und {port} als Platzhalter
+ * stehen duerfen (http://{text}/ setzte den Ansagetext als Rechner ein).
+ */
+function ansage_vorlage_grund($tpl)
+{
+    if (!is_string($tpl) || $tpl === '' || trim($tpl) !== $tpl || !preg_match('#^https?://([^/?\#]*)#i', $tpl, $m)
+        || $m[1] === '') {
+        return 'TTS_VORLAGE_HTTP';
+    }
+    if (preg_match('/\{(?!ip\}|port\})/', $m[1])) { return 'TTS_VORLAGE_HEIMNETZ'; }
+    $g = '';
+    if (ansage_wert_pruefen(array('template' => $tpl), $g) !== null) { return ''; }
+    return ($g === 'TTS_VORLAGE_HEIMNETZ' || $g === 'TTS_VORLAGE_BENUTZER') ? 'TTS_VORLAGE_HEIMNETZ' : 'TTS_VORLAGE_HTTP';
+}
+
+/**
  * Zonenliste fuer Music Server und Vorlagen: Zahlen, je wahlweise mit
  * ~Lautstaerke (1-100), durch Komma getrennt; Leerraum nur um die Kommas und
  * am Rand. Bis 1.0.2 gingen "1 2" oder "2~" durch und ergaben eine kaputte
  * Adresse, die erst die Gegenseite mit einem irrefuehrenden Fehler beantwortete.
+ *
+ * Leer ('' oder nur Leerzeichen) taugt (seit 1.1.1 wieder, wie 1.0.3): leer heisst
+ * "keine Zone angegeben", ansage_tts_url() nimmt dann Zone 1. Der
+ * Abfahrts-Assistent ruft die Funktion ohne eigene Pruefung auf leer; mit 1.1.0
+ * wies er eine leere Zonenliste beim Zurueckspielen ab.
  */
 function ansage_zonen_ok($z)
 {
+    if (is_string($z) && preg_match('/^ *\z/', $z)) { return true; }
     if (!is_string($z) || !preg_match('/^\s*\d+(~\d{1,3})?(\s*,\s*\d+(~\d{1,3})?)*\s*\z/', $z)) { return false; }
     preg_match_all('/~(\d{1,3})/', $z, $mm);
     foreach ($mm[1] as $v) {
@@ -1049,8 +1104,14 @@ function ansage_transport(array $anf)
     return array('code' => $code, 'rumpf' => $rumpf, 'errno' => 0, 'fehler' => '', 'ort' => $ort);
 }
 
-/** Kennung eines Transportfehlers oder eines unerwuenschten Status ('' = in Ordnung). */
-function ansage_http_grund_id($errno, $status)
+/**
+ * Kennung eines Transportfehlers oder eines unerwuenschten Status ('' = in
+ * Ordnung). $fehler (wahlfrei, wie 1.0.3; 1.1.0 hatte ihn nicht) ist der
+ * Fehlertext des Transports: HTTP_NETZ|<errno>|<text>. Bis 1.0.2 fehlte er, und
+ * "Netzfehler %s: %s" endete mit "Netzfehler 52: " (Pruefung 02.10.2026, Nr. 3).
+ * Ohne $fehler bleibt es bei HTTP_NETZ|<errno>.
+ */
+function ansage_http_grund_id($errno, $status, $fehler = '')
 {
     $errno = (int) $errno;
     $status = (int) $status;
@@ -1059,7 +1120,11 @@ function ansage_http_grund_id($errno, $status)
     if ($errno === 6) { return 'HTTP_NAME'; }
     if ($errno === 28) { return 'HTTP_ZEIT'; }
     if ($errno === -1) { return 'HTTP_OHNE_ANTWORT'; }
-    if ($errno !== 0) { return 'HTTP_NETZ|' . $errno; }
+    if ($errno !== 0) {
+        $f = is_scalar($fehler) ? (string) $fehler : '';
+        $f = substr((string) preg_replace('/[\x00-\x1F\x7F]/', '', str_replace('|', '/', $f)), 0, 200);
+        return 'HTTP_NETZ|' . $errno . ($f !== '' ? '|' . $f : '');
+    }
     if ($status === 401 || $status === 403) { return 'HTTP_ZUGANG|' . $status; }
     if ($status === 404) { return 'HTTP_404'; }
     if ($status === 429) { return 'HTTP_429'; }
@@ -1090,7 +1155,7 @@ function ansage_ng_rufen($url, array $felder, $tmo, array $k, $praefix = '')
     $a = ansage_ausfuehren(ansage_anfrage('POST', $url, $felder, $tmo, $k), $k);
     $gid = '';
     if ($a['code'] <= 0) {
-        $gid = ansage_http_grund_id($a['errno'] === 0 ? -1 : $a['errno'], 0);
+        $gid = ansage_http_grund_id($a['errno'] === 0 ? -1 : $a['errno'], 0, $a['fehler']);
     }
     $zeilen = preg_split('/\r?\n|\r/', trim(str_replace("\xEF\xBB\xBF", '', $a['rumpf'])));
     $muster = (is_string($praefix) && $praefix !== '') ? '/^' . preg_quote($praefix, '/') . ';/' : '/^[A-Z][A-Z0-9_]*;/';
@@ -1283,7 +1348,8 @@ function ansage_sprechen($text, array $tts, array $k = array(), array $opt = arr
         } elseif ($a['code'] === 404) {
             $r['kennung'] = 'SONOS_FEHLT|' . $basis . '|404';
         } else {
-            $r['kennung'] = ansage_http_grund_id($a['code'] > 0 ? 0 : ($a['errno'] === 0 ? -1 : $a['errno']), $a['code']);
+            $r['kennung'] = ansage_http_grund_id($a['code'] > 0 ? 0 : ($a['errno'] === 0 ? -1 : $a['errno']), $a['code'],
+                                                 $a['fehler']);
         }
         $r['stand'] = $r['kennung'] === '' ? 1 : 0;
         return ansage_letzte_merken($r, $k);
@@ -1313,7 +1379,7 @@ function ansage_sprechen($text, array $tts, array $k = array(), array $opt = arr
     }
     $a = ansage_ausfuehren(ansage_anfrage('GET', $url, null, ANSAGE_TMO, $k), $k);
     $r['http'] = $a['code'];
-    $gid = ansage_http_grund_id($a['code'] > 0 ? 0 : ($a['errno'] === 0 ? -1 : $a['errno']), $a['code']);
+    $gid = ansage_http_grund_id($a['code'] > 0 ? 0 : ($a['errno'] === 0 ? -1 : $a['errno']), $a['code'], $a['fehler']);
     $r['kennung'] = $gid;
     $r['stand'] = $gid === '' ? 1 : 0;
     return ansage_letzte_merken($r, $k);
@@ -2528,6 +2594,71 @@ function ansage_selbsttest()
     $antworten = array(array('code' => 200, 'rumpf' => ''));
     $c = ansage_cli(json_encode(array('text' => $TEXT)), $sx, $k);
     $pruef('cli sonos', $c, array(0, 'ANSAGE;STAND=1;ART=sonos4lox;KENNUNG=-;HTTP=200;ZEICHEN=39'));
+
+    // ================= seit 1.1.1: vertraeglich mit 1.0.3 =================
+
+    // --- .intern wie 1.0.3; [::1] bleibt (Loopback) ---
+    foreach (array('ms.intern' => true, 'nas.keller.intern' => true, 'ms.internx' => false, 'intern.example.com' => false,
+                   '[::1]' => true) as $hst => $soll) {
+        $pruef('heimnetz 111 ' . $hst, ansage_heimnetz_host((string) $hst), $soll);
+    }
+    $pruef('wp ip intern', ansage_wert_pruefen(array('ip' => 'ms.intern'), $g), array('ip' => 'ms.intern'));
+    $antworten = array(array('code' => 200, 'rumpf' => ''));
+    $log = array();
+    $r = ansage_sprechen($TEXT, array('ip' => 'ms.intern') + $msx, $k);
+    $pruef('ms intern sendet', array($r['stand'], count($log), strpos($log[0]['url'], 'http://ms.intern:7091/')), array(1, 1, 0));
+
+    // --- Huellen fuer 1.0.3-Aufrufe (Abfahrts-Assistent) ---
+    foreach (array('http://192.168.1.7:7091/x?t=a%40b' => true, 'https://ms.local/x' => true, 'http://ms.intern/x' => true,
+                   'http://192.168.1.7:80' . '@' . 'example.com/' => false, 'http://ms.local' . '@' . 'example.com/' => false,
+                   'http://example.com#' . '@' . '192.168.1.7/' => false, 'http://' . $OKT . '/' => false,
+                   'http://' . $HEX . '/' => false, 'file://192.168.1.7/x' => false, 'http://[::1]/' => true,
+                   'http://192.168.1.7\\' . '@' . 'example.com/' => false, 7 => false) as $u => $soll) {
+        $pruef('url heimnetz 111 ' . $u, ansage_url_heimnetz(is_int($u) ? $u : (string) $u), $soll);
+    }
+    foreach (array('http://{ip}:{port}/tts?t={text}' => '', 'http://ms.local:81/s?t={text}' => '',
+                   'http://ms.intern/s?t={text}' => '', 'http://[fd00::7]:{port}/t?{text}' => '',
+                   'http://{ip}:80' . '@' . 'example.com/tts?t={text}' => 'TTS_VORLAGE_HEIMNETZ',
+                   'http://localhost:x' . '@' . 'example.com/' => 'TTS_VORLAGE_HEIMNETZ',
+                   'http://{ip}' . '@' . 'example.com/' => 'TTS_VORLAGE_HEIMNETZ',
+                   'http://' . $DEZ . '/t?{text}' => 'TTS_VORLAGE_HEIMNETZ',
+                   'http://{text}/' => 'TTS_VORLAGE_HEIMNETZ', 'http://{ip}.example.com/' => 'TTS_VORLAGE_HEIMNETZ',
+                   'http://{ip}:{text}/' => 'TTS_VORLAGE_HEIMNETZ', 'http://{zones}.local/' => 'TTS_VORLAGE_HEIMNETZ',
+                   'http://example.com\\' . '@' . '{ip}/' => 'TTS_VORLAGE_HTTP',
+                   'http:///t' => 'TTS_VORLAGE_HTTP', 'ftp://{ip}/' => 'TTS_VORLAGE_HTTP', ' http://{ip}/' => 'TTS_VORLAGE_HTTP',
+                   '' => 'TTS_VORLAGE_HTTP') as $tpl => $soll) {
+        $pruef('vorlage grund 111 ' . $tpl, ansage_vorlage_grund((string) $tpl), $soll);
+    }
+    $pruef('vorlage grund liste', ansage_vorlage_grund(array('http://{ip}/')), 'TTS_VORLAGE_HTTP');
+
+    // --- Zonen: leer taugt wie in 1.0.3 ---
+    foreach (array('' => true, '   ' => true, "\t" => false, '1' => true, ' 1 , 2 ' => true, '2~30, 4' => true,
+                   '1 2' => false, '1,2,' => false) as $zw => $soll) {
+        $pruef('zonen ok 111 "' . $zw . '"', ansage_zonen_ok((string) $zw), $soll);
+    }
+    $pruef('zonen ok liste', ansage_zonen_ok(array('1')), false);
+
+    // --- Fehlertext bei Netzfehlern (1.0.3, Pruefung 02.10.2026 Nr. 3) ---
+    $antworten = array(array('code' => 0, 'rumpf' => '', 'errno' => 52, 'fehler' => 'Empty reply from server'));
+    $pruef('ms netz mit text', ansage_sprechen($TEXT, $msx, $k)['kennung'], 'HTTP_NETZ|52|Empty reply from server');
+    $antworten = array(array('code' => 0, 'rumpf' => '', 'errno' => 35, 'fehler' => "a|b\nc"));
+    $pruef('alexa netz mit text', ansage_sprechen($TEXT, $ax, $k)['kennung'], 'ALEXA_KEINE_ANTWORT|' . $alexa_url . '|10|HTTP_NETZ|35|a/bc');
+    $antworten = array(array('code' => 0, 'rumpf' => '', 'errno' => 56, 'fehler' => 'Recv failure'));
+    $pruef('sonos netz mit text', ansage_sprechen($TEXT, $sx, $k)['kennung'], 'HTTP_NETZ|56|Recv failure');
+    $pruef('kennung netz ohne text', ansage_http_grund_id(52, 0), 'HTTP_NETZ|52');
+    $pruef('kennung netz text liste', ansage_http_grund_id(52, 0, array('x')), 'HTTP_NETZ|52');
+    $pruef('kennung netz text lang', strlen(ansage_http_grund_id(52, 0, str_repeat('x', 300))), strlen('HTTP_NETZ|52|') + 200);
+    $pruef('kennung zeit mit text', ansage_http_grund_id(28, 0, 'timed out'), 'HTTP_ZEIT');
+
+    // --- Wertpruefung vor dem Senden (Luecke aus Sprachmodul-3): Faelle, die die Adresse NICHT verraet ---
+    /* lang 'deu' und volume 500 ergeben eine gueltige Adresse im Heimnetz (ansage_tts_url() kappt die
+     * Lautstaerke, die Sprache steht nur im Pfad); nur ansage_wert_pruefen() vor dem Senden weist sie ab. */
+    $log = array();
+    $r = ansage_sprechen($TEXT, array('lang' => 'deu') + $msx, $k);
+    $pruef('vor dem senden sprache', array($r['stand'], $r['kennung'], count($log)), array(0, 'EINSTELLUNG|TTS_SPRACHE', 0));
+    $pruef('vor dem senden sprache adresse taugt', ansage_url_grund(ansage_tts_url($TEXT, array('lang' => 'deu') + $msx)), '');
+    $r = ansage_sprechen($TEXT, array('mode' => 'ms4h', 'volume' => 500) + $msx, $k);
+    $pruef('vor dem senden lautstaerke', array($r['kennung'], count($log)), array('EINSTELLUNG|UNTER|tts.volume|AUSSERHALB|1|100', 0));
 
     // --- Sprachschluessel: eindeutig ---
     $sl = ansage_sprachschluessel();

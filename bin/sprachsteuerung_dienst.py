@@ -3803,7 +3803,7 @@ def _grund_text(grund_id) -> str:
     return "keine Antwort (%s)" % (g or "ohne Angabe")
 
 
-# Kennungen der gemeinsamen Sprachausgabe (sprachausgabe.php 1.1.0, Bruecke
+# Kennungen der gemeinsamen Sprachausgabe (sprachausgabe.php 1.1.0/1.1.1, Bruecke
 # sp_ansage.php), die bis 0.12.0 roh als "keine Antwort (TTS_VORLAGE_HEIMNETZ)"
 # in Protokoll, Benachrichtigung und Reiter Test standen (Runde 2, A2). Aufbau
 # wie ansage_kennung_text(): KENNUNG|wert|wert...; EINSTELLUNG| und UNTER|feld|
@@ -5921,11 +5921,13 @@ def _heimnetz_v4(o: list) -> bool:
 
 def heimnetz_host(h) -> bool:
     """Liegt der Rechner im Heimnetz? Dieselbe Regel wie
-    ansage_heimnetz_host() in sprachausgabe.php (1.1.0): localhost, IPv4 nur
+    ansage_heimnetz_host() in sprachausgabe.php (1.1.1): localhost, IPv4 nur
     in strenger Dezimalform (10/8, 127/8, 192.168/16, 172.16/12,
     169.254/16), IPv6 in Klammern (::1, fc00::/7, fe80::/10, auf IPv4
     abgebildet), ein Name ohne Punkt oder mit .local/.lan/.home/.fritz.box/
-    .home.arpa/.internal/.intranet."""
+    .home.arpa/.internal/.intranet/.intern.
+    0.12.2: .intern wie die Sprachausgabe 1.1.1 - bis 0.12.1 nahm die
+    Oberflaeche ms.intern an, das Ducken las die Lautstaerke dort aber nicht."""
     import ipaddress
     h = str(h or "").strip().lower()
     if not h:
@@ -5949,7 +5951,7 @@ def heimnetz_host(h) -> bool:
     if re.fullmatch(r"[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?", h):
         return True
     return bool(re.fullmatch(r"[a-z0-9](?:[a-z0-9.\-]{0,251}[a-z0-9])?\."
-                             r"(local|lan|home|fritz\.box|home\.arpa|internal|intranet)", h))
+                             r"(local|lan|home|fritz\.box|home\.arpa|internal|intranet|intern)", h))
 
 
 def musik_zone(cfg: dict, zone_feld) -> tuple:
