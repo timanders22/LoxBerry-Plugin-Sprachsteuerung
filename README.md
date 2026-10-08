@@ -13,6 +13,12 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 
 ---
 
+## Neu in 0.12.1
+
+Nur die Fassungsnummer ist berichtigt. Das Paket 0.12.0 trug in `plugin.cfg` und in dieser README
+versehentlich schon die Nummer 0.12.1; am LoxBerry stand deshalb 0.12.1, obwohl 0.12.0 installiert war.
+Der Inhalt ist gleich 0.12.0, am Verhalten ändert sich nichts.
+
 ## Neu in 0.12.0
 
 Durchgang über das ganze Plugin: alle Befunde der Prüfung vom 03.10.2026 behoben, dazu
