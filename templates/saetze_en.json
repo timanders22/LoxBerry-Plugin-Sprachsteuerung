@@ -11,13 +11,26 @@
     "           MAY BE ABSENT: if the sentence names no target, the room",
     "           configured on the microphone applies ('turn on' in the living",
     "           room).",
-    "  {wert}   takes a number - as digits OR as a word ('fifty').",
-    "  {dauer}  takes a time span ('10 minutes', 'one hour'). The command is",
-    "           then scheduled and executed later.",
+    "  {wert}   takes a number - as digits OR as a word ('fifty',",
+    "           'one hundred and twenty', '21.5', 'twenty one point five').",
+    "  {dauer}  takes a time span ('10 minutes', 'an hour', 'half an hour',",
+    "           'an hour and a half', '2 hours and 30 minutes') or a time of",
+    "           day ('at 10 pm', 'at 7:30', 'tomorrow at 7'). The command is",
+    "           then scheduled and executed later. Where {dauer} does NOT",
+    "           follow 'in' or 'after', the phrase must bring its own",
+    "           preposition ('in 5 minutes', 'at 10 pm').",
     "  {rest}   takes arbitrary text and is available in the answer.",
     "Alternatives go in square brackets separated by a vertical bar:",
     "  'turn [the|] light {ziel} on'",
     "Case, umlauts and punctuation are normalised for the comparison.",
+    "A name only matches as a whole word: 'tor' does not match in 'motor'.",
+    "",
+    "WHAT IS NOT SWITCHED: if the sentence holds a time phrase, a negation",
+    "('not', 'don't') or a second command ('... and the kitchen on') that",
+    "no rule takes up, the system asks back instead of ignoring the rest.",
+    "",
+    "RANGE: a target may carry \"min\" and \"max\". A value outside is",
+    "rejected; without them, percent values must lie between 0 and 100.",
     "",
     "IN THE ANSWER TEXT every field of the result can be used:",
     "  {zielname} {wert} {einheit} {dauer_s} {rest} {istwert}",
@@ -25,6 +38,10 @@
     "ORDER MATTERS: the FIRST matching rule wins. More specific patterns",
     "belong at the top - the self-test on the Test tab checks this and",
     "names any shadowed rule.",
+    "",
+    "WHY 'down' IS NOT AN OFF WORD: 'turn the kitchen down' means dimming,",
+    "not switching off. The plugin cannot dim by one step, so 'down' is",
+    "left out of the rules rather than mapped to off.",
     "",
     "WHY on/off HAVE A FIXED POSITION HERE: a pattern like",
     "  [turn|switch] [off|] {ziel} [off|]",
@@ -36,7 +53,28 @@
     "The plugin fetches that address and inserts the answer as {istwert}.",
     "",
     "SENSITIVE TARGETS: a target with \"bestaetigen\": true is not switched at",
-    "once - the system asks back, and only a 'yes' triggers it."
+    "once - the system asks back, and only a 'yes' triggers it.",
+    "",
+    "READING A VALUE VIA MQTT (since 0.12.0): \"url_lesen\": \"mqtt:<topic>\" takes",
+    "the last message on that topic. It needs the permanent broker connection",
+    "(Settings tab, mqtt_dauer_ein); without it the question gets no value, and",
+    "the self-test says so.",
+    "",
+    "RELATIVE COMMANDS (since 0.12.0, built in): 'make the kitchen brighter',",
+    "'make it darker', 'make it 2 degrees warmer', 'make the tv louder'. The",
+    "system reads the current value via url_lesen, adds the step and sends the",
+    "result as wert - within min/max (percent: 0 to 100). The step: the number",
+    "in the sentence, else \"schritt\" on the target, else 10 for percent and 1",
+    "for degrees. Without a readable value nothing is changed.",
+    "",
+    "BUILT-IN SENTENCES (since 0.12.0) - they apply AFTER the rules of this",
+    "file and are therefore not listed under 'regeln':",
+    "  'which timers are running', 'cancel all timers', 'cancel the timer for",
+    "  {ziel}', 'remind me in 10 minutes to ...', the relative commands above",
+    "  and - only with musik_steuern - 'louder', 'quieter', 'pause', 'resume',",
+    "  'next song', 'previous song' for the Music Server zone of the",
+    "  microphone. Two commands joined with 'and' are both carried out when",
+    "  each is clear on its own (no sensitive target among them)."
   ],
 
   "ziele": {
@@ -54,15 +92,45 @@
       "name": "all lights",
       "alias": ["all lights", "everywhere", "every light"],
       "thema": "all/light"
+    },
+    "livingroom_heating": {
+      "name": "living room heating",
+      "alias": ["heating", "thermostat", "living room heating"],
+      "thema": "livingroom/heating",
+      "einheit": "degrees"
     }
   },
 
   "regeln": [
-    { "muster": "[turn|switch] {ziel} [off|down] in {dauer}",
+    { "muster": "[turn|switch] {ziel} off in {dauer}",
       "absicht": "schalten", "aktion": "aus",
       "antwort": "All right, {zielname} goes off in {dauer_s} seconds" },
 
     { "muster": "[turn|switch] {ziel} on in {dauer}",
+      "absicht": "schalten", "aktion": "ein",
+      "antwort": "All right, {zielname} comes on in {dauer_s} seconds" },
+
+    { "muster": "[turn|switch] off {ziel} {dauer}",
+      "absicht": "schalten", "aktion": "aus",
+      "antwort": "All right, {zielname} goes off in {dauer_s} seconds" },
+
+    { "muster": "[turn|switch] on {ziel} {dauer}",
+      "absicht": "schalten", "aktion": "ein",
+      "antwort": "All right, {zielname} comes on in {dauer_s} seconds" },
+
+    { "muster": "[turn|switch] {ziel} off {dauer}",
+      "absicht": "schalten", "aktion": "aus",
+      "antwort": "All right, {zielname} goes off in {dauer_s} seconds" },
+
+    { "muster": "[turn|switch] {ziel} on {dauer}",
+      "absicht": "schalten", "aktion": "ein",
+      "antwort": "All right, {zielname} comes on in {dauer_s} seconds" },
+
+    { "muster": "{dauer} [turn|switch] off {ziel}",
+      "absicht": "schalten", "aktion": "aus",
+      "antwort": "All right, {zielname} goes off in {dauer_s} seconds" },
+
+    { "muster": "{dauer} [turn|switch] on {ziel}",
       "absicht": "schalten", "aktion": "ein",
       "antwort": "All right, {zielname} comes on in {dauer_s} seconds" },
 
@@ -81,6 +149,10 @@
     { "muster": "[turn|switch] {ziel} on",
       "absicht": "schalten", "aktion": "ein",
       "antwort": "{zielname} is on" },
+
+    { "muster": "[set|turn] {ziel} to {wert} [degrees|degree]",
+      "absicht": "dimmen", "aktion": "wert", "einheit": "degrees",
+      "antwort": "{zielname} is set to {wert} degrees" },
 
     { "muster": "[dim|set] {ziel} to {wert} [percent|]",
       "absicht": "dimmen", "aktion": "wert", "einheit": "percent",

@@ -8,6 +8,10 @@
  *
  *   /plugins/<ordner>/index.php?token=<TOKEN>&aktion=<Befehl>
  *
+ * Das Token darf seit 0.12.0 auch als POST-Feld "token" oder im Kopf
+ * "X-Token" kommen - dann steht es nicht im Zugriffsprotokoll des
+ * Webservers. ?token= bleibt, weil Loxone-Ausgaenge meist nur GET koennen.
+ *
  * Pruefend (loest NICHTS aus):
  *   ?selftest=1           stimmt das Token? Sonst passiert nichts.
  *
@@ -40,6 +44,9 @@
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
 require_once __DIR__ . '/sp_lib.php';
 header('Content-Type: text/plain; charset=utf-8');
+/* Keine Antwort in einen Zwischenspeicher: sie kann Zustand, Verlauf oder
+ * das Abbild tragen, und die Anfrage traegt das Token. */
+header('Cache-Control: no-store');
 
 $sp_cfg = sp_config(false);
 
@@ -63,8 +70,26 @@ $sp_par = function ($name) {
 };
 
 /* ---------------- Token ---------------- */
-$sp_soll = (string) $sp_cfg['aktionstoken'];
-$sp_ist = $sp_par('token');
+/* Getrimmt und mit Mindestlaenge: bis 0.11.15 genuegte ein Soll-Token aus
+ * Leerzeichen - "   " und ?token=%20%20%20 ergaben SELFTEST;OK=1. Ein
+ * erzeugtes Token ist 24 Zeichen lang (sp_token_erzeugen()); unter 16 gilt
+ * keins als eingerichtet. */
+$sp_soll = trim((string) $sp_cfg['aktionstoken']);
+/* Woher das Token kommt: Kopf X-Token, POST-Feld token, sonst ?token= (Loxone).
+ * Ein POST-Feld als Liste wird abgewiesen wie bei GET. */
+if (isset($_SERVER['HTTP_X_TOKEN']) && is_string($_SERVER['HTTP_X_TOKEN']) && $_SERVER['HTTP_X_TOKEN'] !== '') {
+    $sp_ist = $_SERVER['HTTP_X_TOKEN'];
+} elseif (isset($_POST['token'])) {
+    if (!is_scalar($_POST['token'])) {
+        http_response_code(400);
+        echo "FEHLER;OK=0;GRUND=PARAMETER\n";
+        echo "Der Parameter token muss ein einzelner Wert sein.\n";
+        exit;
+    }
+    $sp_ist = (string) $_POST['token'];
+} else {
+    $sp_ist = $sp_par('token');
+}
 $sp_selftest = isset($_GET['selftest']) && $sp_par('selftest') !== '0';
 
 /* Der Selbsttest steht unmittelbar hinter der Tokenpruefung und VOR jeder
@@ -73,14 +98,14 @@ $sp_selftest = isset($_GET['selftest']) && $sp_par('selftest') !== '0';
  * bringen oder das Licht zu schalten, nur um zu erfahren, ob die Adresse im
  * Miniserver noch stimmt. Ein falsches Token bekommt dieselbe Abweisung wie
  * sonst auch - der Selbsttest ist keine Abkuerzung an der Sicherheit vorbei. */
-if ($sp_soll === '') {
+if (strlen($sp_soll) < 16) {
     http_response_code(403);
     if ($sp_selftest) {
         echo "SELFTEST;OK=0;ERR=KEIN_TOKEN_EINGERICHTET\n";
         exit;
     }
     echo "FEHLER;OK=0;GRUND=KEIN_TOKEN_GESETZT\n";
-    echo "Die Plugin-Oberflaeche wurde noch nie geoeffnet - es gibt noch kein Token.\n";
+    echo "Es ist kein gueltiges Token eingerichtet (mindestens 16 Zeichen) - die Plugin-Oberflaeche oeffnen.\n";
     exit;
 }
 if (!hash_equals($sp_soll, $sp_ist)) {
@@ -96,7 +121,8 @@ if ($sp_selftest) {
 /* ---------------- Aktion (Weissliste) ---------------- */
 $sp_lesend = array('status', 'satelliten', 'verlauf', 'roh', 'diag');
 $sp_schaltend = array('satz', 'sprechen', 'ruhe');
-$sp_aktion = isset($_GET['aktion']) ? (string) $_GET['aktion'] : 'status';
+// Ueber $sp_par: ?aktion[]=status ergab bis 0.11.15 eine Warnung samt Pfad und HTTP 200 statt 400.
+$sp_aktion = isset($_GET['aktion']) ? $sp_par('aktion') : 'status';
 if (!in_array($sp_aktion, array_merge($sp_lesend, $sp_schaltend), true)) {
     http_response_code(400);
     echo "FEHLER;OK=0;GRUND=UNBEKANNTE_AKTION\n";
@@ -129,14 +155,19 @@ if (sp_zeichen($sp_text) > 400) {
     exit;
 }
 
-/* Zone, Mikrofon und Dringlichkeit: enge Muster, alles andere abgewiesen. */
+/* Zone, Mikrofon und Dringlichkeit: enge Muster, alles andere abgewiesen.
+ * Zonen wie in der Sprachausgabe (ansage_zonen_ok()): Zahl[~Lautstaerke 1-100],
+ * durch Komma getrennt. Bis 0.11.15 stand dort [0-9~,] mit $ - ein Zeilenende
+ * (%0A) und "2~" gingen durch und endeten als kaputte Adresse und irrefuehrendes
+ * HTTP_NETZ|3. Leerraum um die Kommas faellt weg. */
 $sp_zone = $sp_par('zone');
-if ($sp_zone !== '' && !preg_match('/^[0-9~,]{1,80}$/', $sp_zone)) {
+if ($sp_zone !== '' && (strlen($sp_zone) > 80 || !ansage_zonen_ok($sp_zone))) {
     http_response_code(400);
     echo "FEHLER;OK=0;GRUND=ZONE_UNGUELTIG\n";
     echo "Zonen bestehen aus Ziffern, Komma und der Tilde, zum Beispiel 2,4 oder 2~15.\n";
     exit;
 }
+$sp_zone = (string) preg_replace('/\s+/', '', $sp_zone);
 $sp_mikro = $sp_par('mikrofon');
 $sp_mikro_sauber = preg_replace('/[\x00-\x1F\x7F]/u', '', $sp_mikro);
 if ($sp_mikro_sauber === null) {
@@ -158,6 +189,15 @@ $sp_lox = sp_loxone();
 $sp_sats = sp_satelliten();
 $sp_alter = sp_alter();
 
+/* Ein Feld in einer Antwortzeile: kein ; (trennt die Felder) und kein
+ * Steuerzeichen (eine neue Zeile gaebe sich als eigener Eintrag aus). Bis
+ * 0.11.15 nur beim Satz; Raum, Zone, Absicht, Ziel, Mikrofon und Namen gingen
+ * roh hinaus. */
+$sp_feld = function ($w) {
+    $w = is_scalar($w) ? (string) $w : '';
+    return str_replace(';', ',', (string) preg_replace('/[\x00-\x1F\x7F]+/', ' ', $w));
+};
+
 /* ================= Lesende Aktionen ================= */
 
 if ($sp_aktion === 'roh') {
@@ -170,10 +210,11 @@ if ($sp_aktion === 'satelliten') {
     printf("SATELLITEN;OK=%d;N=%d;ALTER=%d\n",
         (int) (!empty($sp_lox['ok'])), count($sp_sats), $sp_alter);
     foreach ($sp_sats as $sp_name => $sp_s) {
-        echo $sp_name . ';' . $sp_s['art'] . ';' . $sp_s['host'] . ':' . $sp_s['port']
-           . ';' . $sp_s['zustand']
-           . ';' . (string) (isset($sp_s['raum']) ? $sp_s['raum'] : '')
-           . ';' . (string) (isset($sp_s['zone']) ? $sp_s['zone'] : '') . "\n";
+        echo $sp_feld($sp_name) . ';' . $sp_feld(isset($sp_s['art']) ? $sp_s['art'] : '')
+           . ';' . $sp_feld(isset($sp_s['host']) ? $sp_s['host'] : '') . ':' . $sp_feld(isset($sp_s['port']) ? $sp_s['port'] : '')
+           . ';' . $sp_feld(isset($sp_s['zustand']) ? $sp_s['zustand'] : '')
+           . ';' . $sp_feld(isset($sp_s['raum']) ? $sp_s['raum'] : '')
+           . ';' . $sp_feld(isset($sp_s['zone']) ? $sp_s['zone'] : '') . "\n";
     }
     exit;
 }
@@ -185,10 +226,10 @@ if ($sp_aktion === 'verlauf') {
         printf("%s;%s;%s;%s;%s;%s\n",
             date('H:i:s', (int) (isset($sp_e['ts']) ? $sp_e['ts'] : 0)),
             isset($sp_e['ok']) && $sp_e['ok'] ? 'ok' : 'nein',
-            str_replace(';', ',', (string) (isset($sp_e['satz']) ? $sp_e['satz'] : '')),
-            (string) (isset($sp_e['absicht']) ? $sp_e['absicht'] : ''),
-            (string) (isset($sp_e['ziel']) ? $sp_e['ziel'] : ''),
-            (string) (isset($sp_e['mikrofon']) ? $sp_e['mikrofon'] : ''));
+            $sp_feld(isset($sp_e['satz']) ? $sp_e['satz'] : ''),
+            $sp_feld(isset($sp_e['absicht']) ? $sp_e['absicht'] : ''),
+            $sp_feld(isset($sp_e['ziel']) ? $sp_e['ziel'] : ''),
+            $sp_feld(isset($sp_e['mikrofon']) ? $sp_e['mikrofon'] : ''));
     }
     exit;
 }
@@ -265,7 +306,7 @@ if (sp_dienst_pid() === 0) {
 }
 
 if ($sp_aktion === 'ruhe') {
-    $sp_wert = isset($_GET['wert']) ? (string) $_GET['wert'] : '';
+    $sp_wert = $sp_par('wert');
     if (!in_array($sp_wert, array('0', '1'), true)) {
         http_response_code(400);
         echo "SET;OK=0;GRUND=WERT_UNGUELTIG\n";
@@ -275,7 +316,7 @@ if ($sp_aktion === 'ruhe') {
     /* Auch das geht ueber die Warteschlange: der DIENST schreibt, nicht der
      * unangemeldete Endpunkt. */
     list($sp_erg, $sp_meldung) = sp_befehl_absetzen(
-        array('aktion' => 'ruhe', 'wert' => (int) $sp_wert));
+        array('aktion' => 'ruhe', 'wert' => (int) $sp_wert), null, 'endpunkt');
     if ($sp_erg === 0) { http_response_code(500); }
     printf("SET;OK=%d;AKTION=ruhe;WERT=%d;MELDUNG=%s\n", $sp_erg, (int) $sp_wert,
         str_replace(array("\r", "\n", ';'), ' ', $sp_meldung));
@@ -295,7 +336,9 @@ if ($sp_aktion === 'sprechen') {
     if ($sp_mikro !== '') { $sp_befehl['mikrofon'] = $sp_mikro; }
     if ($sp_dringend)     { $sp_befehl['dringend'] = 1; }
 }
-list($sp_erg, $sp_meldung) = sp_befehl_absetzen($sp_befehl);
+/* S9: der Dienst erfaehrt, dass der Befehl von Loxone kommt (quelle=endpunkt) -
+ * Rueckfrage und Kontext haengen daran, nicht mehr an der Frage "raum fehlt". */
+list($sp_erg, $sp_meldung) = sp_befehl_absetzen($sp_befehl, null, 'endpunkt');
 if ($sp_erg === 0) {
     http_response_code(500);
 }

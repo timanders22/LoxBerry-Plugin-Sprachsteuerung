@@ -16,7 +16,7 @@ function sp_erreichbar($host, $port, $zeit = 3)
 {
     $fp = @fsockopen($host, (int) $port, $errno, $errstr, $zeit);
     if ($fp) { fclose($fp); return array(1, ''); }
-    return array(0, $errstr !== '' ? $errstr : ('Fehler ' . $errno));
+    return array(0, $errstr !== '' ? $errstr : sprintf(sp_t('UI012.FEHLER_NR'), (int) $errno));
 }
 
 function sp_pruefungen()
@@ -165,6 +165,9 @@ function sp_pruefungen()
         $zeilen[] = sp_pruefzeile($sp_al[0], sp_t('TEST.F_ANSAGE'), $sp_al[1]);
     }
 
+    // A10: Dauerverbindung, letzte Ansage, laufende Timer - aus dem Abbild.
+    foreach (sp_test_dienstzeilen($cfg, sp_loxone()) as $z) { $zeilen[] = $z; }
+
     // Vorgaben, Zweitschrift, Suchmuster, Vorlage, Oberflaeche
     list($st, $tx) = sp_vorgaben_probe();
     $zeilen[] = sp_pruefzeile($st, sp_t('TEST.F_VORGABEN'), $tx);
@@ -187,26 +190,52 @@ function sp_pruefungen()
     return $zeilen;
 }
 
-/** Steht dieser Raum als Ziel in der Satzdatei? */
+/**
+ * Text einebnen wie einebnen() in bin/verstehen.py: NFC zuerst (ein "ü" kann
+ * als u plus Trema kommen), Umlaute und ß ausschreiben, klein, Beizeichen
+ * weg, alles ausser Buchstaben und Ziffern wird Leerraum.
+ */
+function sp_test_einebnen($t)
+{
+    $t = trim((string) $t);
+    if (class_exists('Normalizer', false)) {
+        $n = Normalizer::normalize($t, Normalizer::FORM_C);
+        if (is_string($n)) { $t = $n; }
+    }
+    $t = function_exists('mb_strtolower') ? mb_strtolower($t, 'UTF-8') : strtolower($t);
+    $t = strtr($t, array("\xC3\xA4" => 'ae', "\xC3\xB6" => 'oe', "\xC3\xBC" => 'ue', "\xC3\x9F" => 'ss',
+                         "\xC3\x84" => 'ae', "\xC3\x96" => 'oe', "\xC3\x9C" => 'ue', "\xE1\xBA\x9E" => 'ss'));
+    if (class_exists('Normalizer', false)) {
+        $n = Normalizer::normalize($t, Normalizer::FORM_KD);
+        if (is_string($n)) { $t = (string) preg_replace('/\p{Mn}+/u', '', $n); }
+    }
+    $t = strtolower($t);
+    return trim((string) preg_replace('/\s+/', ' ', (string) preg_replace('/[^a-z0-9]+/', ' ', $t)));
+}
+
+/**
+ * Steht dieser Raum als Ziel in der Satzdatei?
+ *
+ * A6 (Runde 2): verglichen wird nach Wortgrenzen wie im Dienst. Bis Runde 1
+ * genuegte ein Teilstueck (strpos): der Raum "Motorraum" galt als bekannt,
+ * weil es ein Ziel "tor" gab - im Dienst traf "tor" in "motorraum" nie.
+ * Ein Name gilt, wenn er als ganze Wortfolge im eingeebneten Raum steht.
+ */
 function sp_raum_bekannt($raum, $ziele)
 {
-    $ebnen = function ($t) {
-        $t = strtolower(trim((string) $t));
-        $t = strtr($t, array('ä' => 'ae', 'ö' => 'oe', 'ü' => 'ue', 'ß' => 'ss'));
-        return trim(preg_replace('/\s+/', ' ', preg_replace('/[^a-z0-9 ]+/', ' ', $t)));
-    };
-    $gesucht = $ebnen($raum);
+    $gesucht = sp_test_einebnen($raum);
     if ($gesucht === '') { return false; }
-    foreach ($ziele as $k => $z) {
-        $namen = array($ebnen($k));
+    $mit_grenzen = ' ' . $gesucht . ' ';
+    foreach ((array) $ziele as $k => $z) {
+        $namen = array(sp_test_einebnen(str_replace('_', ' ', (string) $k)));
         if (is_array($z)) {
-            $namen[] = $ebnen(isset($z['name']) ? $z['name'] : '');
+            $namen[] = sp_test_einebnen(isset($z['name']) && is_scalar($z['name']) ? $z['name'] : '');
             foreach ((array) (isset($z['alias']) ? $z['alias'] : array()) as $a) {
-                $namen[] = $ebnen($a);
+                if (is_scalar($a)) { $namen[] = sp_test_einebnen($a); }
             }
         }
         foreach ($namen as $n) {
-            if ($n !== '' && ($n === $gesucht || strpos($gesucht, $n) !== false)) {
+            if ($n !== '' && strpos($mit_grenzen, ' ' . $n . ' ') !== false) {
                 return true;
             }
         }
@@ -214,15 +243,105 @@ function sp_raum_bekannt($raum, $ziele)
     return false;
 }
 
-/** Rueckgabe: array(stand, Meldung) */
+/**
+ * A10 (Runde 2): Dauerverbindung zum Broker (S3) und letzte Ansage - aus dem
+ * Abbild des Dienstes (data/.../loxone.json). Welche Felder ein Dienst dort
+ * schreibt, haengt an seiner Fassung; gelesen wird mit Rueckfall, und was
+ * fehlt, steht grau als "meldet der Dienst nicht".
+ * Rueckgabe: Liste von Pruefzeilen.
+ */
+function sp_test_dienstzeilen(array $cfg, array $abbild)
+{
+    $zeilen = array();
+    $wert = function (array $d, array $namen) {
+        foreach ($namen as $n) { if (array_key_exists($n, $d)) { return $d[$n]; } }
+        return null;
+    };
+    // Dauerverbindung: ein Block mqtt_dauer {verbunden, seit, grund} oder einzelne Felder.
+    if (empty($cfg['mqtt_dauer_ein'])) {
+        $zeilen[] = sp_pruefzeile(-1, sp_t('UI013.F_MQTT_DAUER'), sp_e(sp_t('UI013.A_MQTT_DAUER_AUS')));
+    } else {
+        $blk = isset($abbild['mqtt_dauer']) && is_array($abbild['mqtt_dauer']) ? $abbild['mqtt_dauer'] : array();
+        $verb = $wert($blk, array('verbunden', 'ok'));
+        if ($verb === null) { $verb = $wert($abbild, array('mqtt_dauer_verbunden', 'mqtt_verbunden')); }
+        $grund = $wert($blk, array('grund', 'fehler'));
+        if ($grund === null) { $grund = $wert($abbild, array('mqtt_dauer_grund')); }
+        $seit = $wert($blk, array('seit'));
+        if ($verb === null || !is_scalar($verb)) {
+            $zeilen[] = sp_pruefzeile(-1, sp_t('UI013.F_MQTT_DAUER'), sp_e(sp_t('UI013.A_MQTT_DAUER_UNBEKANNT')));
+        } elseif (!empty($verb)) {
+            $zeilen[] = sp_pruefzeile(1, sp_t('UI013.F_MQTT_DAUER'),
+                sp_e(is_numeric($seit) && (int) $seit > 0
+                     ? sprintf(sp_t('UI013.A_MQTT_DAUER_SEIT'), date('d.m.Y H:i', (int) $seit))
+                     : sp_t('UI013.A_MQTT_DAUER_JA')));
+        } else {
+            $zeilen[] = sp_pruefzeile(0, sp_t('UI013.F_MQTT_DAUER'),
+                sp_e(sprintf(sp_t('UI013.A_MQTT_DAUER_NEIN'), is_scalar($grund) && (string) $grund !== '' ? (string) $grund : '-')));
+        }
+    }
+    // Letzte Ansage: Block letzte_ansage {ok, grund, ts} oder ansage_ok/ansage_grund/ansage_ts.
+    $la = isset($abbild['letzte_ansage']) && is_array($abbild['letzte_ansage']) ? $abbild['letzte_ansage'] : array();
+    $ok = $wert($la, array('ok'));
+    $grund = $wert($la, array('grund', 'meldung'));
+    $ts = $wert($la, array('ts', 'zeit'));
+    if ($ok === null) {
+        $ok = $wert($abbild, array('ansage_ok'));
+        $grund = $wert($abbild, array('ansage_grund'));
+        $ts = $wert($abbild, array('ansage_ts'));
+    }
+    if ($ok === null || !is_scalar($ok)) {
+        $zeilen[] = sp_pruefzeile(-1, sp_t('UI013.F_LETZTE_ANSAGE'), sp_e(sp_t('UI013.A_LETZTE_ANSAGE_UNBEKANNT')));
+    } else {
+        $wann = is_numeric($ts) && (int) $ts > 0 ? date('d.m.Y H:i:s', (int) $ts) : '-';
+        // ok -1: gesendet, aber ohne Beleg (Sonos4Lox nach Zeitablauf,
+        // Chromecast4lox bei schon sprechendem Lautsprecher) - kein Ausfall.
+        $zeilen[] = ((int) $ok === -1)
+            ? sp_pruefzeile(-1, sp_t('UI013.F_LETZTE_ANSAGE'), sp_e(sprintf(sp_t('UI013.A_LETZTE_ANSAGE_UNKLAR'), $wann)))
+            : (!empty($ok)
+            ? sp_pruefzeile(1, sp_t('UI013.F_LETZTE_ANSAGE'), sp_e(sprintf(sp_t('UI013.A_LETZTE_ANSAGE_OK'), $wann)))
+            : sp_pruefzeile(0, sp_t('UI013.F_LETZTE_ANSAGE'),
+                sp_e(sprintf(sp_t('UI013.A_LETZTE_ANSAGE_FEHL'), $wann, is_scalar($grund) && (string) $grund !== '' ? (string) $grund : '-'))));
+    }
+    // Laufende Timer (das Abbild fuehrt sie seit 0.11: timer = Liste {faellig, ziel, zielname, aktion}).
+    $timer = isset($abbild['timer']) && is_array($abbild['timer']) ? $abbild['timer'] : array();
+    $teile = array();
+    foreach (array_slice($timer, 0, 6) as $t) {
+        if (!is_array($t)) { continue; }
+        $n = isset($t['zielname']) && is_scalar($t['zielname']) && (string) $t['zielname'] !== '' ? (string) $t['zielname']
+           : (isset($t['ziel']) && is_scalar($t['ziel']) ? (string) $t['ziel'] : '?');
+        $teile[] = date('H:i', (int) (isset($t['faellig']) ? $t['faellig'] : 0)) . ' ' . $n
+                 . (isset($t['aktion']) && is_scalar($t['aktion']) ? ' ' . (string) $t['aktion'] : '');
+    }
+    $zeilen[] = sp_pruefzeile(-1, sp_t('UI013.F_TIMER'),
+        $timer ? sp_e(sprintf(sp_t('UI013.A_TIMER'), count($timer), implode('; ', $teile))) : sp_e(sp_t('UI013.A_TIMER_KEINE')));
+    return $zeilen;
+}
+
+/**
+ * Rueckgabe: array(stand, Meldung als HTML).
+ *
+ * F2 (0.12.0): die Meldung ist MASKIERT. Bis 0.11.15 reichte diese Funktion
+ * die Meldung des Dienstes roh weiter, und die Oberflaeche gab sie roh aus -
+ * darin stehen aber Texte, die nicht von hier stammen: Zielnamen aus einer
+ * eingespielten Sicherung oder dem Loxone-Import, Antwortzeilen fremder
+ * Geraete, der Text eines Sprachmodells. Ein Zielname wie
+ * <img src=x onerror=...> lief damit im angemeldeten Browser. Jetzt geht
+ * alles Fremde durch sp_e(); HTML entsteht nur hier, aus festen Teilen.
+ */
 function sp_test_aktion($aktion)
 {
-    $reinigen = function ($feld) {
-        $t = isset($_POST[$feld]) ? (string) $_POST[$feld] : '';
-        return trim(preg_replace('/[\x00-\x1F\x7F]/u', ' ', $t));
+    // F14: eine Liste (test_satz[]=) ist kein Text - Leerwert statt Warnung.
+    $feld_text = function ($feld) {
+        return isset($_POST[$feld]) && is_string($_POST[$feld]) ? $_POST[$feld] : '';
     };
-    $raum = isset($_POST['test_raum'])
-        ? trim(preg_replace('/[\x00-\x1F\x7F"\']/u', '', (string) $_POST['test_raum'])) : '';
+    $reinigen = function ($feld) use ($feld_text) {
+        return trim((string) preg_replace('/[\x00-\x1F\x7F]/u', ' ', $feld_text($feld)));
+    };
+    $raum = trim((string) preg_replace('/[\x00-\x1F\x7F"\']/u', '', $feld_text('test_raum')));
+    // Die Antwort des Dienstes: Stand bleibt, die Meldung wird maskiert.
+    $maskiert = function ($erg) {
+        return array(isset($erg[0]) ? $erg[0] : 0, sp_e(isset($erg[1]) ? (string) $erg[1] : ''));
+    };
 
     switch ($aktion) {
         case 'satz':
@@ -233,8 +352,8 @@ function sp_test_aktion($aktion)
              * nie zur Wirkung kamen. Sie vorzutaeuschen ist schlimmer, als sie
              * wegzulassen: wer sie liest, glaubt, der Reiter warte eine
              * Minute. */
-            return sp_befehl_absetzen(array('aktion' => 'satz', 'satz' => $text,
-                                            'raum' => $raum));
+            return $maskiert(sp_befehl_absetzen(array('aktion' => 'satz', 'satz' => $text,
+                                                      'raum' => $raum), null, 'web'));
 
         case 'trocken':
             /* Der Trockenlauf braucht KEINEN laufenden Dienst - gerade dann
@@ -243,15 +362,15 @@ function sp_test_aktion($aktion)
             $text = $reinigen('test_satz');
             if ($text === '') { return array(0, sp_t('TEST.M_SATZ_LEER')); }
             list($ok, $antwort, $d) = sp_trockenlauf($text, $raum);
-            if (!$d) { return array(0, $antwort); }
+            if (!$d) { return array(0, sp_e($antwort)); }
             $teile = array();
             foreach (array('absicht', 'aktion', 'ziel', 'zielname', 'wert', 'einheit',
                            'dauer_s', 'quelle', 'grund') as $k) {
-                if (isset($d[$k]) && $d[$k] !== '' && $d[$k] !== null) {
+                if (isset($d[$k]) && is_scalar($d[$k]) && $d[$k] !== '') {
                     $teile[] = sp_e($k) . '=<span class="sm-mono">' . sp_e($d[$k]) . '</span>';
                 }
             }
-            $themen = isset($d['themen']) && is_array($d['themen']) ? $d['themen'] : array();
+            $themen = isset($d['themen']) && is_array($d['themen']) ? array_filter($d['themen'], 'is_scalar') : array();
             return array($ok ? 1 : 0,
                 sprintf(sp_t('TEST.M_TROCKEN'), implode(', ', $teile),
                         sp_e($antwort), count($themen))
@@ -261,33 +380,34 @@ function sp_test_aktion($aktion)
             $text = $reinigen('test_ansage');
             if ($text === '') { return array(0, sp_t('TEST.M_ANSAGE_LEER')); }
             $befehl = array('aktion' => 'sprechen', 'text' => $text);
-            $zone = isset($_POST['test_zone'])
-                ? trim(preg_replace('/[^0-9~,]/', '', (string) $_POST['test_zone'])) : '';
+            $zone = trim((string) preg_replace('/[^0-9~,]/', '', $feld_text('test_zone')));
             if ($zone !== '') { $befehl['zone'] = $zone; }
-            return sp_befehl_absetzen($befehl);
+            return $maskiert(sp_befehl_absetzen($befehl, null, 'web'));
 
         case 'neu_laden':
-            return sp_befehl_absetzen(array('aktion' => 'neu_laden'));
+            return $maskiert(sp_befehl_absetzen(array('aktion' => 'neu_laden'), null, 'web'));
 
         case 'dienste':
             // Die Funktion liefert an vier von sechs Stellen nur zwei
             // Elemente. Ein list() mit drei Zielen erzeugt unter PHP 8
             // eine Warnung auf der Seite - der dritte Wert wird deshalb
             // einzeln geholt.
-            $sp_erg = sp_befehl_absetzen(array('aktion' => 'dienste'));
+            $sp_erg = sp_befehl_absetzen(array('aktion' => 'dienste'), null, 'web');
             $ok = $sp_erg[0];
-            $meldung = $sp_erg[1];
             $a = isset($sp_erg[2]) && is_array($sp_erg[2]) ? $sp_erg[2] : array();
-            if (!$ok || empty($a['dienste'])) { return array($ok, $meldung); }
+            if (!$ok || empty($a['dienste']) || !is_array($a['dienste'])) { return $maskiert($sp_erg); }
             $zeilen = array();
             foreach ($a['dienste'] as $name => $d) {
+                $d = is_array($d) ? $d : array();
                 if (!empty($d['ok'])) {
+                    $modelle = isset($d['modelle']) && is_array($d['modelle']) ? array_filter($d['modelle'], 'is_scalar') : array();
                     $zeilen[] = '<b>' . sp_e($name) . '</b>: '
-                              . ($d['modelle']
-                                 ? '<span class="sm-mono">' . sp_e(implode(', ', $d['modelle'])) . '</span>'
+                              . ($modelle
+                                 ? '<span class="sm-mono">' . sp_e(implode(', ', $modelle)) . '</span>'
                                  : sp_t('TEST.A_KEINE_MODELLE'));
                 } else {
-                    $zeilen[] = '<b>' . sp_e($name) . '</b>: ' . sp_e($d['fehler']);
+                    $zeilen[] = '<b>' . sp_e($name) . '</b>: '
+                              . sp_e(isset($d['fehler']) && is_scalar($d['fehler']) ? $d['fehler'] : '');
                 }
             }
             return array(1, implode('<br>', $zeilen));

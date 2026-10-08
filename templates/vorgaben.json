@@ -31,7 +31,7 @@
 
     "llm_ein": 0,
     "sprache": "de",
-    "wakeword": "ok_nabu",
+    "wakeword": "okay_nabu",
 
     "whisper_modell": "",
     "piper_stimme": "",
@@ -44,10 +44,12 @@
              "stimme": "",
              "cc_praefix": "chromecast4lox", "cc_ziel": "alle",
              "alexa_geraet": "", "alexa_token": "", "alexa_laut": -1,
-             "google_geraet": "", "google_token": "", "google_laut": -1 },
+             "google_geraet": "", "google_token": "", "google_laut": -1,
+             "sonos_zone": "", "sonos_laut": -1 },
 
     "mqtt_ein": 1,
     "mqtt_topic": "sprachsteuerung",
+    "mqtt_dauer_ein": 0,
 
     "miniserver_url": "",
     "aktionstoken": "",
@@ -62,6 +64,12 @@
     "herzschlag_s": 60,
     "kontext_s": 30,
     "bestaetigung_s": 20,
+
+    "musik_ducken": 0,
+    "musik_ducken_laut": 15,
+    "musik_steuern": 0,
+
+    "docker_neustart": 0,
 
     "mitschnitt_bis": 0,
     "messwerte": {}
@@ -78,13 +86,15 @@
     "ansage_je_tag":    [0, 500],
     "herzschlag_s":     [0, 3600],
     "kontext_s":        [0, 300],
-    "bestaetigung_s":   [0, 120]
+    "bestaetigung_s":   [0, 120],
+    "musik_ducken_laut": [0, 100],
+    "tts_volume":       [1, 100]
   },
 
   "auswahl": {
     "antwortweg": ["satellit", "loxone", "beide"],
     "tts_mode":   ["aus", "musicserver", "ms4h", "audioserver",
-                   "chromecast", "alexang", "cc4lox", "custom"]
+                   "chromecast", "alexang", "cc4lox", "sonos4lox", "custom"]
   },
 
   "_hinweis_retain": [
@@ -118,7 +128,30 @@
     "einem Neustart von Broker oder Gateway nicht noch einmal ankommen",
     "sollen (Entscheidung des Hausherrn 25.09.2026, wie der Stellbefehl der",
     "Einspeisebremse). Den Altwert raeumt der Dienst ab und liest beim Broker",
-    "nach (altlast_lage() in bin/sprachsteuerung_dienst.py)."
+    "nach (altlast_lage() in bin/sprachsteuerung_dienst.py).",
+    "",
+    "SEIT 0.12.0, NUR MIT mqtt_dauer_ein=1 (dauerhafte Broker-Verbindung):",
+    "ansage_ok (1 gesendet, 0 nicht, -1 gesendet mit unklarem Ausgang),",
+    "ansage_grund und mikrofon/<name>/zustand gehen fluechtig ueber diese",
+    "Verbindung hinaus. 'online' setzt sie selbst zurueckbehalten (1 beim",
+    "Verbinden, 0 als Letzter Wille und beim Beenden) - das ist der eine Fall,",
+    "in dem das Lebenszeichen zurueckbehalten stehen darf: der Broker loescht",
+    "es mit dem Letzten Willen, sobald der Dienst wegbricht. Der Herzschlag",
+    "laesst 'online' dann weg, solange diese Verbindung steht."
+  ],
+
+  "_hinweis_runde2": [
+    "Seit 0.12.0, alle ab Werk aus (0):",
+    "  mqtt_dauer_ein    dauerhafte Verbindung des Dienstes zum Broker:",
+    "                    <praefix>/cmd/sprechen|satz|ruhe, Werte fuer",
+    "                    url_lesen 'mqtt:<thema>', Zustand der Mikrofone",
+    "  musik_ducken      die Music-Server-Zone des Mikrofons waehrend des",
+    "                    Zuhoerens auf musik_ducken_laut (0-100) senken",
+    "  musik_steuern     'lauter', 'pause', 'naechster titel' ohne Ziel steuern",
+    "                    die Zone des Mikrofons (nur Loxone Music Server)",
+    "  docker_neustart   einen haengenden EIGENEN lokalen Container nach drei",
+    "                    Fehlschlaegen neu starten (hoechstens alle 10 Minuten)",
+    "tts_volume ist die Grenze fuer tts.volume, kein eigener Schluessel."
   ],
 
   "retain": {
@@ -133,12 +166,24 @@
       "mikrofone": 1, "bereit": 0,
       "dienste_ok": 0, "dienste_gesamt": 1,
       "regeln": 1, "ziele": 1, "ruhe": 0,
-      "letzter_satz_alter": 0
+      "letzter_satz_alter": 0,
+
+      "ansage_ok": 0, "ansage_grund": 0
     },
-    "endungen": { "/aktion": 0, "/wert": 0 }
+    "endungen": { "/aktion": 0, "/wert": 0, "/zustand": 0 }
   },
 
+  "_hinweis_wakewords": [
+    "Die eingebauten Modelle von openWakeWord ab 2.0 (pyopen-wakeword,",
+    "Model in const.py): okay_nabu, hey_jarvis, hey_mycroft, alexa,",
+    "hey_rhasspy. Bis 0.11.15 stand hier 'ok_nabu' - so hiess das Modell",
+    "bis wyoming-openwakeword 1.10; 2.0.0 hat es in 'okay_nabu' umbenannt",
+    "(CHANGELOG: 'Rename ok_nabu to okay_nabu to match microWakeWord').",
+    "Eine Konfiguration mit 'ok_nabu' bleibt gueltig; sp_lib.php bildet sie",
+    "auf 'okay_nabu' ab (sp_weckwort_norm())."
+  ],
+
   "wakewords": [
-    "ok_nabu", "hey_jarvis", "alexa", "hey_mycroft", "hey_rhasspy"
+    "okay_nabu", "hey_jarvis", "alexa", "hey_mycroft", "hey_rhasspy"
   ]
 }

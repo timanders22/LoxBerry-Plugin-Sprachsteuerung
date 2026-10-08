@@ -18,6 +18,36 @@ if [ -z "$BASE" ] || [ ! -d "$BASE/config/plugins" ]; then
     echo "<INFO> preupgrade: LoxBerry-Wurzel nicht ermittelbar - nichts gesichert."
     exit 0
 fi
+# Der Ordnername darf keinen Pfadtrenner tragen - weiter unten wird mit ihm
+# verschoben und geloescht (dieselbe Pruefung wie in preinstall.sh).
+case "$PFOLDER" in
+    ''|*/*|*..*) echo "<INFO> preupgrade: unzulaessiger Ordnername '$PFOLDER' - nichts gesichert."; exit 0 ;;
+esac
+
+# ---------- Ist das die Wiederholung eines abgebrochenen Updates? ----------
+# Geprueft, BEVOR die Marke neu geschrieben wird (0.12.0). Bricht ein Update
+# nach preupgrade.sh ab, bleiben die Marke und die Sicherung der Langzeitwerte
+# liegen, waehrend purge_installation den Datenordner schon geloescht hat
+# (oder der Installer ihn leer neu angelegt hat). Bis 0.11.15 hielt die
+# Wiederholung die Sicherung fuer "aus einem frueheren Vorgang", legte sie nach
+# .alt und sicherte danach den LEEREN Datenordner - Verlauf, Messreihe und
+# Ansagezeiten lagen dann nur noch unter .alt. Ebenso wurde der Sollmerker
+# geloescht, und der Dienst blieb nach dem Update aus.
+# Eine Wiederholung ist es, wenn die Marke schon liegt UND der Datenordner
+# fehlt oder die Sicherung Inhalt traegt. Dann bleiben Sicherung und
+# Sollmerker, wie sie sind.
+SP_WIEDERHOLUNG=""
+if [ -f "$BASE/data/plugins/$PFOLDER.upgrade_laeuft" ]; then
+    if [ ! -d "$BASE/data/plugins/$PFOLDER" ]; then
+        SP_WIEDERHOLUNG=ja
+    else
+        for LANG_F in verlauf.json messwerte.json ansagen.json; do
+            [ -f "$BASE/data/plugins/$PFOLDER.upgrade_sicherung/$LANG_F" ] && SP_WIEDERHOLUNG=ja
+        done
+    fi
+fi
+[ -n "$SP_WIEDERHOLUNG" ] \
+    && echo "<INFO> Ein frueheres Update wurde nicht zu Ende gefuehrt - seine Sicherung wird weiterverwendet."
 
 # ---------- Die Marke "Aktualisierung laeuft" ZUERST ----------
 # Der Installer legt die Cron-Datei rund eine Minute VOR postinstall.sh neu
@@ -34,8 +64,21 @@ mkdir -p "$BASE/data/plugins" 2>/dev/null
 date +%s > "$BASE/data/plugins/$PFOLDER.upgrade_laeuft" 2>/dev/null
 # Die Wirkung pruefen, nicht den Rueckgabewert: eine leere Datei waere keine
 # Marke (dienst.sh laesst eine unlesbare nicht gelten).
-[ -s "$BASE/data/plugins/$PFOLDER.upgrade_laeuft" ] \
-    && echo "<OK> Dienststart bis zum Ende der Installation gesperrt."
+#
+# Ohne Marke wird abgebrochen, mit Rueckgabewert 2 (0.12.0): der Installer
+# bricht dann VOR purge_installation ab (plugininstall.pl, preupgrade mit
+# exitcode > 1 -> &fail), und das alte Plugin bleibt mit Daten und laufendem
+# Dienst stehen. Bis 0.11.15 lief es ohne Marke weiter: preinstall.sh hielt
+# das Update fuer eine Neuinstallation und legte Zweitschriften, Sicherung und
+# Sollmerker nach .alt, und postinstall.sh spielte nichts zurueck.
+if [ -s "$BASE/data/plugins/$PFOLDER.upgrade_laeuft" ]; then
+    echo "<OK> Dienststart bis zum Ende der Installation gesperrt."
+else
+    echo "<FAIL> Die Marke $BASE/data/plugins/$PFOLDER.upgrade_laeuft liess sich nicht schreiben - das Update wird abgebrochen."
+    echo "<INFO> Ohne sie gingen Einstellungen und Langzeitwerte beim Update verloren. Das bisherige"
+    echo "<INFO> Plugin bleibt unveraendert. Bitte Rechte und freien Platz unter $BASE/data/plugins pruefen."
+    exit 2
+fi
 
 # ---------- Den laufenden Dienst anhalten ----------
 # Bis 0.11.7 gingen BEIDE Signale - das weiche und das harte - ungeprueft an
@@ -63,7 +106,12 @@ sp_ist_dienst() {   # $1 Prozessnummer, $2 Dienstpfad
         # am 25.09.2026 in WSL, Pruefung-Sprachsteuerung-0.11.10, Fall D3).
         IFS= read -r a2 && exit 1
         case "${a0##*/}" in python|python3|python3.*) ;; *) exit 1 ;; esac
-        [ "$a1" = "$2" ]
+        # Gegen den Pfad, wie er hier zusammengesetzt ist, UND gegen den
+        # physischen (0.12.0): bin/dienst.sh startet den Dienst mit dem
+        # Pfad aus 'pwd -P'. Ist die Wurzel ein Verweis (etwa /opt/loxberry),
+        # unterschieden sich beide, und der Dienst wurde bis 0.11.15 hier
+        # nicht gefunden - er lief durch das ganze Update weiter.
+        [ "$a1" = "$2" ] || { [ -n "$SP_DIENST_P" ] && [ "$a1" = "$SP_DIENST_P" ]; }
     }
 }
 # Alle eigenen Dienste mit Skript $1, die dem Benutzer $2 gehoeren. Der
@@ -92,6 +140,10 @@ sp_dienste_beenden() {  # $1 Dienstpfad, $2 Benutzernummer
     echo $ZIEL
 }
 SP_DIENST="$BASE/bin/plugins/$PFOLDER/sprachsteuerung_dienst.py"
+# Derselbe Pfad physisch, wie ihn bin/dienst.sh (Zeile 145, 'pwd -P') dem
+# Dienst mitgibt. Leer, wenn es den Ordner nicht gibt.
+SP_PBIN_P=$(cd "$BASE/bin/plugins/$PFOLDER" 2>/dev/null && pwd -P)
+SP_DIENST_P="${SP_PBIN_P:+$SP_PBIN_P/sprachsteuerung_dienst.py}"
 SP_UID=$(id -u loxberry 2>/dev/null || id -u)
 
 PID="$BASE/data/plugins/$PFOLDER/dienst.pid"
@@ -189,7 +241,10 @@ LANG_SICHER="$BASE/data/plugins/$PFOLDER.upgrade_sicherung"
 # dem Nachzug G1 (02.10.2026, Entscheidung 1) an der Marke zurueck, ohne
 # Altersvergleich, und darf deshalb nie einen alten Bestand einspielen. Ein
 # vorhandenes .alt geht vorher weg; die Deinstallation raeumt .alt ab.
-if [ -e "$LANG_SICHER" ] || [ -L "$LANG_SICHER" ]; then
+# Ausnahme seit 0.12.0: die Wiederholung eines abgebrochenen Updates (siehe
+# SP_WIEDERHOLUNG oben). Dann IST die liegende Sicherung die aus diesem
+# Vorgang, und sie bleibt.
+if [ -z "$SP_WIEDERHOLUNG" ] && { [ -e "$LANG_SICHER" ] || [ -L "$LANG_SICHER" ]; }; then
     if [ -L "$LANG_SICHER.alt" ]; then
         rm -f "$LANG_SICHER.alt"
     elif [ -e "$LANG_SICHER.alt" ]; then
@@ -208,8 +263,14 @@ chmod 0700 "$LANG_SICHER" 2>/dev/null
 # der Marke. Bis 0.11.14 blieb eine Datei aus einem frueheren, abgebrochenen
 # Update hier liegen und kam mit zurueck; seither liegt sie unter .alt (oben)
 # und wird von Hand geholt, wenn sie gebraucht wird.
-date +%s > "$LANG_SICHER/angelegt" 2>/dev/null
+# Bei einer Wiederholung bleibt der Zeitpunkt des ersten Versuchs stehen, und
+# eine schon gesicherte Datei wird NICHT ueberschrieben: im Datenordner liegt
+# nach dem abgebrochenen Versuch hoechstens ein leerer oder neu begonnener
+# Stand. Ergaenzt wird nur, was in der Sicherung noch fehlt.
+[ -n "$SP_WIEDERHOLUNG" ] && [ -f "$LANG_SICHER/angelegt" ] \
+    || date +%s > "$LANG_SICHER/angelegt" 2>/dev/null
 for LANG_F in verlauf.json messwerte.json ansagen.json; do
+    [ -n "$SP_WIEDERHOLUNG" ] && [ -f "$LANG_SICHER/$LANG_F" ] && continue
     [ -f "$BASE/data/plugins/$PFOLDER/$LANG_F" ] \
         && cp -p "$BASE/data/plugins/$PFOLDER/$LANG_F" "$LANG_SICHER/$LANG_F" 2>/dev/null
 done
@@ -231,7 +292,10 @@ fi
 # Entscheidung 1, Nachzug G1 02.10.2026): er geht weg, bevor ueber den neuen
 # entschieden wird. Sonst startete diese Aktualisierung einen Dienst, der vorher
 # nicht lief. Er ist eine leere Datei; es geht nichts verloren.
-rm -f "$BASE/data/plugins/$PFOLDER.soll_laufen" 2>/dev/null
+# Bei einer Wiederholung (0.12.0) stammt er aus dem abgebrochenen Versuch
+# DIESES Updates - der Datenordner mit dem eigentlichen Merker ist dann schon
+# fort, und ohne den Nachbarn bliebe der Dienst nach dem Update aus.
+[ -n "$SP_WIEDERHOLUNG" ] || rm -f "$BASE/data/plugins/$PFOLDER.soll_laufen" 2>/dev/null
 if [ -e "$BASE/data/plugins/$PFOLDER/soll_laufen" ]; then
     touch "$BASE/data/plugins/$PFOLDER.soll_laufen" 2>/dev/null \
         && echo "<OK> Der Dienst lief - er wird nach dem Update wieder gestartet."
@@ -250,6 +314,41 @@ if [ -d "$BASE/data/plugins/$PFOLDER/modelle" ] \
     else
         echo "<INFO> Der Modellordner liess sich nicht beiseite schieben - die"
         echo "<INFO> Modelle werden nach dem Update neu geladen."
+    fi
+fi
+
+# ---------- Die virtuelle Python-Umgebung ----------
+# Sie liegt unter bin/plugins/<x>/venv, und purge_installation loescht
+# bin/plugins/<x>/ bei JEDEM Update (plugininstall.pl, purge_installation:
+# "rm -rfv $lbhomedir/bin/plugins/$pfolder/"). Bis 0.11.15 holte postinstall.sh
+# deshalb nach jedem Update - auch jeder Selbstaktualisierung - wyoming und
+# aioesphomeapi neu aus dem Netz. Ohne Netz scheiterte pip, postinstall.sh
+# endete mit exit 1, und der Dienst starb danach am fehlenden Paket.
+#
+# Deshalb wie die Modelle NEBEN den Datenordner: mv auf demselben
+# Dateisystem, ohne zu kopieren. postinstall.sh holt sie an GENAU denselben
+# Pfad zurueck - die Skripte in venv/bin tragen ihn als Shebang, und nur am
+# alten Ort bleiben sie gueltig. Ob sie danach noch taugt, prueft
+# postinstall.sh (Ladeprobe, Pruefsumme von bin/requirements.txt).
+#
+# Liegt schon eine beiseitegelegte venv (abgebrochenes Update), und gibt es
+# daneben eine im Plugin-Ordner, gilt die im Plugin-Ordner: mit ihr lief das
+# Plugin bis eben. Die alte geht weg - eine venv laesst sich neu anlegen, sie
+# traegt keine Daten. Fehlt die im Plugin-Ordner (Wiederholung nach dem
+# Abraeumen), bleibt die beiseitegelegte unberuehrt.
+SP_VENV="$BASE/bin/plugins/$PFOLDER/venv"
+SP_VENV_UMZUG="$BASE/data/plugins/$PFOLDER.venv_umzug"
+if [ -d "$SP_VENV" ] && [ ! -L "$SP_VENV" ]; then
+    if [ -L "$SP_VENV_UMZUG" ]; then
+        rm -f "$SP_VENV_UMZUG" 2>/dev/null
+    elif [ -e "$SP_VENV_UMZUG" ]; then
+        rm -rf "${SP_VENV_UMZUG:?}" 2>/dev/null
+    fi
+    if [ ! -e "$SP_VENV_UMZUG" ] && mv "$SP_VENV" "$SP_VENV_UMZUG" 2>/dev/null; then
+        echo "<OK> Die virtuelle Python-Umgebung ist vor dem Update in Sicherheit."
+    else
+        echo "<INFO> Die virtuelle Python-Umgebung liess sich nicht beiseite schieben - sie"
+        echo "<INFO> wird nach dem Update neu angelegt (dafuer braucht es eine Internetverbindung)."
     fi
 fi
 exit 0

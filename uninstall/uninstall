@@ -51,6 +51,12 @@
 #   5. Die zurueckbehaltenen MQTT-Themen (Abschnitt 1b). Bis 0.11.9 stand
 #      hier "Was NICHT aufgeraeumt werden muss: MQTT" - das war seit 0.11.5
 #      falsch, seither gehen Zustaende mit "retain" hinaus.
+#
+#   6. Die heruntergeladenen Modelle (seit 0.12.0, Abschnitt 4b) samt den
+#      Nachbarn <ordner>.modelle_umzug und <ordner>.venv_umzug. Die Container
+#      schreiben als root in data/plugins/<ordner>/modelle; LoxBerry loescht
+#      den Datenordner als loxberry und liess diese Dateien liegen -
+#      mehrere Gigabyte.
 
 ARGV3=$3
 ARGV5=$5
@@ -97,6 +103,12 @@ fi
 PDATA="$BASE/data/plugins/$PFOLDER"
 PBIN="$BASE/bin/plugins/$PFOLDER"
 PCONFIG="$BASE/config/plugins"
+# Der Dienstpfad zusaetzlich physisch (0.12.0): bin/dienst.sh startet den
+# Dienst mit dem Pfad aus 'pwd -P'. Ist die Wurzel ein Verweis (etwa
+# die LoxBerry-Wurzel selbst), unterschied sich das vom zusammengesetzten Pfad, und der
+# Dienst wurde hier nicht gefunden - er lief nach der Deinstallation weiter.
+SP_PBIN_P=$(cd "$PBIN" 2>/dev/null && pwd -P)
+SP_DIENST_P="${SP_PBIN_P:+$SP_PBIN_P/sprachsteuerung_dienst.py}"
 # Der Benutzer, dem der Dienst gehoert. bin/dienst.sh steigt vor allem
 # anderen auf loxberry ab (Zeile 41) - der Dienst laeuft also nie als root,
 # auch wenn dieses Skript als root aufgerufen wird. Wo es den Benutzer nicht
@@ -129,7 +141,8 @@ ist_unser_dienst() {
         # am 25.09.2026 in WSL, Pruefung-Sprachsteuerung-0.11.10, Fall D5).
         IFS= read -r a2 && exit 1
         case "${a0##*/}" in python|python3|python3.*) ;; *) exit 1 ;; esac
-        [ "$a1" = "$PBIN/sprachsteuerung_dienst.py" ]
+        [ "$a1" = "$PBIN/sprachsteuerung_dienst.py" ] \
+            || { [ -n "$SP_DIENST_P" ] && [ "$a1" = "$SP_DIENST_P" ]; }
     }
 }
 
@@ -270,27 +283,30 @@ fi
 # ---------------------------------------------------------------
 # Bis 0.11.10 blieben die Container ABSICHTLICH stehen, mit der Begruendung,
 # in ihren Datenordnern laegen die Modelle. Die liegen aber unter
-# data/plugins/<ordner>/modelle, und diesen Ordner raeumt LoxBerry beim
-# Deinstallieren ohnehin ab (plugininstall.pl, purge_installation - Regeln/06).
-# Zurueck blieben laufende Container, die auf einen geloeschten Ordner zeigten
-# und ihren Port weiter belegten.
+# data/plugins/<ordner>/modelle (plugininstall.pl, purge_installation -
+# Regeln/06). Zurueck blieben laufende Container, die auf einen geloeschten
+# Ordner zeigten und ihren Port weiter belegten. Dass LoxBerry den Modellordner
+# "ohnehin abraeumt", stimmte nur fuer den Teil, der loxberry gehoert - den
+# Rest entfernt seit 0.12.0 Abschnitt 4b.
 #
 # Entfernt wird NUR, was diesem Plugin gehoert: ein Container mit beiden
 # Labels de.loxberry.plugin.folder=<ordner> und de.loxberry.plugin.name=
-# sprachsteuerung, oder Altbestand ohne diese Labels, der genau
+# sprachsteuerung - ganz gleich, wie er heisst, also auch <ordner>-<dienst>
+# einer Zweitinstallation (die Labels sucht sp_ct_deinstallieren() eigens mit
+# "docker ps --filter label=..."), oder Altbestand ohne diese Labels, der genau
 # sprachsteuerung-<dienst> heisst UND aus dem Abbild aus templates/modelle.json
 # stammt. Die Entscheidung trifft dieselbe Bibliothek wie die Oberflaeche
 # (sp_ct_deinstallieren() ueber bin/container_vorgang.php), damit es nur EINE
 # Regel gibt. Jeder docker-Aufruf darin hat seine Zeitgrenze; dazu kommt hier
 # eine fuer den ganzen Schritt. Als root: der Gruppenzugang von loxberry wirkt
 # erst nach einem Neustart (postroot.sh), root braucht ihn nicht.
-# Der Modellordner wird hier nicht angefasst.
+# Der Modellordner folgt in Abschnitt 4b, NACH den Containern.
 if ! command -v docker >/dev/null 2>&1; then
     echo "<INFO> Docker ist nicht installiert - es gibt keine Container dieses Plugins zu entfernen."
 elif ! command -v php >/dev/null 2>&1 || [ ! -f "$PBIN/container_vorgang.php" ]; then
     echo "<WARNING> php oder bin/container_vorgang.php fehlt - die Container dieses Plugins wurden NICHT entfernt."
     echo "<WARNING> Von Hand nachsehen: docker ps -a --filter label=de.loxberry.plugin.folder=$PFOLDER"
-    echo "<WARNING> und nach Containern mit dem Namen sprachsteuerung-whisper, -piper, -wakeword, -llm."
+    echo "<WARNING> und nach Containern mit dem Namen $PFOLDER-whisper, -piper, -wakeword, -llm."
 else
     env "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PFOLDER" timeout -k 5 300 \
         php "$PBIN/container_vorgang.php" deinstallieren < /dev/null 2>&1
@@ -302,8 +318,86 @@ else
         echo "<WARNING> Nicht jeder Container dieses Plugins liess sich entfernen (Rueckgabewert $CT_RC) - siehe oben."
     fi
 fi
-echo "<INFO> Die heruntergeladenen Modelle liegen unter data/plugins/$PFOLDER/modelle;"
-echo "<INFO> dieses Skript fasst sie nicht an, LoxBerry entfernt sie mit dem Datenordner."
+
+# ---------------------------------------------------------------
+# 4b. Die heruntergeladenen Modelle (seit 0.12.0)
+# ---------------------------------------------------------------
+# Die Container haengen data/plugins/<ordner>/modelle/<dienst> ein und
+# schreiben als root hinein; fehlte der Ordner beim Anlegen, hat ihn der
+# Docker-Dienst selbst als root angelegt. purge_installation loescht danach
+# als loxberry ("sudo -n -u loxberry rm -rfv .../data/plugins/<ordner>/") -
+# was root gehoert, blieb liegen. Bis 0.11.15 stand hier, LoxBerry entferne die
+# Modelle mit dem Datenordner; zurueck blieben Gigabyte, die keinem Plugin
+# mehr gehoerten. Dieses Skript laeuft als root und raeumt sie selbst ab,
+# NACH den Containern (Abschnitt 4), damit keiner mehr hineinschreibt.
+# Dazu die beiden Nachbarn, die nur ein abgebrochenes Update hinterlaesst:
+# <ordner>.modelle_umzug und <ordner>.venv_umzug (preupgrade.sh).
+#
+# Mit root wird nur geloescht, was sich zweifelsfrei zuordnen laesst: der
+# Ordnername ohne Pfadtrenner und ohne "..", die Wurzel mit
+# config/system/general.json (Regeln/06), kein Verweis auf dem Weg - ein
+# Verweis wird als Verweis entfernt, sein Ziel bleibt.
+sp_raeumen_erlaubt() {
+    case "$PFOLDER" in ''|.|*/*|*..*) return 1 ;; esac
+    [ -f "$BASE/config/system/general.json" ] && [ -d "$BASE/data/plugins" ]
+}
+sp_ordner_entfernen() {   # $1 Pfad, $2 Bezeichnung
+    if [ -L "$1" ]; then
+        rm -f "$1" && echo "<OK> Verweis entfernt: $2"
+        return 0
+    fi
+    [ -d "$1" ] || return 0
+    SP_MB=$(timeout -k 5 60 du -sm "$1" 2>/dev/null | cut -f1)
+    rm -rf "${1:?}" 2>/dev/null
+    if [ -e "$1" ]; then
+        echo "<WARNING> $2 liess sich nicht vollstaendig entfernen: $1"
+    else
+        echo "<OK> $2 entfernt${SP_MB:+ (rund $SP_MB MB)}."
+    fi
+}
+if ! sp_raeumen_erlaubt; then
+    echo "<WARNING> Ordnername '$PFOLDER' oder Wurzel '$BASE' nicht eindeutig - die Modelle wurden NICHT entfernt."
+    echo "<WARNING> Von Hand nachsehen: data/plugins/$PFOLDER/modelle unter der LoxBerry-Wurzel."
+else
+    if [ -L "$PDATA" ]; then
+        echo "<WARNING> $PDATA ist ein Verweis - der Modellordner darin wurde NICHT entfernt."
+    else
+        sp_ordner_entfernen "$PDATA/modelle" "Heruntergeladene Modelle ($PFOLDER/modelle)"
+    fi
+    sp_ordner_entfernen "$BASE/data/plugins/$PFOLDER.modelle_umzug" "Beiseitegelegte Modelle ($PFOLDER.modelle_umzug)"
+    sp_ordner_entfernen "$BASE/data/plugins/$PFOLDER.venv_umzug" "Beiseitegelegte Python-Umgebung ($PFOLDER.venv_umzug)"
+fi
+
+# ---------------------------------------------------------------
+# 4c. Die Abbilder der Sprachdienste (seit 0.12.0)
+# ---------------------------------------------------------------
+# Nur die vier aus templates/modelle.json, und mit "docker image rm" OHNE -f:
+# Docker verweigert das Entfernen, solange irgendein Container - auch ein
+# angehaltener, auch einer einer Zweitinstallation oder ein fremder - das
+# Abbild benutzt. Dann bleibt es, und das Protokoll sagt es. Jeder Aufruf mit
+# Zeitgrenze, wie alle docker-Aufrufe dieses Plugins.
+SP_TAB="$BASE/templates/plugins/$PFOLDER/modelle.json"
+if command -v docker >/dev/null 2>&1 && [ -f "$SP_TAB" ] && command -v python3 >/dev/null 2>&1; then
+    SP_ABBILDER=$(python3 -c 'import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+    for v in (d.get("dienste") or {}).values():
+        a = str((v or {}).get("abbild") or "").strip()
+        if a:
+            print(a)
+except Exception:
+    pass' "$SP_TAB" 2>/dev/null)
+    for SP_A in $SP_ABBILDER; do
+        # Nur ein Abbildname, keine Schalter oder Sonderzeichen.
+        case "$SP_A" in -*|*[!A-Za-z0-9._/:@-]*) continue ;; esac
+        timeout -k 5 30 docker image inspect "$SP_A" >/dev/null 2>&1 || continue
+        if SP_AUS=$(timeout -k 5 120 docker image rm "$SP_A" 2>&1); then
+            echo "<OK> Abbild entfernt: $SP_A"
+        else
+            echo "<INFO> Abbild $SP_A bleibt: $(printf '%s\n' "$SP_AUS" | tail -n 1 | cut -c1-200)"
+        fi
+    done
+fi
 
 # ---------------------------------------------------------------
 # 5. Was bleibt, wird gesagt

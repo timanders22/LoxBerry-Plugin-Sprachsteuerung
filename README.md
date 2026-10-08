@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.11.15
+Version 0.12.1
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,101 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.12.0
+
+Durchgang über das ganze Plugin: alle Befunde der Prüfung vom 03.10.2026 behoben, dazu
+Erweiterungen im Zusammenspiel mit anderen Plugins. Gemessen gegen Attrappen mit den
+Originalpaketen (wyoming 1.10.2, wyoming-satellite 1.0.0, aioesphomeapi 46.6.0, ESPHome-Firmware
+2026.6.5 im Quelltext), einen echten MQTT-Broker (amqtt), den Installer-Ablauf aus
+`plugininstall.pl` und unter PHP 8.3; **nicht am Gerät**, nicht unter PHP 7.4/8.5.
+
+### Mikrofone: beide Wege konnten keinen Satz verarbeiten
+
+* **ESPHome:** Die Verbindung brach alle ~5 s ab (`klient.connected` gibt es in aioesphomeapi
+  nicht), und jedes Audio wurde als „Abbruch“ verworfen (die Firmware meldet das reguläre Ende
+  über `handle_stop(True)`). Beides behoben; der Puffer ist auf 30 s begrenzt.
+* **Sprachende auf dem Server:** wyoming-satellite schickt kein `AudioStop` und wartet auf ein
+  `Transcript`, Weckwort-Geräte wie Voice PE auf `STT_VAD_END`. Der Dienst erkennt das Ende des
+  Sprechens jetzt selbst (Pegel, 0,8 s Stille, höchstens 15 s), schickt die Abschrift zurück und
+  kehrt zum Weckwort zurück. Bisher streamte ein Satellit nach dem ersten Weckwort endlos.
+* Der Wortwecker auf dem Server wurde nie angesprochen (Vergleich mit `PipelineStage` war nie
+  wahr). Das Weckwort `ok_nabu` heißt in openWakeWord 2.x `okay_nabu` – beide gelten.
+* Kein Abbau mehr alle 90 s im Leerlauf (wyoming-satellite antwortet nicht auf `ping`;
+  stattdessen TCP-Keepalive), 24/32 Bit und Stereo werden umgerechnet, Stille und bekannte
+  Whisper-Halluzinationen („Untertitel im Auftrag des ZDF“) lösen nichts aus.
+* Rückfrage (Bestätigung) ohne neues Weckwort; ESPHome-Geräte mit Timer-Anzeige zeigen Timer.
+* **Probehören einer Stimme** scheiterte immer (doppelt definierte Funktion) – behoben.
+
+### Deutung
+
+* Ziele treffen nur als ganzes Wort: „mach den Motor an“ schaltete bisher das Garagentor
+  (Alias „tor“), „mach das Wohnzimmer klein“ schaltete ein. **Zusammengesetzte Wörter wie
+  „Wohnzimmerlampe“ brauchen jetzt einen Alias.**
+* Zeitangaben werden nie mehr verschluckt: „in eineinhalb Stunden“, „in einer halben Stunde“,
+  „in 2 Stunden und 30 Minuten“, „um 22 Uhr“, „morgen um 7“, „schalte in 10 Minuten das
+  Wohnzimmer aus“ werden vorgemerkt; eine Zeitangabe, die keine Regel trägt, wird nachgefragt
+  statt sofort geschaltet. Bisher lief der Befehl in all diesen Fällen sofort.
+* „Mach das Licht an“ nimmt den Raum des Mikrofons; Verneinung („nicht“) wird abgewiesen;
+  Dezimalzahlen („21,5“), Zahlwörter bis 999, Grad-Regel, Grenzen je Ziel (`min`/`max`).
+* **Neu:** mehrere Befehle in einem Satz („mach die Küche aus und das Wohnzimmer an“), wenn
+  jeder Teil eindeutig ist; relative Befehle („heller“, „zwei Grad wärmer“; Ziel-Feld `schritt`);
+  Timer-Verwaltung („welche Timer laufen“, „Timer abbrechen“) und Erinnerungen („erinnere mich
+  in 10 Minuten an …“). Diese Regeln sind eingebaut und gelten auch mit einer älteren Satzdatei.
+* Eine Frage („wie warm ist es …“) schaltet nichts mehr; die Antwort des Sprachmodells wird
+  gegen feste Listen und die Zielliste geprüft (Schema, Zeitgrenze 20 s) und hält die übrigen
+  Mikrofone nicht mehr auf.
+
+### Miniserver und Loxone
+
+* `http://benutzer:kennwort@…` funktionierte nie (urllib) – jetzt als Basic-Anmeldung; Umlaute
+  und Leerzeichen in Namen virtueller Eingänge werden kodiert. **Neu:** `ms://1/dev/sps/io/…`
+  nimmt Adresse und Zugangsdaten des Miniservers aus der LoxBerry-Konfiguration; der
+  Loxone-Import wählt den Miniserver ebenfalls aus LoxBerry und übernimmt UUID und Lesepfad.
+* Istwerte aus Loxone-JSON, Fehlercodes werden erkannt (bisher „1,0 Grad“ aus dem XML-Kopf).
+* Die Zielvorlage ist jetzt `VIU_Sprachsteuerung_Ziele.xml` (virtueller UDP-Eingang passend zum
+  MQTT-Gateway); die alte HTTP-Vorlage bekam nie einen Wert. Vorlagen nennen die LAN-Adresse
+  des LoxBerry statt der Adresse, über die der Browser die Seite geöffnet hat.
+* Endpunkt-Probe und Loxone-Import scheiterten unter PHP < 8.4 immer (Statuscode 0) – behoben.
+
+### Zusammenspiel mit anderen Plugins
+
+* **Neue Ausgabeart Sonos4Lox** (Zone, Lautstärke; `dringend` wird als `urgent` weitergereicht).
+* **Ausgabe je Raum:** je Mikrofon eigenes Alexa-Gerät, Google-Gerät, Chromecast4lox-Ziel oder
+  Sonos-Zone – die Antwort kommt im Raum, in dem gefragt wurde.
+* **Neu, ab Werk aus: dauerhafte MQTT-Verbindung** – Befehle über `<präfix>/cmd/sprechen`,
+  `/cmd/satz`, `/cmd/ruhe`; Zustand je Mikrofon, Ergebnis jeder Ansage, Letzter Wille
+  `<präfix>/online`; Werte lesen über `url_lesen: "mqtt:<thema>"`. Das MQTT-Gateway (Fassung 1)
+  bekommt das Abo `<präfix>/#` über `mqtt_subscriptions.cfg`.
+* **Neu, ab Werk aus:** Musik am Loxone Music Server leiser drehen, solange zugehört wird, und
+  per Sprache steuern („lauter“, „Pause“, „nächster Titel“). MusicServer4Home kennt diese
+  Schnittstelle nicht.
+* Alexa-NG und Chromecast 4 Lox NG: Ordner und Fassung über die Plugin-Datenbank, `dringend`
+  wird weitergereicht, strenge Erfolgsprüfung (`SPRECHEN;OK=1`), Umleitung auf https-Loopback.
+* Docker NG: Container mit Ressourcengrenzen (CPU, Speicher, Prozesse), Protokoll höchstens
+  2 × 10 MB, feste Abbild-Fassungen, eigener Port je Dienst, Erkennung fremder Dienste auf dem
+  Port; **neu, ab Werk aus:** eigenen Container nach drei Fehlschlägen neu starten.
+* Die **Wiederholungsbremse** gilt nur noch für Ansagen aus Loxone, nicht für Antworten im
+  Gespräch; scheitert eine externe Ausgabe, sprechen in jedem Modus die Sprachgeräte.
+
+### Installation, Betrieb, Sicherheit
+
+* Die venv übersteht jedes Update (bisher bei jedem Autoupdate neu von PyPI – ohne Netz blieb
+  der Dienst danach aus); Paketfassungen fest (`bin/requirements*.txt`).
+* **Die Deinstallation entfernt jetzt Modelle und Abbilder** (bisher blieben mehrere GB als
+  root liegen). Wer zur Reparatur deinstalliert und neu installiert, lädt sie neu.
+* Wächter läuft auch ohne Log-Ordner; `start.log` wird gekappt; ein abgebrochenes Update lässt
+  sich wiederholen, ohne Verlauf und Sollzustand zu verlieren; Dienst mit niedrigerer Priorität.
+* Eine kaputte Konfiguration (Komma, BOM) wird nicht mehr mit Vorgaben überschrieben.
+* Formularmerkmal aus eigenem Geheimnis statt aus dem Aktionstoken; Endpunkt nimmt das Token
+  auch per POST-Feld `token` oder Kopf `X-Token`; Heimnetz-Prüfung der Ansage-Adressen dicht;
+  eingespielte Sicherungen werden wie das Formular geprüft.
+* Oberfläche: Speichern der Ziele verliert keine Felder mehr, „Probehören“ speichert nicht mit,
+  Eingaben kommen nach jeder Beanstandung zurück, Verlauf im Reiter Test lädt live nach, die
+  letzten fünf Stände der Satzdatei lassen sich zurückholen.
+
+**In Loxone:** Wer die Zielvorlage verwendet, importiert `VIU_Sprachsteuerung_Ziele.xml` neu.
+Sonst nichts zu tun.
 
 ## Neu in 0.11.15
 
@@ -41,7 +136,7 @@ Gemessen im Installer-Prüfstand (WSL, ohne Netz); nicht am Gerät.
 * **Zurückgespielt wird nur bei einer Aktualisierung,** erkannt allein an der Upgrade-Marke, ohne Altersvergleich. Bisher galt eine Aktualisierung, die länger als eine Stunde brauchte, als „nicht aus diesem Vorgang“. Verlauf, Messreihe und Ansagezeiten kamen dann nicht zurück. Ab dieser Fassung entscheidet die Marke; die Angaben zu „höchstens eine Stunde alt“ unter 0.11.7 beschreiben das frühere Verhalten.
 * **Dienst startet nicht ungefragt:** Der Merker „der Dienst lief vor dem Update“ zählt nur noch bei einer Aktualisierung. Bisher startete ein liegengebliebener Merker den Dienst nach einer Neuinstallation ungefragt. Dasselbe geschah nach einer Aktualisierung, vor der der Dienst gar nicht lief. `preupgrade.sh` entfernt einen alten Merker und legt eine alte Sicherung der Langzeitwerte nach `.alt`.
 * **Deinstallation** räumt die `.alt`-Dateien und den Merker mit ab.
-* Die heruntergeladenen Sprachmodelle werden bei einer Neuinstallation weiter benutzt.
+* Die heruntergeladenen Sprachmodelle werden bei einer Neuinstallation weiter benutzt (seit 0.12.0 entfernt die Deinstallation sie).
 
 ## Neu in 0.11.13
 
@@ -905,15 +1000,21 @@ austauschbar.
 
 | Container | Abbild | Port | nötig? |
 |---|---|---|---|
-| Spracherkennung | `rhasspy/wyoming-whisper` | 10300 | ja |
-| Sprachausgabe | `rhasspy/wyoming-piper` | 10200 | für Antworten |
-| Wortwecker | `rhasspy/wyoming-openwakeword` | 10400 | nur für Mikrofone ohne eigenen |
-| Sprachmodell | `ghcr.io/ggml-org/llama.cpp:server` | 8080 | nein |
+| Spracherkennung | `rhasspy/wyoming-whisper:3.8.1` | 10300 | ja |
+| Sprachausgabe | `rhasspy/wyoming-piper:2.5.2` | 10200 | für Antworten |
+| Wortwecker | `rhasspy/wyoming-openwakeword:2.1.0` | 10400 | nur für Mikrofone ohne eigenen |
+| Sprachmodell | `ghcr.io/ggml-org/llama.cpp:server-b11371` | 8080 | nein |
+
+Die Fassungen stehen fest in `templates/modelle.json` und ändern sich nur mit
+einer Fassung des Plugins. Der Port außen ist der in den Einstellungen; jeder
+Container hat Grenzen für CPU, Speicher und Prozesse und höchstens 2 × 10 MB
+Protokoll.
 
 Im Reiter *Dienste* richtet **ein Knopf** alles ein: „Sprachdienste
 einrichten“ holt die Abbilder, legt die Container passend zur Hardware an und
 startet sie — im Hintergrund, die Seite zeigt Schritt und Dauer und je Dienst
-eine Ampel (Abbild da / Container läuft / Port antwortet). Das Sprachmodell
+eine Ampel (Abbild da / Container läuft / der richtige Dienst antwortet – ein
+fremder Dienst auf dem Port wird erkannt). Das Sprachmodell
 wird nur angelegt, wenn es in den Einstellungen eingeschaltet ist. Anhalten,
 Starten, Entfernen und das Protokoll je Container stehen unter *Einzeln
 verwalten*. Die Container werden **ohne** `--network=host` angelegt und binden
@@ -943,9 +1044,10 @@ Maßgeblich ist `templates/modelle.json`, nicht diese Tabelle — sie ist eine
 Abschrift. Weichen beide ab, gilt die Datei. Gemeint ist der **gesamte**
 Arbeitsspeicher, und es gilt die erste Stufe, deren Schwelle **erreicht** ist.
 
-Eine erkannte Grafikkarte hebt die Stufe um eins; erkannt wird sie über
-`nvidia-smi`, AMD und Intel zählen also nicht. Ohne 64 Bit oder mit weniger
-als zwei Kernen gibt es keine Empfehlung für ein Sprachmodell.
+Eine erkannte Grafikkarte wird angezeigt, hebt die Stufe aber nicht: die
+Container sind CPU-Fassungen. Kerne und Speicher werden mit den Grenzen eines
+Containers bzw. LXC gelesen. Ohne 64-Bit-Userland gibt es keine Container,
+mit weniger als zwei Kernen keine Empfehlung für ein Sprachmodell.
 
 ### Die Dienste auf einem anderen Rechner betreiben
 
@@ -1015,6 +1117,16 @@ das Wohnzimmer in 10 Minuten aus", und der Befehl wäre dann sofort ausgeführt
 statt vorgemerkt. Der Selbsttest prüft das und nennt die verdeckte Regel beim
 Namen.
 
+Seit 0.12.0 treffen Zielnamen und feste Wörter nur als **ganzes Wort**
+(„Motor“ trifft das Ziel „tor“ nicht mehr; „Wohnzimmerlampe“ braucht einen
+Alias). Steht eine Zeitangabe im Satz, die keine Regel mit `{dauer}` aufnimmt,
+fragt die Anlage nach, statt sofort zu schalten. Verneinungen werden
+abgewiesen. Ziele dürfen `min`, `max` und `schritt` tragen; Adressen dürfen
+`ms://<nr>/…` (Miniserver aus LoxBerry) und `url_lesen` zusätzlich
+`mqtt:<thema>` sein. Timer-Verwaltung, Erinnerungen, relative Befehle und
+mehrere Befehle in einem Satz sind eingebaut und brauchen keine Regel in der
+Satzdatei.
+
 Passt kein Muster **und** ist das Sprachmodell eingeschaltet, wird es gefragt.
 Es muss reines JSON antworten und darf nur Ziele nennen, die in der Liste
 stehen — erfundene werden verworfen. Die Muster gehen immer vor: sie sind
@@ -1042,6 +1154,7 @@ Im Reiter *Einstellungen* wählt **Art der Audioausgabe** ein weiteres Gerät,
 | Chromecast4lox | MQTT `<cc-präfix>/<lautsprecher>/cmd/tts`, QoS 1, nicht zurückbehalten, Nutzlast = Text | Themenpräfix (ab Werk `chromecast4lox`), Ziel-Lautsprecher oder `alle`; die Lautstärke stellt Chromecast4lox ein |
 | Alexa-NG (eigenes Plugin) | `POST http://127.0.0.1:<Webport>/plugins/alexang/index.php`, `aktion=sprechen` | Gerät (leer = Standardgerät), Sprechtoken, Lautstärke (leer = unverändert) |
 | Google-Lautsprecher (Chromecast 4 Lox NG) | `POST http://127.0.0.1:<Webport>/plugins/chromecast-4lox-ng/index.php`, `aktion=sprechen` (ab Chromecast 4 Lox NG 1.3.15) | Gerät (leer = Standardgerät), eigenes Sprechtoken, Lautstärke (leer = Ansagelautstärke) |
+| Sonos4Lox (eigenes Plugin) | `GET http://127.0.0.1:<Webport>/plugins/sonos4lox/index.php?zone=…&action=say&text=…` | Zone, Lautstärke (leer = unverändert) |
 | Eigene Vorlage | URL mit `{ip} {port} {zones} {vol} {lang} {text}` – darüber auch eine vorhandene Alexa-Brücke (Home Assistant, Node-RED) | Vorlage |
 
 **Fällt das Ziel aus, bleibt der bisherige Weg.** Chromecast4lox gilt als da,
@@ -1051,8 +1164,15 @@ binnen 10 s `…/tts_active` auf `1` geht. Alexa-NG muss mit `SPRECHEN;OK=1`
 antworten. Sonst sprechen die Lautsprecher der Sprachgeräte – auch beim
 Antwortweg *nur Loxone* –, das Plugin-Protokoll und eine Benachrichtigung
 nennen den Grund, und der Reiter *Test* zeigt die Zeile *Zusätzliche
-Ansage* samt Ergebnis der letzten Ansage. Ruhezeit und Wiederholungsbremse
-gelten für alle Wege und sind kein Ausfall.
+Ansage* samt Ergebnis der letzten Ansage. Die Ruhezeit gilt für alle Wege,
+die Wiederholungsbremse seit 0.12.0 nur für Ansagen aus Loxone; beide sind
+kein Ausfall. Sonos4Lox antwortet erst nach der Wiedergabe und meldet keinen
+Erfolg; dauert es länger als 30 s, gilt die Ansage als „gesendet, Ausgang
+unklar“ – ohne Rückfall, sonst käme sie doppelt.
+
+Je Mikrofon lassen sich Alexa-Gerät, Google-Gerät, Chromecast4lox-Ziel und
+Sonos-Zone überschreiben (*Mikrofone* → *Ausgabe dieses Raums*); Antworten
+gehen dann dorthin, wo gefragt wurde.
 
 Über Chromecast4lox geht die Ansage absichtlich **nicht** über dessen
 UDP-Eingang: der trennt an `;`, und ein Lautsprechername mit Leerzeichen
@@ -1114,8 +1234,14 @@ Länge des Textes), in der Sicherung oder in einer Benachrichtigung.
     templates/saetze_de.json  Satzmuster und Ziele, deutsch
     templates/saetze_en.json  dasselbe auf englisch - postinstall.sh waehlt
                               nach der Oberflaechensprache
+    bin/requirements.txt      feste Paketfassungen der venv (dazu
+                              requirements-esphome.txt, freiwillig)
+    dpkg/apt                  python3-venv
     webfrontend/htmlauth/     Oberfläche (acht Reiter)
-    webfrontend/html/         Endpunkt für den Miniserver + Bibliothek
+    webfrontend/html/         Endpunkt für den Miniserver, Bibliothek,
+                              sp_pruefen.php (Feldregeln für Formular und
+                              Sicherung), sprachausgabe.php (gemeinsame
+                              Sprachausgabe)
 
 Die beiden Sprachdateien werden **erzeugt**, nicht von Hand gepflegt:
 `Werkzeuge/sp_sprache_erzeugen.py` hält jeden Text einmal, deutsch und englisch
@@ -1140,19 +1266,25 @@ liefert 3.11.
 - Keine Zugangsdaten auf der Kommandozeile — sie stünden in der Prozessliste.
 - Der Endpunkt im unangemeldeten Bereich hat eine **Positivliste** erlaubter
   Aktionen; das Token wird mit `hash_equals` verglichen, und `?selftest=1`
-  beantwortet die Tokenfrage, ohne etwas auszulösen.
+  beantwortet die Tokenfrage, ohne etwas auszulösen. Seit 0.12.0 nimmt er das
+  Token auch per POST-Feld `token` oder Kopf `X-Token` (dann steht es in keinem
+  Zugriffsprotokoll) und antwortet mit `Cache-Control: no-store`.
 - **Der Endpunkt schreibt nichts.** Auch ein abgewiesener Aufruf legt keine
   Datei an; alles Schreibende macht der Dienst über die Warteschlange.
 - Jedes Formular der Oberfläche trägt ein **Merkmal gegen fremde Absender**,
-  abgeleitet aus dem Aktionstoken. Eine Prüfzeile im Reiter Test zählt nach, ob
+  seit 0.12.0 abgeleitet aus einem eigenen Geheimnis (`formgeheimnis`, 0600),
+  nicht mehr allein aus dem Aktionstoken, das im LAN mitlesbar ist. Eine Prüfzeile im Reiter Test zählt nach, ob
   wirklich jedes es hat.
 - Eingaben, die nicht zum Muster passen, werden **abgelehnt und benannt**, nie
   stillschweigend zurechtgebogen.
 - Die Container-Ports hören nur auf `127.0.0.1`.
 - Die Sicherungsdatei enthält **weder Token noch Miniserver-Adresse noch
   Mikrofon-Schlüssel noch die Sprechtoken für Alexa-NG und Chromecast 4 Lox
-  NG**. Eine Sicherung, die ein Sprechtoken für Chromecast 4 Lox NG trägt,
-  wird abgewiesen.
+  NG**. Eine Sicherung, die ein Sprechtoken trägt, wird abgewiesen; jede
+  eingespielte Sicherung wird mit denselben Regeln geprüft wie das Formular.
+- Ansage-Adressen gehen nur ins Heimnetz: Benutzerdaten in der Adresse und
+  Zahlformen wie `134744072` (= 8.8.8.8) werden abgewiesen, auch auf dem Weg
+  des Dienstes über die Brücke.
 
 ## Was ungeprüft bleibt
 
@@ -1189,6 +1321,13 @@ steht weiterhin kein Mikrofon und kein Container.
 * **Die Ansage über Google-Lautsprecher (Chromecast 4 Lox NG).** Gemessen
   gegen eine Attrappe des Endpunkts und gegen dessen echten Endpunkt mit dem
   Dienst gegen eine Lautsprecher-Attrappe, nicht an echten Lautsprechern.
+
+* **Neu in 0.12.0 und nur gegen Attrappen gemessen:** die Schwellen der
+  Sprachende-Erkennung (Pegel, 0,8 s Stille) an einem echten Mikrofon im Raum;
+  Sonos4Lox und der Loxone Music Server (Pfade nach Doku und Nachbauten, kein
+  echter Server); ESPHome-Timer an echter Firmware; der Container-Neustart an
+  echtem Docker; die Dauerverbindung an mosquitto (gemessen mit amqtt); der
+  Import von `VIU_Sprachsteuerung_Ziele.xml` in Loxone Config; PHP 7.4 und 8.5.
 
 **Seit 0.11.5 nicht mehr auf dieser Liste:** `retain` am laufenden
 MQTT-Gateway. Am Gerät gemessen am 13.09.2026 — der UDP-Eingang nimmt das

@@ -74,5 +74,45 @@ if [ -f "$PDATA_ALT/zustand.json" ]; then
     echo "<OK> Nicht mehr benutzte zustand.json entfernt."
 fi
 
+# ---------- Kurzer Selbsttest nach dem Update (0.12.0) ----------
+# Laedt die venv wyoming, und ist der Dienst als Python lesbar? Seit 0.12.0
+# uebersteht die venv das Update (preupgrade.sh/postinstall.sh); scheitert
+# trotzdem etwas, startet der Waechter danach einen Dienst, der sofort am
+# fehlenden Paket stirbt - und das Installationsprotokoll liest nach einer
+# Selbstaktualisierung niemand. Deshalb zusaetzlich eine Benachrichtigung im
+# LoxBerry (bin/sp_notify.php, Aufruf: <Schwere> <Text> <Ordner>; 3 = Fehler).
+# Bewusst KEIN --selbsttest des Dienstes: der fragt auch Sprachdienste und
+# Mikrofone ab, und deren Lage hat mit dem Update nichts zu tun.
+# Der Dienst wird nur gelesen (ast.parse), nicht geladen - beim Laden liefe
+# sein Hauptteil an.
+SP_PY="$PBIN/venv/bin/python3"
+SP_TEST=""
+if [ ! -x "$SP_PY" ]; then
+    SP_TEST="Die virtuelle Python-Umgebung fehlt ($PBIN/venv)."
+elif ! SP_AUS=$(PYTHONDONTWRITEBYTECODE=1 timeout -k 5 60 "$SP_PY" -c 'import wyoming' 2>&1); then
+    SP_TEST="wyoming laesst sich nicht laden: $(printf '%s\n' "$SP_AUS" | tail -n 1 | cut -c1-200)"
+elif [ ! -f "$PBIN/sprachsteuerung_dienst.py" ]; then
+    SP_TEST="bin/sprachsteuerung_dienst.py fehlt."
+elif ! SP_AUS=$(PYTHONDONTWRITEBYTECODE=1 timeout -k 5 60 "$SP_PY" -c 'import ast, sys
+ast.parse(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1])' "$PBIN/sprachsteuerung_dienst.py" 2>&1); then
+    SP_TEST="bin/sprachsteuerung_dienst.py ist nicht lesbar: $(printf '%s\n' "$SP_AUS" | tail -n 1 | cut -c1-200)"
+fi
+if [ -z "$SP_TEST" ]; then
+    echo "<OK> Selbsttest nach dem Update: die virtuelle Umgebung laedt wyoming, der Dienst ist lesbar."
+else
+    echo "<WARNING> Selbsttest nach dem Update gescheitert: $SP_TEST"
+    echo "<INFO> Der Dienst kann so nicht starten. Abhilfe: das Plugin mit Internetverbindung erneut installieren."
+    if command -v php >/dev/null 2>&1 && [ -f "$PBIN/sp_notify.php" ]; then
+        if env "LBHOMEDIR=$BASE" "LBPPLUGINDIR=$PFOLDER" timeout -k 5 30 \
+               php "$PBIN/sp_notify.php" 3 \
+               "Nach dem Update kann der Sprachdienst nicht starten: $SP_TEST - Bitte das Plugin mit Internetverbindung erneut installieren." \
+               "$PFOLDER" < /dev/null >/dev/null 2>&1; then
+            echo "<INFO> Eine Benachrichtigung im LoxBerry wurde abgelegt."
+        else
+            echo "<INFO> Die Benachrichtigung im LoxBerry liess sich nicht ablegen."
+        fi
+    fi
+fi
+
 echo "<OK> postupgrade abgeschlossen."
 exit 0
