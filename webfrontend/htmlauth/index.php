@@ -1889,7 +1889,7 @@ $sp_mm = function ($feld, $min, $max) {
 
 <!-- ================= Reiter: Einstellungen ================= -->
 <div class="sm-seite<?= $sp_tab === 'tab-settings' ? ' sm-active' : '' ?>" id="tab-settings">
-<div class="sm-warnung"><?= sp_t('EINST.WAS_IST_DAS') ?></div>
+<div class="sm-hinweis"><?= sp_t('EINST.WAS_IST_DAS') ?></div>
 
 <h2><?= sp_e(sp_t('EINST.H_DIENST')) ?></h2>
 <p class="sm-hilfe"><?= sp_t('EINST.DIENST_ERKLAERUNG') ?></p>
