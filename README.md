@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.12.3
+Version 0.12.4
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,20 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.12.4
+
+Baustein-Liste in der Schreibweise des Leitungswerkzeugs, gemeinsame Sprachausgabe 1.1.2.
+
+* **Baustein-Liste (Reiter Einbindung in Loxone):** Die Spalte „Eingänge verbinden mit“ nennt die
+  Quellen in fester Form: `#13` statt „I ← #13“, `I1 = #6, I2 = #4` statt „I1 ← #6, I2 ← #4“,
+  an der Beleuchtungssteuerung `AI = #8, AUS = #9`. Was aus der eigenen Anlage kommt (das Ereignis,
+  der Nachtmerker), bleibt in Worten. Gleiche Bausteine, gleiche Verbindungen.
+* **Sprachausgabe 1.1.2:** gemeinsames Modul in der Fassung 1.1.2. Die Sprachsteuerung benutzt daraus
+  nur Funktionen ohne Sätze (Webport, Gerätenamen, Aufrufe, Prüfungen) und führt ihre Texte selbst;
+  neu ist für sie nur die Zeichenzahl bei kaputtem UTF-8 (jetzt in Zeichen). Der eigene Rückfall auf
+  die Lautsprecher der Sprachgeräte bleibt, wie er ist.
+* Gerendert unter PHP 7.4, 8.4 und 8.5, nicht am Gerät angesehen.
 
 ## Neu in 0.12.3
 

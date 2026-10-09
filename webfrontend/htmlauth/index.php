@@ -3301,6 +3301,11 @@ if ($sp_x3g) { ?>
 <?php
 /**
  * Die komplette Baustein-Liste. Pflicht im Hausstandard.
+ *
+ * X-10 (0.12.4): die Eingangsspalte in der Schreibweise von
+ * Werkzeuge/leitungen_setzen.py - "#N" (Ausgang von Zeile N auf den ersten
+ * Eingang), "I1 = #N, I2 = #M", benannte Anschluesse "AI = #8, AUS = #9";
+ * bis 0.12.3 stand dort "I &larr; #N".
  */
 function sp_bausteine()
 {
@@ -3335,18 +3340,18 @@ function sp_bausteine()
         array(5,  'BAUSTEIN.T_VET',     'BAUSTEIN.N05',
               array('text' => sprintf(sp_t('BAUSTEIN.P05'), $mono($praefix . '/grund'))),
               '&mdash;'),
-        array(6,  'BAUSTEIN.T_VERGL',   'BAUSTEIN.N06', 'BAUSTEIN.P06', 'I1 &larr; #3'),
-        array(7,  'BAUSTEIN.T_VERGL',   'BAUSTEIN.N07', 'BAUSTEIN.P07', 'I1 &larr; #3'),
-        array(8,  'BAUSTEIN.T_UND',     'BAUSTEIN.N08', '',             'I1 &larr; #6, I2 &larr; #4'),
-        array(9,  'BAUSTEIN.T_UND',     'BAUSTEIN.N09', '',             'I1 &larr; #7, I2 &larr; #4'),
-        array(10, 'BAUSTEIN.T_LICHT',   'BAUSTEIN.N10', 'BAUSTEIN.P10', 'AI &larr; #8, AUS &larr; #9'),
-        array(11, 'BAUSTEIN.T_SWS',     'BAUSTEIN.N11', 'BAUSTEIN.P11', 'I &larr; #2'),
-        array(12, 'BAUSTEIN.T_NICHT',   'BAUSTEIN.N12', '',             'I &larr; #1'),
-        array(13, 'BAUSTEIN.T_ODER',    'BAUSTEIN.N13', '',             'I1 &larr; #11, I2 &larr; #12'),
-        array(14, 'BAUSTEIN.T_EVZ',     'BAUSTEIN.N14', 'BAUSTEIN.P14', 'I &larr; #13'),
-        array(15, 'BAUSTEIN.T_BENACHR', 'BAUSTEIN.N15', 'BAUSTEIN.P15', 'I &larr; #14'),
-        array(16, 'BAUSTEIN.T_VA',      'BAUSTEIN.N16', 'BAUSTEIN.P16', 'I &larr; ' . sp_t('BAUSTEIN.EREIGNIS')),
-        array(17, 'BAUSTEIN.T_VA',      'BAUSTEIN.N17', 'BAUSTEIN.P17', 'I &larr; ' . sp_t('BAUSTEIN.NACHTS')),
+        array(6,  'BAUSTEIN.T_VERGL',   'BAUSTEIN.N06', 'BAUSTEIN.P06', 'I1 = #3'),
+        array(7,  'BAUSTEIN.T_VERGL',   'BAUSTEIN.N07', 'BAUSTEIN.P07', 'I1 = #3'),
+        array(8,  'BAUSTEIN.T_UND',     'BAUSTEIN.N08', '',             'I1 = #6, I2 = #4'),
+        array(9,  'BAUSTEIN.T_UND',     'BAUSTEIN.N09', '',             'I1 = #7, I2 = #4'),
+        array(10, 'BAUSTEIN.T_LICHT',   'BAUSTEIN.N10', 'BAUSTEIN.P10', 'AI = #8, AUS = #9'),
+        array(11, 'BAUSTEIN.T_SWS',     'BAUSTEIN.N11', 'BAUSTEIN.P11', '#2'),
+        array(12, 'BAUSTEIN.T_NICHT',   'BAUSTEIN.N12', '',             '#1'),
+        array(13, 'BAUSTEIN.T_ODER',    'BAUSTEIN.N13', '',             'I1 = #11, I2 = #12'),
+        array(14, 'BAUSTEIN.T_EVZ',     'BAUSTEIN.N14', 'BAUSTEIN.P14', '#13'),
+        array(15, 'BAUSTEIN.T_BENACHR', 'BAUSTEIN.N15', 'BAUSTEIN.P15', '#14'),
+        array(16, 'BAUSTEIN.T_VA',      'BAUSTEIN.N16', 'BAUSTEIN.P16', 'I = ' . sp_t('BAUSTEIN.EREIGNIS')),
+        array(17, 'BAUSTEIN.T_VA',      'BAUSTEIN.N17', 'BAUSTEIN.P17', 'I = ' . sp_t('BAUSTEIN.NACHTS')),
     );
 }
 ?>
