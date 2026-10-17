@@ -1720,6 +1720,14 @@ if ($sp_rahmen) {
 .sm-wrap, .sm-wrap *, .sm-tabs, .sm-tabs * { text-shadow: none !important; }
 .sm-wrap h2 { color: #6dac20; margin: 24px 0 10px; font-size: 1.15em; border-bottom: 2px solid #e0e0e0; padding-bottom: 6px; }
 .sm-wrap h3 { color: #4f7d17; font-size: 1.0em; font-weight: 700; margin: 16px 0 2px; }
+/* Welle Bild 18 (0.12.5): Seiten, Schritte, Hinweise und Bild je Baustein-Liste (Bauart Skoda-Connect-NG 0.9.33). */
+.sm-wrap h4.sm-h4 { color: #4f7d17; font-size: 0.98em; font-weight: 700; margin: 22px 0 4px;
+    padding-top: 10px; border-top: 1px solid #e0e0e0; }
+.sm-schritte { margin: 6px 0 0 18px; padding: 0; }
+.sm-schritte li { margin: 3px 0; }
+.sm-bild { margin: 12px 0; }
+.sm-bild img { max-width: 100%; height: auto; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
+.sm-bild figcaption { font-size: .9em; color: #555; margin-top: 4px; }
 .sm-tabs { display: flex; gap: 4px; margin: 14px 0 0; border-bottom: 2px solid #6dac20; flex-wrap: wrap; }
 .sm-tab { background: #eee; border: 1px solid #ccc; border-bottom: 0; border-radius: 8px 8px 0 0;
           padding: 9px 18px; font-size: 0.95em; color: #444 !important; text-decoration: none; display: inline-block; }
@@ -3198,6 +3206,208 @@ if ($sp_x3g) { ?>
 <?= sp_t('LOX.S1_TEXT') ?>
 </div>
 
+<?php
+/**
+ * Die Baustein-Listen des Reiters "Einbindung in Loxone" - Welle Bild 18 (0.12.5, Hausherr 11.10.2026:
+ * Vollausstattung, ein absoluter Laie soll das Maximum leicht uebernehmen koennen; Entwurf Welle 18 ss,
+ * E1-E13, 17.10.2026). DREI Seiten wie im LoxBerry-Plugins Musterprojekt (Musterprojekt/baustein_listen.txt,
+ * Abschnitte "Sprachsteuerung" 26, "Sprachsteuerung Befehle" 14, "Sprachsteuerung Ansagen" 22 Zeilen),
+ * je in dem Schritt, zu dem sie gehoert (2 Zustand, 3 Sprachbefehle, 4 Loxone spricht). Bis 0.12.4 stand hier
+ * EINE Liste mit 17 Zeilen (Funktion sp_bausteine). Berichtigt gegen sie: die Texteingaenge des Gateways
+ * heissen in Config "Virtueller Texteingang" und muessen GENAU den Gateway-Namen tragen (unter dem
+ * Vorschlagsnamen legte das Gateway einen zweiten Eingang an, der Baustein der Liste blieb leer);
+ * "Vergleicher (Text)" und "Beleuchtungssteuerung AI/AUS" gibt es in Config nicht (Textvergleich jetzt im
+ * Status, Statuswert am Ausgang AQ); die Ausfallerkennung las nur OK und ALTER und meldete bei stehendem
+ * LoxBerry nie (jetzt Analogwertvalidierung am Lebenszeichen ZAEHLER); "Nachtmerker der Anlage" war kein
+ * baubarer Verweis (jetzt Schaltuhr).
+ *
+ * Jede Zeile ist EIN Sprachschluessel BAUSTEIN.Z<Seite>_<Nr> "Typ | Name | Parameter | Eingaenge" (Zeilen mit
+ * Prozentzeichen dort doppelt und ueber sprintf() geholt, angezeigt mit einem; deutsch wortgleich mit der Liste;
+ * Bausteinnamen auch englisch deutsch). DIE NAMEN DER GATEWAY-EINGAENGE WERDEN GEBAUT, NICHT ABGESCHRIEBEN:
+ * eine Zeile mit 'gw' traegt den Namen aus sp_gateway_name() - das Gateway bildet ihn aus dem Praefix (Reiter
+ * MQTT) und dem Thema, "/", "%" und Leerzeichen als "_" (wie sp_vorlage_ziele()). Mit dem Werkspraefix
+ * steht genau der Name der Liste da. Keine Leitung geht ueber eine Seitengrenze; SPRACHSTEUERUNG_RUHE steht auf
+ * Seite 3 als weitere Instanz.
+ *
+ * Rueckgabe: Liste von array('seite', 'bild', 'zeilen' => array(array(Nr, Typ, Name, Parameter, Eingaenge),
+ * ...), 'schritte', 'hinweise'). Zellen und Schritte sind Klartext (unten maskiert), die Hinweise
+ * freigegebenes HTML aus der Sprachdatei.
+ */
+function sp_bausteinliste()
+{
+    // Seitenname (= Config-Seite im Musterprojekt, deshalb fest), Bild, Zeilen, Kasten, Hinweise
+    $seiten = array(
+        array('Sprachsteuerung', 'einbindung_loxone.png', array(
+            array(sp_t('BAUSTEIN.Z1_01')),
+            array(sp_t('BAUSTEIN.Z1_02')),
+            array(sp_t('BAUSTEIN.Z1_03')),
+            array(sp_t('BAUSTEIN.Z1_04')),
+            array(sp_t('BAUSTEIN.Z1_05')),
+            array(sp_t('BAUSTEIN.Z1_06')),
+            array(sp_t('BAUSTEIN.Z1_07')),
+            array(sp_t('BAUSTEIN.Z1_08')),
+            array(sp_t('BAUSTEIN.Z1_09')),
+            array(sp_t('BAUSTEIN.Z1_10')),
+            array(sp_t('BAUSTEIN.Z1_11')),
+            array(sp_t('BAUSTEIN.Z1_12')),
+            array(sp_t('BAUSTEIN.Z1_13')),
+            array(sp_t('BAUSTEIN.Z1_14')),
+            array(sp_t('BAUSTEIN.Z1_15')),
+            array(sp_t('BAUSTEIN.Z1_16')),
+            array(sp_t('BAUSTEIN.Z1_17')),
+            array(sp_t('BAUSTEIN.Z1_18')),
+            array(sp_t('BAUSTEIN.Z1_19')),
+            array(sp_t('BAUSTEIN.Z1_20')),
+            array(sp_t('BAUSTEIN.Z1_21')),
+            array(sp_t('BAUSTEIN.Z1_22')),
+            array(sp_t('BAUSTEIN.Z1_23')),
+            array(sp_t('BAUSTEIN.Z1_24')),
+            array(sp_t('BAUSTEIN.Z1_25')),
+            array(sp_t('BAUSTEIN.Z1_26')),
+        ), array(
+            'BAUSTEIN.SEITE1_SCHRITT1',
+            'BAUSTEIN.SEITE1_SCHRITT2',
+            'BAUSTEIN.SEITE1_SCHRITT3',
+            'BAUSTEIN.SEITE1_SCHRITT4',
+            'BAUSTEIN.SEITE1_SCHRITT5',
+            'BAUSTEIN.SEITE1_SCHRITT6',
+        ), array(
+            'BAUSTEIN.SEITE1_H1',
+            'BAUSTEIN.SEITE1_H2',
+            'BAUSTEIN.SEITE1_H3',
+            'BAUSTEIN.SEITE1_H4',
+            'BAUSTEIN.SEITE1_H5',
+            'BAUSTEIN.SEITE1_H6',
+        )),
+        array('Sprachsteuerung Befehle', 'einbindung_loxone_befehle.png', array(
+            array(sp_t('BAUSTEIN.Z2_01'), 'gw'),
+            array(sprintf(sp_t('BAUSTEIN.Z2_02')), 'gw'),
+            array(sp_t('BAUSTEIN.Z2_03')),
+            array(sp_t('BAUSTEIN.Z2_04')),
+            array(sp_t('BAUSTEIN.Z2_05')),
+            array(sp_t('BAUSTEIN.Z2_06')),
+            array(sp_t('BAUSTEIN.Z2_07'), 'gw'),
+            array(sp_t('BAUSTEIN.Z2_08'), 'gw'),
+            array(sp_t('BAUSTEIN.Z2_09'), 'gw'),
+            array(sp_t('BAUSTEIN.Z2_10'), 'gw'),
+            array(sp_t('BAUSTEIN.Z2_11'), 'gw'),
+            array(sp_t('BAUSTEIN.Z2_12'), 'gw'),
+            array(sp_t('BAUSTEIN.Z2_13'), 'gw'),
+            array(sp_t('BAUSTEIN.Z2_14')),
+        ), array(
+            'BAUSTEIN.SEITE2_SCHRITT1',
+            'BAUSTEIN.SEITE2_SCHRITT2',
+            'BAUSTEIN.SEITE2_SCHRITT3',
+            'BAUSTEIN.SEITE2_SCHRITT4',
+            'BAUSTEIN.SEITE2_SCHRITT5',
+        ), array(
+            'BAUSTEIN.SEITE2_H1',
+            'BAUSTEIN.SEITE2_H2',
+            'BAUSTEIN.SEITE2_H3',
+            'BAUSTEIN.SEITE2_H4',
+            'BAUSTEIN.SEITE2_H5',
+            'BAUSTEIN.SEITE2_H6',
+            'BAUSTEIN.SEITE2_H7',
+        )),
+        array('Sprachsteuerung Ansagen', 'einbindung_loxone_ansagen.png', array(
+            array(sp_t('BAUSTEIN.Z3_01')),
+            array(sp_t('BAUSTEIN.Z3_02')),
+            array(sp_t('BAUSTEIN.Z3_03')),
+            array(sp_t('BAUSTEIN.Z3_04')),
+            array(sp_t('BAUSTEIN.Z3_05')),
+            array(sp_t('BAUSTEIN.Z3_06')),
+            array(sp_t('BAUSTEIN.Z3_07')),
+            array(sp_t('BAUSTEIN.Z3_08')),
+            array(sp_t('BAUSTEIN.Z3_09')),
+            array(sp_t('BAUSTEIN.Z3_10')),
+            array(sp_t('BAUSTEIN.Z3_11')),
+            array(sp_t('BAUSTEIN.Z3_12')),
+            array(sp_t('BAUSTEIN.Z3_13')),
+            array(sp_t('BAUSTEIN.Z3_14')),
+            array(sp_t('BAUSTEIN.Z3_15')),
+            array(sp_t('BAUSTEIN.Z3_16')),
+            array(sp_t('BAUSTEIN.Z3_17')),
+            array(sp_t('BAUSTEIN.Z3_18')),
+            array(sp_t('BAUSTEIN.Z3_19'), 'gw'),
+            array(sp_t('BAUSTEIN.Z3_20'), 'gw'),
+            array(sp_t('BAUSTEIN.Z3_21'), 'gw'),
+            array(sp_t('BAUSTEIN.Z3_22')),
+        ), array(
+            'BAUSTEIN.SEITE3_SCHRITT1',
+            'BAUSTEIN.SEITE3_SCHRITT2',
+            'BAUSTEIN.SEITE3_SCHRITT3',
+            'BAUSTEIN.SEITE3_SCHRITT4',
+            'BAUSTEIN.SEITE3_SCHRITT5',
+        ), array(
+            'BAUSTEIN.SEITE3_H1',
+            'BAUSTEIN.SEITE3_H2',
+            'BAUSTEIN.SEITE3_H3',
+            'BAUSTEIN.SEITE3_H4',
+            'BAUSTEIN.SEITE3_H5',
+            'BAUSTEIN.SEITE3_H6',
+            'BAUSTEIN.SEITE3_H7',
+        )),
+    );
+    $aus = array();
+    foreach ($seiten as $sp_s) {
+        $sp_zeilen = array();
+        foreach ($sp_s[2] as $sp_i => $sp_z) {
+            $sp_c = array_pad(explode(' | ', $sp_z[0], 4), 4, '');
+            if (isset($sp_z[1]) && $sp_z[1] === 'gw') {
+                $sp_c[1] = sp_gateway_name($sp_c[1]);
+            }
+            $sp_zeilen[] = array_merge(array($sp_i + 1), $sp_c);
+        }
+        $aus[] = array('seite' => $sp_s[0], 'bild' => $sp_s[1], 'zeilen' => $sp_zeilen,
+                       'schritte' => array_map('sp_t', $sp_s[3]), 'hinweise' => array_map('sp_t', $sp_s[4]));
+    }
+    return $aus;
+}
+
+/** Gateway-Name eines Eingangs der Liste (dort mit dem Werkspraefix "sprachsteuerung_"). */
+function sp_gateway_name($name)
+{
+    $praefix = trim((string) sp_config(false)['mqtt_topic'], '/');
+    if ($praefix === '') { $praefix = 'sprachsteuerung'; }
+    $rest = (string) $name;
+    if (strpos($rest, 'sprachsteuerung_') === 0) { $rest = substr($rest, strlen('sprachsteuerung_')); }
+    return str_replace(array('/', '%', ' '), '_', $praefix) . '_' . $rest;
+}
+
+/** Eine Seite: Ueberschrift (= Seitenname in Config), Kasten, Tabelle, Hinweise, Bild, Link. */
+function sp_bausteinseite_zeigen($sp_bs)
+{ ?>
+<h4 class="sm-h4"><?= sp_e($sp_bs['seite']) ?></h4>
+<div class="sm-hinweis"><b><?= sp_e(sp_t('LOX.SCHRITTE_TITEL')) ?></b>
+<ol class="sm-schritte">
+<?php foreach ($sp_bs['schritte'] as $sp_bx) { ?>
+<li><?= sp_e($sp_bx) ?></li>
+<?php } ?>
+</ol></div>
+<div class="sm-roll">
+<table class="sm-tbl">
+<tr><th>#</th><th><?= sp_e(sp_t('LOX.T_BAUSTEIN')) ?></th><th><?= sp_e(sp_t('LOX.T_NAMENSVORSCHLAG')) ?></th>
+    <th><?= sp_e(sp_t('LOX.T_PARAMETER')) ?></th><th><?= sp_e(sp_t('LOX.T_EINGAENGE')) ?></th></tr>
+<?php foreach ($sp_bs['zeilen'] as $sp_bz) { ?>
+<tr><td><?= (int) $sp_bz[0] ?></td><td><?= sp_e($sp_bz[1]) ?></td><td><?= sp_e($sp_bz[2]) ?></td>
+    <td><?= sp_e($sp_bz[3]) ?></td><td><?= sp_e($sp_bz[4]) ?></td></tr>
+<?php } ?>
+</table>
+</div>
+<div class="sm-warnung"><b><?= sp_e(sp_t('LOX.HINWEISE_TITEL')) ?></b>
+<ul class="sm-schritte">
+<?php foreach ($sp_bs['hinweise'] as $sp_bx) { ?>
+<li><?= $sp_bx ?></li>
+<?php } ?>
+</ul></div>
+<figure class="sm-bild">
+<img src="<?= sp_e($sp_bs['bild']) ?>" alt="<?= sp_e(sprintf(sp_t('LOX.BILD_ALT'), $sp_bs['seite'])) ?>" loading="lazy">
+<figcaption><?= sp_e(sprintf(sp_t('LOX.BILD_UNTERSCHRIFT'), $sp_bs['seite'])) ?></figcaption>
+</figure>
+<p class="sm-hilfe"><?= sp_t('LOX.MUSTERPROJEKT') ?></p>
+<?php }
+$sp_bl = sp_bausteinliste();
+?>
 <div class="sm-step"><b><?= sp_e(sp_t('LOX.S3_TITEL')) ?></b><br>
 <?= sp_t('LOX.S3_TEXT') ?>
 <div class="sm-roll">
@@ -3221,21 +3431,49 @@ if ($sp_x3g) { ?>
     <?php $sp_hidden('tab-loxone'); ?>
     <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="vorlage" value="eingang"><?= sp_e(sp_t('LOX.K_VORLAGE')) ?></button>
   </form>
+</div>
+<?php /* Welle Bild 18 (0.12.5): Knopf Ziele mit seinen Hinweisen jetzt in Schritt 3,
+   Knopf Ausgang in Schritt 4 - je bei der Seite, die ihn braucht. */
+sp_bausteinseite_zeigen($sp_bl[0]); ?>
+</div>
+
+<div class="sm-step"><b><?= sp_e(sp_t('LOX.SB_TITEL')) ?></b><br>
+<?= sp_t('LOX.SB_TEXT') ?>
+<?php /* Welle Bild 18 (0.12.5, Entwurf Welle 18 ss Abschnitt 4): die Namen der Gateway-Eingaenge je Ziel,
+   GERECHNET aus dem Praefix (Reiter MQTT) und dem Thema des Ziels (Satzdatei) - so wie sp_vorlage_ziele() sie
+   bildet und das Gateway V1 im HTTP-Betrieb sie vergibt ("/", "%" und Leerzeichen als "_"). */
+$sp_gw_p = str_replace(array('/', '%', ' '), '_', $sp_praefix !== '' ? $sp_praefix : 'sprachsteuerung');
+$sp_gw_z = (isset($sp_saetze['ziele']) && is_array($sp_saetze['ziele'])) ? $sp_saetze['ziele'] : array();
+$sp_gw_zeilen = array();
+foreach ($sp_gw_z as $sp_gw_k => $sp_gw_e) {
+    $sp_gw_t = sp_ziel_thema($sp_gw_k, $sp_gw_e);
+    if ($sp_gw_t === '') { continue; }
+    $sp_gw_n = (is_array($sp_gw_e) && isset($sp_gw_e['name']) && is_scalar($sp_gw_e['name'])) ? (string) $sp_gw_e['name'] : (string) $sp_gw_k;
+    $sp_gw_zeilen[] = array($sp_gw_n, $sp_gw_p . '_' . str_replace(array('/', '%', ' '), '_', $sp_gw_t));
+}
+if (!$sp_gw_zeilen) { ?>
+<div class="sm-hinweis"><?= sp_e(sp_t('LOX.SB_KEINE_ZIELE')) ?></div>
+<?php } else { ?>
+<div class="sm-roll">
+<table class="sm-tbl">
+<tr><th><?= sp_e(sp_t('LOX.T_ZIEL')) ?></th><th><?= sp_e(sp_t('LOX.T_GW_AKTION')) ?></th><th><?= sp_e(sp_t('LOX.T_GW_WERT')) ?></th></tr>
+<?php foreach ($sp_gw_zeilen as $sp_gw_r) { ?>
+<tr><td><?= sp_e($sp_gw_r[0]) ?></td><td><span class="sm-mono"><?= sp_e($sp_gw_r[1] . '_aktion') ?></span></td>
+    <td><span class="sm-mono"><?= sp_e($sp_gw_r[1] . '_wert') ?></span></td></tr>
+<?php } ?>
+</table>
+</div>
+<?php } ?>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-lesen"></i> <?= sp_t('LEGENDE.LESEN') ?></span></div>
+<div class="sm-knopfreihe">
   <form action="index.php" method="post" data-ajax="false">
     <?php $sp_hidden('tab-loxone'); ?>
     <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="vorlage" value="ziele"><?= sp_e(sp_t('LOX.K_VORLAGE_ZIELE')) ?></button>
   </form>
-  <form action="index.php" method="post" data-ajax="false">
-    <?php $sp_hidden('tab-loxone'); ?>
-    <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="vorlage" value="ausgang"><?= sp_e(sp_t('LOX.K_VORLAGE_AUSGANG')) ?></button>
-  </form>
 </div>
-<?php /* A4 (Runde 2): die Zielvorlage ist seit 0.12.0 ein virtueller
-   UDP-Eingang (VirtualInUdp) mit dem Namen VIU_Sprachsteuerung_Ziele.xml,
-   versorgt vom MQTT-Gateway. Der Hinweis zu "Noncached" steht auch im Kopf
-   der Vorlage - hier, damit man ihn vor dem Import liest. */ ?>
-<div class="sm-hinweis"><?= sp_e(sprintf(sp_t('UI013.VORLAGE_ZIELE'), 'VIU_Sprachsteuerung_Ziele.xml', sp_mqtt_gateway_udpport())) ?></div>
-<div class="sm-warnung"><?= sp_e(sprintf(sp_t('UI013.VORLAGE_NONCACHED'), $sp_praefix)) ?></div>
+<div class="sm-hinweis"><?= sp_e(sp_t('LOX.SB_UDP')) ?> <?= sp_e(sprintf(sp_t('UI013.VORLAGE_ZIELE'), 'VIU_Sprachsteuerung_Ziele.xml', sp_mqtt_gateway_udpport())) ?></div>
+<div class="sm-hinweis"><?= sp_e(sprintf(sp_t('UI013.VORLAGE_NONCACHED'), $sp_praefix)) ?></div>
+<?php sp_bausteinseite_zeigen($sp_bl[1]); ?>
 </div>
 
 <div class="sm-step"><b><?= sp_e(sp_t('LOX.S4_TITEL')) ?></b><br>
@@ -3277,6 +3515,14 @@ if ($sp_x3g) { ?>
 </table>
 </div>
 <div class="sm-hinweis"><?= sp_e(sp_t('UI013.HINWEIS_TOKEN_POST')) ?></div>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-lesen"></i> <?= sp_t('LEGENDE.LESEN') ?></span></div>
+<div class="sm-knopfreihe">
+  <form action="index.php" method="post" data-ajax="false">
+    <?php $sp_hidden('tab-loxone'); ?>
+    <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="vorlage" value="ausgang"><?= sp_e(sp_t('LOX.K_VORLAGE_AUSGANG')) ?></button>
+  </form>
+</div>
+<?php sp_bausteinseite_zeigen($sp_bl[2]); ?>
 </div>
 
 <div class="sm-step"><b><?= sp_e(sp_t('LOX.S5_TITEL')) ?></b>
@@ -3296,80 +3542,6 @@ if ($sp_x3g) { ?>
     <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="token_neu" value="1"><?= sp_e(sp_t('LOX.K_TOKEN_NEU')) ?></button>
   </form>
 </div>
-</div>
-
-<?php
-/**
- * Die komplette Baustein-Liste. Pflicht im Hausstandard.
- *
- * X-10 (0.12.4): die Eingangsspalte in der Schreibweise von
- * Werkzeuge/leitungen_setzen.py - "#N" (Ausgang von Zeile N auf den ersten
- * Eingang), "I1 = #N, I2 = #M", benannte Anschluesse "AI = #8, AUS = #9";
- * bis 0.12.3 stand dort "I &larr; #N".
- */
-function sp_bausteine()
-{
-    /* Suchtext und Themen werden GEBILDET, nicht abgeschrieben.
-     * Der Suchtext entsteht in sp_check() - das ist laut Kommentar dort
-     * die einzige Stelle, an der das Muster entsteht. Das Themenpraefix
-     * ist einstellbar; bis 0.10.1 stand in dieser Tabelle fest
-     * 'sprachsteuerung/aktion', waehrend der Reiter MQTT daneben das
-     * eingestellte Praefix zeigte. Der Anwender tippt DIESE Tabelle ab. */
-    $mono = function ($s) { return '<span class="sm-mono">' . sp_e($s) . '</span>'; };
-    $praefix = trim((string) sp_config(false)['mqtt_topic'], '/');
-    if ($praefix === '') { $praefix = 'sprachsteuerung'; }
-    /* Die fuenf sprintf-Aufrufe stehen AUSGESCHRIEBEN und nicht in einer
-     * Huelle: sprachplatzhalter_pruefen.py liest die Aufrufstelle und
-     * zaehlt Platzhalter gegen Argumente. Ueber eine Huelle saehe es
-     * nichts mehr und meldete fuenf Schluessel je Sprache als 'nirgends
-     * durch sprintf gereicht'. Ein Werkzeug blind zu machen ist dasselbe,
-     * wie es abzuschaffen. */
-    return array(
-        array(1,  'BAUSTEIN.T_VE',      'BAUSTEIN.N01',
-              array('text' => sprintf(sp_t('BAUSTEIN.P01'), $mono(sp_check('OK')))),
-              '&mdash;'),
-        array(2,  'BAUSTEIN.T_VE',      'BAUSTEIN.N02',
-              array('text' => sprintf(sp_t('BAUSTEIN.P02'), $mono(sp_check('ALTER')))),
-              '&mdash;'),
-        array(3,  'BAUSTEIN.T_VET',     'BAUSTEIN.N03',
-              array('text' => sprintf(sp_t('BAUSTEIN.P03'), $mono($praefix . '/aktion'))),
-              '&mdash;'),
-        array(4,  'BAUSTEIN.T_VET',     'BAUSTEIN.N04',
-              array('text' => sprintf(sp_t('BAUSTEIN.P04'), $mono($praefix . '/ziel'))),
-              '&mdash;'),
-        array(5,  'BAUSTEIN.T_VET',     'BAUSTEIN.N05',
-              array('text' => sprintf(sp_t('BAUSTEIN.P05'), $mono($praefix . '/grund'))),
-              '&mdash;'),
-        array(6,  'BAUSTEIN.T_VERGL',   'BAUSTEIN.N06', 'BAUSTEIN.P06', 'I1 = #3'),
-        array(7,  'BAUSTEIN.T_VERGL',   'BAUSTEIN.N07', 'BAUSTEIN.P07', 'I1 = #3'),
-        array(8,  'BAUSTEIN.T_UND',     'BAUSTEIN.N08', '',             'I1 = #6, I2 = #4'),
-        array(9,  'BAUSTEIN.T_UND',     'BAUSTEIN.N09', '',             'I1 = #7, I2 = #4'),
-        array(10, 'BAUSTEIN.T_LICHT',   'BAUSTEIN.N10', 'BAUSTEIN.P10', 'AI = #8, AUS = #9'),
-        array(11, 'BAUSTEIN.T_SWS',     'BAUSTEIN.N11', 'BAUSTEIN.P11', '#2'),
-        array(12, 'BAUSTEIN.T_NICHT',   'BAUSTEIN.N12', '',             '#1'),
-        array(13, 'BAUSTEIN.T_ODER',    'BAUSTEIN.N13', '',             'I1 = #11, I2 = #12'),
-        array(14, 'BAUSTEIN.T_EVZ',     'BAUSTEIN.N14', 'BAUSTEIN.P14', '#13'),
-        array(15, 'BAUSTEIN.T_BENACHR', 'BAUSTEIN.N15', 'BAUSTEIN.P15', '#14'),
-        array(16, 'BAUSTEIN.T_VA',      'BAUSTEIN.N16', 'BAUSTEIN.P16', 'I = ' . sp_t('BAUSTEIN.EREIGNIS')),
-        array(17, 'BAUSTEIN.T_VA',      'BAUSTEIN.N17', 'BAUSTEIN.P17', 'I = ' . sp_t('BAUSTEIN.NACHTS')),
-    );
-}
-?>
-<div class="sm-step"><b><?= sp_e(sp_t('LOX.S6_TITEL')) ?></b><br>
-<?= sp_t('LOX.S6_TEXT') ?>
-<div class="sm-roll">
-<table class="sm-tbl">
-<tr><th>#</th><th><?= sp_e(sp_t('LOX.T_BAUSTEIN')) ?></th><th><?= sp_e(sp_t('LOX.T_NAMENSVORSCHLAG')) ?></th>
-    <th><?= sp_e(sp_t('LOX.T_PARAMETER')) ?></th><th><?= sp_e(sp_t('LOX.T_EINGAENGE')) ?></th></tr>
-<?php foreach (sp_bausteine() as $sp_b) { ?>
-<tr><td><?= (int) $sp_b[0] ?></td><td><?= sp_t($sp_b[1]) ?></td><td><?= sp_t($sp_b[2]) ?></td>
-    <td><?= is_array($sp_b[3]) ? $sp_b[3]['text']
-                               : ($sp_b[3] !== '' ? sp_t($sp_b[3]) : '&mdash;') ?></td>
-    <td><?= $sp_b[4] ?></td></tr>
-<?php } ?>
-</table>
-</div>
-<?= sp_t('LOX.S6_ERLAEUTERUNG') ?>
 </div>
 
 <div class="sm-step"><b><?= sp_e(sp_t('LOX.S7_TITEL')) ?></b><br>

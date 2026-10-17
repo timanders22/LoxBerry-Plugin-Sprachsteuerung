@@ -4835,6 +4835,60 @@ def kontext_schluessel(mikrofon: str, herkunft: str = "") -> str:
     return "-" + herkunft if herkunft else "-"
 
 
+# ---------------------------------------------------------------------------
+# Zielaktion zuruecksetzen (Welle Bild 18, 0.12.5; Entwurf Welle 18 ss E5,
+# Hausherr 17.10.2026)
+#
+# Das MQTT-Gateway schickt nur GEAENDERTE Werte an den Miniserver, und ein
+# Loxone-Eingang, der auf Aenderung reagiert, sieht denselben Text ohnehin
+# nicht als neu (Regeln/09). Zweimal hintereinander "Licht an" (dazwischen von
+# Hand aus) kam deshalb nur einmal an. Jetzt geht <thema>/aktion
+# AKTION_RUECKSETZEN_S nach jedem Befehl fluechtig auf "-" (der Strich ist
+# hier schon der Wert fuer "leer", siehe mqtt_senden()). Nur das Zielthema,
+# nicht das allgemeine "aktion"; /wert bleibt stehen (eine Zahl ist ein Wert,
+# kein Ereignis). Ein neuerer Befehl fuer dasselbe Ziel innerhalb der Frist
+# hebt die Ruecksetzung des aelteren auf - sonst loeschte sie den neuen
+# Befehl. Gesendet wird unter einer Sperre, damit "-" nie nach einem neueren
+# Befehl hinausgeht. Bei Dienstende verfallen offene Ruecksetzungen (die
+# Faeden sind Daemonen); die Eingaenge stehen nach einem Neustart ohnehin
+# leer (Zielthemen gehen fluechtig, seit 0.11.10).
+# ---------------------------------------------------------------------------
+AKTION_RUECKSETZEN_S = 2.0
+_AKTION_STAND: dict = {}
+_AKTION_SPERRE = threading.Lock()
+
+
+def ziel_aktion_senden(paare: dict, praefix: str, cfg: dict) -> list:
+    """paare senden und je Zielthema <thema>/aktion die Ruecksetzung planen.
+    Rueckgabe: die gestarteten Zeitgeber (fuer den Selbsttest)."""
+    themen = [k for k in paare if k.endswith("/aktion")]
+    staende = {}
+    with _AKTION_SPERRE:
+        for k in themen:
+            _AKTION_STAND[k] = _AKTION_STAND.get(k, 0) + 1
+            staende[k] = _AKTION_STAND[k]
+        mqtt_senden(paare, praefix, cfg)
+    zeitgeber = []
+    for k in themen:
+        t = threading.Timer(AKTION_RUECKSETZEN_S, _aktion_zuruecksetzen,
+                            args=(k, staende[k], praefix, cfg))
+        t.daemon = True
+        t.start()
+        zeitgeber.append(t)
+    return zeitgeber
+
+
+def _aktion_zuruecksetzen(thema_aktion: str, stand: int, praefix: str, cfg: dict) -> None:
+    with _AKTION_SPERRE:
+        if _AKTION_STAND.get(thema_aktion) != stand:
+            return          # ein neuerer Befehl fuer dasselbe Ziel setzt selbst zurueck
+        try:
+            mqtt_senden({thema_aktion: "-"}, praefix, cfg)
+        except Exception as err:  # noqa: BLE001 - ein Faden darf nicht still sterben
+            melde_gebremst("aktion_zurueck", "MQTT: %s/%s liess sich nicht auf '-' "
+                           "zuruecksetzen (%s)." % (praefix, thema_aktion, fehlertext(err)), 3600)
+
+
 def satz_verarbeiten(satz: str, cfg: dict, v, mikrofon: str = "",
                      raum: str = "", zone: str = "", trocken: bool = False,
                      herkunft: str = "", llm_aussen: bool = False,
@@ -5401,7 +5455,8 @@ def _ausfuehren(erkannt: dict, cfg: dict, beginn: float, trocken: bool) -> dict:
             if erkannt.get("wert") is not None:
                 paare[thema + "/wert"] = erkannt["wert"]
         if not trocken:
-            mqtt_senden(paare, praefix, cfg)
+            # Seit 0.12.5 geht <thema>/aktion 2 s spaeter auf "-" (E5).
+            ziel_aktion_senden(paare, praefix, cfg)
 
     ruf = {"ok": -1}
     if not trocken and not frage:
@@ -8039,7 +8094,15 @@ def abbild_schreiben(cfg: dict, sats: dict | None = None) -> dict:
     # dort, nur log/plugins ist eine Ramdisk). Der Zwangsdurchgang haelt
     # den Zeitstempel frisch, den die Oberflaeche fuer ihre Altersanzeige
     # liest - ohne ihn saehe ein ruhiges Haus aus wie ein toter Dienst.
-    fingerabdruck = json.dumps({k: v for k, v in daten.items() if k != "ts"},
+    # Welle Bild 18 (0.12.5, Hausherr 17.10.2026): letzter_satz_alter waechst
+    # jede Sekunde und steht deshalb wie ts NICHT im Fingerabdruck - bis
+    # 0.12.4 schrieb der Dienst nach dem ersten verstandenen Satz JEDE Sekunde,
+    # genau die 86 400 Schreibvorgaenge, die dieser Absatz vermeiden will. Der
+    # Zwangsdurchgang alle 15 s bleibt: an ihm haengt das Lebenszeichen ZAEHLER
+    # der Statuszeile (ts modulo 1000, sp_statuszeile()), und LETZTER rechnet
+    # sp_statuszeile() mit dem Alter von ts auf die Abfragezeit hoch.
+    fingerabdruck = json.dumps({k: v for k, v in daten.items()
+                                if k not in ("ts", "letzter_satz_alter")},
                                sort_keys=True, default=str)
     jetzt = time.monotonic()
     if (fingerabdruck != _ABBILD_STAND.get("fingerabdruck")

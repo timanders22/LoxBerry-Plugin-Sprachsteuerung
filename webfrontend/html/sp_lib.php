@@ -1618,6 +1618,16 @@ function sp_mqtt_abo_schreiben($cfg = null)
  * Plausibilitaetspruefung. -1 bedeutet bei ALTER und LETZTER 'nicht bekannt';
  * ohne MinVal=-1 zeigt die Visualisierung dort eine 0, und 0 heisst 'gerade
  * eben' - eine stille Falschaussage genau im Fehlerfall.
+ *
+ * Welle Bild 18 (0.12.5, Entwurf Welle 18 ss E3, Hausherr 17.10.2026): zwei
+ * Felder HINTEN angehaengt (kein Suchtext aendert sich; ';DIENSTE=' trifft
+ * ';DIENSTE_GESAMT=' nicht). ZAEHLER ist das Lebenszeichen: kein Feld davor
+ * aenderte sich sicher bei jeder Abfrage - steht der LoxBerry, behaelt Loxone
+ * jeden Wert (OK 1, ALTER klein), und eine Analogwertvalidierung an ALTER oder
+ * LETZTER gaebe Fehlalarme. DIENSTE_GESAMT ist der Nenner zu DIENSTE ('laeuft
+ * nur teilweise' war ohne ihn nicht erkennbar). LETZTER und ALTER reichen ein
+ * Jahr (bis 0.12.4 30 Tage: danach lag der Wert ueber MaxVal und Loxone zeigte
+ * 0 - 'letzter Satz vor 0 s'; Bauart SignalBot 0.9.26).
  * ================================================================== */
 function sp_status_felder()
 {
@@ -1629,8 +1639,10 @@ function sp_status_felder()
         'REGELN'     => array('',  'SP_FELD.REGELN',     0, 999),
         'ZIELE'      => array('',  'SP_FELD.ZIELE',      0, 999),
         'RUHE'       => array('',  'SP_FELD.RUHE',       0, 1),
-        'LETZTER'    => array('s', 'SP_FELD.LETZTER',   -1, 2592000),
-        'ALTER'      => array('s', 'SP_FELD.ALTER',     -1, 2592000),
+        'LETZTER'    => array('s', 'SP_FELD.LETZTER',   -1, 31536000),
+        'ALTER'      => array('s', 'SP_FELD.ALTER',     -1, 31536000),
+        'ZAEHLER'        => array('', 'SP_FELD.ZAEHLER',        -1, 999),
+        'DIENSTE_GESAMT' => array('', 'SP_FELD.DIENSTE_GESAMT',  0, 3),
     );
 }
 
@@ -1678,8 +1690,19 @@ function sp_statuszeile()
         'REGELN'    => $hol('anzahl_regeln'),
         'ZIELE'     => $hol('anzahl_ziele'),
         'RUHE'      => $ruhe ? 1 : 0,
-        'LETZTER'   => isset($lox['letzter_satz_alter']) ? (int) $lox['letzter_satz_alter'] : -1,
+        // Seit 0.12.5 schreibt der Dienst das Abbild nur bei echter Aenderung,
+        // sonst alle 15 s (abbild_schreiben()): letzter_satz_alter gilt fuer den
+        // Schreibzeitpunkt und wird um das Alter des Abbilds hochgerechnet.
+        'LETZTER'   => (isset($lox['letzter_satz_alter']) && (int) $lox['letzter_satz_alter'] >= 0)
+                       ? (int) $lox['letzter_satz_alter'] + (isset($lox['ts']) ? max(0, time() - (int) $lox['ts']) : 0)
+                       : -1,
         'ALTER'     => sp_alter(),
+        // Welle Bild 18 (E3): das Lebenszeichen ist der Zeitstempel des Abbilds
+        // modulo 1000. Der Dienst schreibt das Abbild spaetestens alle 15 s neu -
+        // zwischen zwei Abfragen (60 s) aendert sich ZAEHLER also immer; steht
+        // der Dienst oder der LoxBerry, steht er. -1 = noch nie ein Abbild.
+        'ZAEHLER'   => isset($lox['ts']) ? ((int) $lox['ts']) % 1000 : -1,
+        'DIENSTE_GESAMT' => $hol('dienste_gesamt'),
     );
     $teile = array('SPRACHSTEUERUNG');
     foreach (sp_status_felder() as $feld => $info) {
@@ -1705,7 +1728,8 @@ function sp_vorlage()
             'comment' => trim(strip_tags(html_entity_decode(sp_t($info[1]), ENT_QUOTES, 'UTF-8')))
                        . ($info[0] !== '' ? ' [' . $info[0] . ']' : ''),
             'check'   => sp_check($feld),
-            'unit'    => '<v.1>' . ($info[0] !== '' ? ' ' . $info[0] : ''),
+            // Welle Bild 18 (E3): alle Felder sind ganze Zahlen - <v.0> statt <v.1>.
+            'unit'    => '<v.0>' . ($info[0] !== '' ? ' ' . $info[0] : ''),
             'min'     => $info[2],
             'max'     => $info[3],
         );
@@ -1715,7 +1739,7 @@ function sp_vorlage()
         'address' => $basis_url . '/plugins/' . $p['plugin']
                    . '/index.php?token=' . $token . '&aktion=status',
         'polling' => '60',
-        'comment' => 'Erzeugt vom LoxBerry-Plugin Sprachsteuerung lokal (' . date('d.m.Y') . ')',
+        'comment' => sprintf(sp_t('LOX.VORLAGE_KOMMENTAR'), date('d.m.Y')),
     ), $cmds));
 }
 
@@ -1733,28 +1757,41 @@ function sp_vorlage_ausgang()
     $p = sp_paths();
     $token = sp_token();
     $basis = '/plugins/' . $p['plugin'] . '/index.php?token=' . $token;
+    /* Welle Bild 18 (0.12.5, Entwurf Welle 18 ss E6): fuenf Befehle wie im
+     * LoxBerry-Plugins Musterprojekt (Seite "Sprachsteuerung Ansagen"). Neu
+     * "Ansage Tuerklingel" und "Alarm" (dringend=1 - spricht auch in der Ruhezeit
+     * und wenn Loxone stillgelegt hat): ein Befehl darf nur einmal im Projekt
+     * stehen, eine zweite Ansage braucht einen eigenen Befehl. Titel und die
+     * gesprochenen Texte bleiben fest deutsch (Sprachregel 13.10.2026), die
+     * Kommentare kommen aus der Sprachdatei (bis 0.12.4 fest im Code, ohne
+     * Umlaute). Der Titel mit Umlaut steht als UTF-8-Bytes: diese Datei bleibt
+     * in ihrem Code ASCII. */
     $cmds = array(
         array('title'   => 'Sprachsteuerung Ansage',
-              'comment' => 'Ein: sagt den festen Text an. Den Text hinter text= '
-                         . 'anpassen; Leerzeichen als %20 schreiben.',
-              'cmdon'   => $basis . '&aktion=sprechen&text=Das%20Garagentor%20steht%20offen',
+              'comment' => sp_t('LOX.VQ_ANSAGE'),
+              'cmdon'   => $basis . '&aktion=sprechen&text=Das%20Garagentor%20steht%20seit%20einer%20Stunde%20offen',
+              'cmdoff'  => ''),
+        array('title'   => "Sprachsteuerung Ansage T\xc3\xbcrklingel",
+              'comment' => sp_t('LOX.VQ_TUERKLINGEL'),
+              'cmdon'   => $basis . '&aktion=sprechen&text=Es%20hat%20an%20der%20Haust%C3%BCr%20geklingelt',
+              'cmdoff'  => ''),
+        array('title'   => 'Sprachsteuerung Alarm',
+              'comment' => sp_t('LOX.VQ_ALARM'),
+              'cmdon'   => $basis . '&aktion=sprechen&dringend=1&text=Wasseralarm%20im%20Keller',
               'cmdoff'  => ''),
         array('title'   => 'Sprachsteuerung Satz',
-              'comment' => 'Ein: schickt einen Satz durch dieselbe Kette wie ein '
-                         . 'gesprochener. Damit laesst sich die Sprachlogik auch '
-                         . 'von einem Taster aus benutzen.',
+              'comment' => sp_t('LOX.VQ_SATZ'),
               'cmdon'   => $basis . '&aktion=satz&text=schalte%20das%20licht%20im%20wohnzimmer%20aus',
               'cmdoff'  => ''),
         array('title'   => 'Sprachsteuerung Ruhe',
-              'comment' => 'Ein schaltet die Ruhezeit ein (keine Ansagen), Aus wieder ab. '
-                         . 'Damit laesst sich die Nachtruhe aus Loxone steuern.',
+              'comment' => sp_t('LOX.VQ_RUHE'),
               'cmdon'   => $basis . '&aktion=ruhe&wert=1',
               'cmdoff'  => $basis . '&aktion=ruhe&wert=0'),
     );
     return array('VQ_Sprachsteuerung.xml', sp_xml_virtual_out(array(
         'title'   => 'Sprachsteuerung lokal - Befehle',
         'address' => sp_lb_adresse(),     // wie sp_vorlage()
-        'comment' => 'Erzeugt vom LoxBerry-Plugin Sprachsteuerung lokal (' . date('d.m.Y') . ')',
+        'comment' => sprintf(sp_t('LOX.VORLAGE_KOMMENTAR'), date('d.m.Y')),
     ), $cmds));
 }
 

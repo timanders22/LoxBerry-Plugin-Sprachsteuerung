@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.12.4
+Version 0.12.5
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,45 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.12.5
+
+Einbindung in Loxone in Vollausstattung: drei Seiten aus dem LoxBerry-Plugins Musterprojekt mit drei Bildern
+und je einer Schritt-für-Schritt-Anleitung („So übernehmen Sie diese Seite“). Sie ersetzen die Baustein-Liste
+mit 17 Zeilen.
+
+* **Seite „Sprachsteuerung“** (26 Zeilen, Reiter Schritt 2): Störung aus „Dienst gestoppt“, „Sprachdienst
+  fehlt“ (Whisper, Piper oder Sprachmodell antworten nicht) und „Lebenszeichen fehlt“ (Analogwertvalidierung am
+  neuen `ZAEHLER`, Tmc 180 s) mit 600 s Bestätigung; eigene Meldung „Mikrofon seit einer Stunde getrennt“; zwei
+  Status.
+* **Seite „Sprachsteuerung Befehle“** (14 Zeilen, Schritt 3): Sprachbefehl → Loxone über das MQTT-Gateway –
+  Wohnzimmerlicht ein/aus als saubere Impulse, Helligkeit und Solltemperatur als Zahl, der letzte Satz mit
+  Ergebnis und Grund im Klartext. Schritt 3 nennt die Gateway-Namen für jedes eingetragene Ziel.
+* **Seite „Sprachsteuerung Ansagen“** (22 Zeilen, Schritt 4): Türklingel, Garagentor seit einer Stunde offen,
+  Wasseralarm trotz Ruhezeit, ein Taster schickt einen Satz; Nachtruhe, Schalter oder „niemand zu Hause“ legen
+  die Ansagen still; Rückmeldung der Ansage.
+* **Berichtigt – wer nach der bisherigen Liste gebaut hat, bitte ansehen:** die Gateway-Eingänge heißen in
+  Config „Virtueller Texteingang“ und müssen genau den Namen tragen, den das Gateway vergibt (Präfix und Thema mit
+  „_“) – unter dem Vorschlagsnamen legte das Gateway einen zweiten Eingang an. „Vergleicher (Text)“ und
+  „Beleuchtungssteuerung AI/AUS“ gibt es in Config nicht (Textvergleich jetzt im Status). Die Ausfallmeldung las
+  nur OK und ALTER und meldete bei stehendem LoxBerry nie.
+* **Statuszeile:** zwei neue Felder hinten – `ZAEHLER` (Lebenszeichen 0–999, ändert sich mindestens alle 15 s,
+  -1 = noch nie) und `DIENSTE_GESAMT` (geprüfte Sprachdienste, der Nenner zu `DIENSTE`). `LETZTER` und `ALTER`
+  reichen bis ein Jahr (bisher kippte `LETZTER` nach 30 Tagen auf 0); `LETZTER` gilt für den Zeitpunkt der
+  Abfrage. Die Zustandsvorlage trägt `<v.0>` statt `<v.1>`. Vorhandene Befehle bleiben gültig; die zwei neuen
+  ergänzt man von Hand (Befehlserkennung in Schritt 2) oder importiert die Vorlage neu.
+* **Befehlsvorlage (Ausgang):** neu „Sprachsteuerung Ansage Türklingel“ und „Sprachsteuerung Alarm“ (dringend –
+  spricht auch in der Ruhezeit); Beispieltext „Das Garagentor steht seit einer Stunde offen“; die Kommentare
+  kommen aus der Sprachdatei (deutsch und englisch). Wirkt nach neuem Import der Vorlage.
+* **Verhalten:** `<thema>/aktion` geht 2 Sekunden nach jedem Befehl flüchtig auf `-` zurück – derselbe Befehl
+  wirkt so auch zweimal hintereinander (das Gateway schickt nur Änderungen). Ein neuer Befehl für dasselbe Ziel
+  innerhalb der 2 Sekunden wird nicht gelöscht. Der Dienst schreibt sein Abbild (`loxone.json`) nur noch bei
+  echter Änderung und sonst alle 15 Sekunden – bisher nach dem ersten verstandenen Satz jede Sekunde (86 400
+  Schreibvorgänge am Tag auf die SD-Karte).
+* Reiter Einbindung neu geordnet: 1 MQTT, 2 Zustand, 3 Sprachbefehle, 4 Loxone spricht, 5 Token,
+  6 Gegenprobe. Reiter MQTT: Zielthema und Empfehlung angepasst; der Noncached-Hinweis ist überholt.
+* Englische Oberfläche: die Bausteinnamen stehen deutsch wie im Musterprojekt.
+* Gerendert unter PHP 7.4, 8.4 und 8.5; Rücksetzen und Abbild gegen Attrappen geprüft, nicht am Gerät.
 
 ## Neu in 0.12.4
 
@@ -1188,6 +1227,13 @@ Ein virtueller Ausgang kann die Anlage etwas ansagen lassen
 gesprochen (`aktion=satz`), oder die Ansagen stilllegen (`aktion=ruhe`). Die
 Vorlage im Reiter *Einbindung in Loxone* baut den Ausgang fertig.
 
+**Fertig verbunden im Musterprojekt.** Die Bausteine der drei Baustein-Listen im Reiter
+*Einbindung in Loxone* stehen fertig verbunden auf den Seiten „Sprachsteuerung“ (Zustand),
+„Sprachsteuerung Befehle“ (Sprachbefehl → Loxone) und „Sprachsteuerung Ansagen“ (Loxone spricht) im
+[LoxBerry-Plugins Musterprojekt](https://github.com/timanders22/LoxBerry-Plugins-Musterprojekt),
+einer gemeinsamen Projektdatei mit allen Plugin-Seiten und Vorlagen. Das Musterprojekt nutzt die Vorlagen
+„Zustand (Eingang)“ und „Befehle (Ausgang)“; die Sprachbefehle kommen über das MQTT-Gateway.
+
 ## Ansagen zusätzlich über ein anderes Gerät (ab Werk aus)
 
 Die Antwort spricht der Lautsprecher des Sprachgeräts, das gefragt wurde.
@@ -1294,7 +1340,7 @@ Länge des Textes), in der Sicherung oder in einer Benachrichtigung.
 
 Die beiden Sprachdateien werden **erzeugt**, nicht von Hand gepflegt:
 `Werkzeuge/sp_sprache_erzeugen.py` hält jeden Text einmal, deutsch und englisch
-nebeneinander, und schreibt beide Dateien. Bei 566 Schlüsseln je Sprache laufen
+nebeneinander, und schreibt beide Dateien. Bei 1017 Schlüsseln je Sprache laufen
 zwei handgepflegte Dateien sonst auseinander.
 
 Im venv liegen zwei Pakete: **`wyoming`** (Pflicht — das offizielle Paket,
