@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.12.5
+Version 0.12.6
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,15 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.12.6
+
+* **Die Stilllegung aus Loxone übersteht ein Plugin-Update.** Legt Loxone die Ansagen über den Befehl
+  „Sprachsteuerung Ruhe“ still, steht das in `ruhe.json` im Datenordner – und den räumt LoxBerry bei jedem
+  Update ab. Bis 0.12.5 sprach das Plugin nach einem Update deshalb wieder, bis Schalter oder Schaltuhr in
+  Loxone das nächste Mal wechselten. Jetzt sichert `preupgrade.sh` die Datei neben dem Plugin-Ordner (wie
+  Verlauf, Messreihe und Ansagezeiten), und `postinstall.sh` spielt sie zurück, bevor der Dienst wieder
+  startet. Der Hinweis auf Seite „Sprachsteuerung Ansagen“ (Reiter Loxone, Schritt 4) ist angepasst.
 
 ## Neu in 0.12.5
 

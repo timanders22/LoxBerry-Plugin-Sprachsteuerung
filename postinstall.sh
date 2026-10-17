@@ -294,6 +294,9 @@ fi
 # Gegenstueck zu preupgrade.sh. Zwischen beiden Skripten hat der Installer
 # data/plugins/<x>/ vollstaendig geloescht; der Nachbar mit dem Punkt hat es
 # ueberstanden.
+# Seit 0.12.6 gehoert ruhe.json dazu (Stilllegung durch Loxone); sie kommt hier
+# zurueck, nicht erst in postupgrade.sh, weil der Waechter den Dienst nach dem
+# Ende dieses Skripts starten darf - er spraeche sonst bis dahin wieder.
 #
 # Entschieden wird an der MARKE, ohne Altersvergleich (Entscheidung 1;
 # Nachzug G1, 02.10.2026, vom Koordinator entschieden). Bis 0.11.14 stand hier
@@ -323,7 +326,7 @@ if [ -z "$MARKE_GILT" ]; then
     sp_neuinstallation_beiseite "$BASE/data/plugins/$PFOLDER.soll_laufen"
 elif [ -d "$LANG_SICHER" ]; then
     LANG_FEHLER=0
-    for LANG_F in verlauf.json messwerte.json ansagen.json; do
+    for LANG_F in verlauf.json messwerte.json ansagen.json ruhe.json; do
         [ -f "$LANG_SICHER/$LANG_F" ] || continue
         LANG_ZIEL="$PDATA/$LANG_F"
         if cp -p "$LANG_SICHER/$LANG_F" "$LANG_ZIEL.rueckholung" 2>/dev/null \

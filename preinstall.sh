@@ -18,7 +18,8 @@
 # Ohne Marke ist es eine NEUINSTALLATION. Was eine fruehere Installation
 # hinterlassen hat - <ordner>.backup.sprachsteuerung.json (Konfiguration mit
 # Aktionstoken und Miniserver-Zugang), <ordner>.backup.saetze.json (Satzmuster),
-# data/plugins/<ordner>.upgrade_sicherung (Verlauf, Messreihe, Ansagezeiten)
+# data/plugins/<ordner>.upgrade_sicherung (Verlauf, Messreihe, Ansagezeiten,
+# seit 0.12.6 auch die Stilllegung durch Loxone)
 # und der Sollmerker data/plugins/<ordner>.soll_laufen (er startete sonst den
 # Dienst ungefragt; F3) - geht nach <name>.alt, gemeldet mit genau einer
 # <WARNING>. Die heruntergeladenen Modelle (<ordner>.modelle_umzug) bleiben:

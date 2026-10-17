@@ -41,7 +41,7 @@ if [ -f "$BASE/data/plugins/$PFOLDER.upgrade_laeuft" ]; then
     if [ ! -d "$BASE/data/plugins/$PFOLDER" ]; then
         SP_WIEDERHOLUNG=ja
     else
-        for LANG_F in verlauf.json messwerte.json ansagen.json; do
+        for LANG_F in verlauf.json messwerte.json ansagen.json ruhe.json; do
             [ -f "$BASE/data/plugins/$PFOLDER.upgrade_sicherung/$LANG_F" ] && SP_WIEDERHOLUNG=ja
         done
     fi
@@ -229,6 +229,10 @@ echo "<OK> preupgrade abgeschlossen. Die Container bleiben unberuehrt."
 # Die Messreihe ist seit 0.10.0 dabei: ohne sie laesst sich nach einem
 # Modellwechsel nicht mehr sagen, ob es schneller geworden ist - und genau
 # dafuer misst man.
+# Dazu seit 0.12.6 die Stilllegung durch Loxone (ruhe.json, Befehl "Ruhe"). Bis
+# 0.12.5 fehlte sie hier: nach jedem Update sprach das Plugin wieder, obwohl
+# Loxone es stillgelegt hatte - bis Schalter oder Schaltuhr in Loxone das
+# naechste Mal wechselten (Welle Bild 18, offene Frage 3).
 # Der Installer loescht data/plugins/<x>/ bei JEDEM Update - gemessen an
 # sbin/plugininstall.pl (Zweig master, 23.08.2026): &purge_installation steht
 # im Upgrade-Zweig (:886), und ihr Rumpf loescht ohne Bedingung (:1631).
@@ -269,19 +273,23 @@ chmod 0700 "$LANG_SICHER" 2>/dev/null
 # Stand. Ergaenzt wird nur, was in der Sicherung noch fehlt.
 [ -n "$SP_WIEDERHOLUNG" ] && [ -f "$LANG_SICHER/angelegt" ] \
     || date +%s > "$LANG_SICHER/angelegt" 2>/dev/null
-for LANG_F in verlauf.json messwerte.json ansagen.json; do
+for LANG_F in verlauf.json messwerte.json ansagen.json ruhe.json; do
     [ -n "$SP_WIEDERHOLUNG" ] && [ -f "$LANG_SICHER/$LANG_F" ] && continue
     [ -f "$BASE/data/plugins/$PFOLDER/$LANG_F" ] \
         && cp -p "$BASE/data/plugins/$PFOLDER/$LANG_F" "$LANG_SICHER/$LANG_F" 2>/dev/null
 done
 # Die Wirkung pruefen, nicht den Rueckgabewert: liegt hinterher etwas da?
-# Gezaehlt werden die drei Dateien - der Zeitpunkt allein ist keine Sicherung.
+# Gezaehlt werden die drei Langzeitdateien - der Zeitpunkt allein ist keine
+# Sicherung, und ruhe.json bekommt eine eigene Zeile.
 LANG_DA=0
 for LANG_F in verlauf.json messwerte.json ansagen.json; do
     [ -f "$LANG_SICHER/$LANG_F" ] && LANG_DA=$((LANG_DA + 1))
 done
 if [ "$LANG_DA" -gt 0 ]; then
     echo "<OK> Langzeitwerte gesichert."
+fi
+if [ -f "$LANG_SICHER/ruhe.json" ]; then
+    echo "<OK> Stilllegung durch Loxone gesichert."
 fi
 
 # ---------- Der Sollmerker ----------
