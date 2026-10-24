@@ -48,23 +48,40 @@ function sp_pruefungen()
     // Konfiguration roh; bei leerem Rechnernamen meldete sie eine Stoerung,
     // waehrend diag mit 127.0.0.1 richtig antwortete. Zwei Abrufwege, zwei
     // Antworten auf dieselbe Frage.
-    foreach (array('whisper' => 'TEST.F_WHISPER', 'piper' => 'TEST.F_PIPER',
-                   'wake' => 'TEST.F_WAKE') as $dienst => $schluessel) {
-        list($host, $port) = sp_dienst_ziel($dienst === 'wake' ? 'wakeword' : $dienst, $cfg);
-        list($ok, $grund) = sp_erreichbar($host, $port);
-        $zeilen[] = sp_pruefzeile($ok, sp_t($schluessel),
-            $ok ? sp_e($host . ':' . $port)
-                : sprintf(sp_t('TEST.A_DIENST_STUMM'), sp_e($host . ':' . $port), sp_e($grund)));
+    /* S15 (0.12.7, Pruefbericht): ein offener Port ist noch kein Sprachdienst. Erkannt wird wie in der Ampel des
+     * Reiters Dienste (sp_dienst_erkennen(): Wyoming-describe bzw. /health des Sprachmodells); ein anderer Dienst auf
+     * dem Port ist rot. Bis 0.12.6 war die Zeile dann gruen, die Ampel daneben rot.
+     * S14: den Wortwecker braucht nur ein Wyoming-Mikrofon - ohne eines ist er grau mit dem Satz des
+     * Dienst-Selbsttests (dort seit 0.12.0 [INFO]); bis 0.12.6 stand die Zeile rot. */
+    $sp_wyoming = 0;
+    foreach ((isset($cfg['satelliten']) && is_array($cfg['satelliten']) ? $cfg['satelliten'] : array()) as $sp_s) {
+        if (is_array($sp_s) && !empty($sp_s['host'])
+            && (isset($sp_s['art']) ? (string) $sp_s['art'] : 'wyoming') !== 'esphome') {
+            $sp_wyoming++;
+        }
     }
-    if (!empty($cfg['llm_ein'])) {
-        list($llm_h, $llm_p) = sp_dienst_ziel('llm', $cfg);
-        list($ok, $grund) = sp_erreichbar($llm_h, $llm_p);
-        $zeilen[] = sp_pruefzeile($ok, sp_t('TEST.F_LLM'),
-            $ok ? sp_e($llm_h . ':' . $llm_p)
-                : sprintf(sp_t('TEST.A_DIENST_STUMM'),
-                          sp_e($llm_h . ':' . $llm_p), sp_e($grund)));
-    } else {
-        $zeilen[] = sp_pruefzeile(-1, sp_t('TEST.F_LLM'), sp_t('TEST.A_LLM_AUS'));
+    foreach (array('whisper' => 'TEST.F_WHISPER', 'piper' => 'TEST.F_PIPER',
+                   'wake' => 'TEST.F_WAKE', 'llm' => 'TEST.F_LLM') as $dienst => $schluessel) {
+        if ($dienst === 'llm' && empty($cfg['llm_ein'])) {
+            $zeilen[] = sp_pruefzeile(-1, sp_t('TEST.F_LLM'), sp_t('TEST.A_LLM_AUS'));
+            continue;
+        }
+        $sp_dn = $dienst === 'wake' ? 'wakeword' : $dienst;
+        list($host, $port) = sp_dienst_ziel($sp_dn, $cfg);
+        list($ok, $grund) = sp_dienst_erkennen($sp_dn, $host, $port, 3.0);
+        if ($ok === 1) {
+            $zeilen[] = sp_pruefzeile(1, sp_t($schluessel), sp_e($host . ':' . $port));
+        } elseif ($ok === 2) {
+            $sp_laedt = $grund === sp_t('LIB012.ERKENNEN_LAEDT');
+            $zeilen[] = sp_pruefzeile($sp_laedt ? -1 : 0, sp_t($schluessel),
+                sprintf(sp_t('TEST.A_DIENST_FREMD'), sp_e($host . ':' . $port), sp_e($grund)));
+        } else {
+            list(, $grund) = sp_erreichbar($host, $port);
+            $zeilen[] = ($dienst === 'wake' && $sp_wyoming === 0)
+                ? sp_pruefzeile(-1, sp_t($schluessel), sprintf(sp_t('TEST.A_WAKE_UNNOETIG'), sp_e($host . ':' . $port)))
+                : sp_pruefzeile(0, sp_t($schluessel),
+                    sprintf(sp_t('TEST.A_DIENST_STUMM'), sp_e($host . ':' . $port), sp_e($grund)));
+        }
     }
 
     /* Seit 0.11.11 (Bauliste Einrichtung E8): die Gesamtzeile der Ampel aus
@@ -140,6 +157,20 @@ function sp_pruefungen()
             . sprintf(sp_t('TEST.A_MQTT_FASSUNG'), $m['fassung'] ?: sp_t('TEST.A_MQTT_UNBEKANNT')) . ')');
     } else {
         $zeilen[] = sp_pruefzeile(0, sp_t('TEST.F_MQTT'), sp_t('TEST.A_MQTT_AUS'));
+    }
+
+    /* Gruppe 11 (0.12.7, Entwurf 3.5): Befehlsbruecke (laeuft sie, status/befehle, letzte Quittung), ihre
+     * Einrichtung (--pruefen: mosquitto-clients, Zuordnung), Praefix in ihrer Grenze, Namensfilter der gemeinsamen
+     * Warteschlange, Lebenszeichen, Namenstabelle, Abo-Datei und Vorlage MQTT-Befehle. Alle lesen nur. */
+    foreach (array('BEFEHL.F_BRUECKE' => sp_pruef_bruecke($cfg),
+                   'BEFEHL.F_EINRICHTUNG' => sp_pruef_bruecke_einrichtung($cfg),
+                   'BEFEHL.F_PRAEFIX' => sp_pruef_praefix($cfg),
+                   'BEFEHL.F_NAMENSFILTER' => sp_pruef_namensfilter(),
+                   'BEFEHL.F_HERZ' => sp_pruef_herzschlag($cfg),
+                   'BEFEHL.F_NAMEN' => sp_pruef_namen(),
+                   'BEFEHL.F_ABO' => sp_pruef_abo($cfg),
+                   'BEFEHL.F_VORLAGE' => sp_pruef_vorlage_mqtt()) as $sp_k => $sp_r) {
+        $zeilen[] = sp_pruefzeile($sp_r[0], sp_t($sp_k), $sp_r[1]);
     }
 
     // Ruhezeit und Bremse - beides wirkt auf JEDE Ansage.

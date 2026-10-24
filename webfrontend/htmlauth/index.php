@@ -598,12 +598,20 @@ if ($sp_post && isset($_POST['log_holen'])) {
 if ($sp_post && isset($_POST['vorlage'])) {
     $sp_was = sp_post_text('vorlage');
     $sp_paar = array('', '');
-    if ($sp_was === 'eingang')      { $sp_paar = sp_vorlage(); }
-    elseif ($sp_was === 'ausgang')  { $sp_paar = sp_vorlage_ausgang(); }
+    /* Gruppe 11 (0.12.7, Entwurf 2.6/3.8): neu die Vorlage MQTT-Befehle; die beiden HTTP-Vorlagen (byte-gleich wie
+     * bis 0.12.6) nur mit dem Haken "HTTP-Endpunkt fuer Loxone annehmen" - ohne ihn antwortete jede Adresse darin
+     * mit 403. */
+    $sp_ep_an = (int) sp_config(false)['endpunkt_ein'] === 1;
+    if ($sp_was === 'eingang' && $sp_ep_an)     { $sp_paar = sp_vorlage(); }
+    elseif ($sp_was === 'ausgang' && $sp_ep_an) { $sp_paar = sp_vorlage_ausgang(); }
     elseif ($sp_was === 'ziele')    { $sp_paar = sp_vorlage_ziele(); }
+    elseif ($sp_was === 'mqtt')     { $sp_paar = sp_vorlage_mqtt_out(); }
     list($sp_name, $sp_inhalt) = $sp_paar;
-    if (!in_array($sp_was, array('eingang', 'ausgang', 'ziele'), true)) {
+    if (!in_array($sp_was, array('eingang', 'ausgang', 'ziele', 'mqtt'), true)) {
         $sp_fehler[] = sp_t('TEST.M_UNBEKANNT');
+        $sp_tab = 'tab-loxone';
+    } elseif (in_array($sp_was, array('eingang', 'ausgang'), true) && !$sp_ep_an) {
+        $sp_fehler[] = sp_e(sp_t('LOX.ERST_HAKEN'));
         $sp_tab = 'tab-loxone';
     } elseif ($sp_inhalt === '') {
         $sp_fehler[] = sp_t('LOX.KEINE_ZIELE_VORLAGE');
@@ -664,6 +672,7 @@ $sp_regel = function ($pfad, $wert, $feld, $idx = null) use (&$sp_fehler) {
 /* ---------------- MQTT speichern (eigener Reiter) ---------------- */
 if ($sp_post && isset($_POST['mqtt_save'])) {
     $sp_cfg = sp_config();
+    $sp_praefix_vorher = trim((string) $sp_cfg['mqtt_topic'], '/');
     $sp_cfg['mqtt_ein'] = isset($_POST['mqtt_ein']) ? 1 : 0;
     // S3 (Runde 2): die Dauerverbindung des Dienstes zum Broker.
     $sp_cfg['mqtt_dauer_ein'] = isset($_POST['mqtt_dauer_ein']) ? 1 : 0;
@@ -676,6 +685,17 @@ if ($sp_post && isset($_POST['mqtt_save'])) {
     if ($sp_regel('herzschlag_s', $sp_takt, 'herzschlag_s')) {
         $sp_cfg['herzschlag_s'] = (int) $sp_takt;
     }
+    /* Gruppe 11 (0.12.7, Entwurf 3.3/3.5/3.7): Befehle ueber MQTT (Befehlsbruecke) mit zweitem Haken fuer Ansagen
+     * und Saetze, dazu der alte Befehlsweg <praefix>/cmd/... (nur mit der dauerhaften Verbindung). Mit
+     * "Befehle ueber MQTT annehmen" muss das Praefix in die Grenze der Bruecke passen (je Ebene Buchstaben, Ziffern,
+     * _ und -) - sonst wird nichts gespeichert (Entscheidung 16 der Gruppe 1). */
+    $sp_cfg['befehle_mqtt_ein'] = isset($_POST['befehle_mqtt_ein']) ? 1 : 0;
+    $sp_cfg['befehle_mqtt_steuern'] = isset($_POST['befehle_mqtt_steuern']) ? 1 : 0;
+    $sp_cfg['befehle_cmd_ein'] = isset($_POST['befehle_cmd_ein']) ? 1 : 0;
+    if (!$sp_fehler && $sp_cfg['befehle_mqtt_ein'] === 1 && !sp_bb_praefix_ok($sp_cfg['mqtt_topic'])) {
+        $sp_fehler[] = sp_e(sprintf(sp_t('BEFEHL.M_PRAEFIX'), (string) $sp_cfg['mqtt_topic']));
+        sp_bean('mqtt_topic');
+    }
     if ($sp_fehler) { $sp_formular_x2 = 'mqtt'; }
     if (!$sp_fehler) {
         if (sp_config_speichern($sp_cfg)) {
@@ -685,10 +705,28 @@ if ($sp_post && isset($_POST['mqtt_save'])) {
             list($sp_ok, $sp_neu) = sp_mqtt_abo_schreiben($sp_cfg);
             if (!$sp_ok) { $sp_hinweise[] = sprintf(sp_t('UI013.ABO_DATEI_FEHLER'), sp_e(sp_mqtt_abo_datei())); }
             elseif ($sp_neu) { $sp_meldungen[] = sprintf(sp_t('UI013.ABO_DATEI_GESCHRIEBEN'), sp_e(trim(sp_mqtt_abo_inhalt($sp_cfg)))); }
+            /* Gruppe 11: die Befehlsbruecke gleich starten bzw. anhalten (sonst der Waechter binnen einer Minute);
+             * ein neues Praefix heisst Neustart (neues Abo). */
+            $sp_bs = sp_bruecke_schalten(trim((string) $sp_cfg['mqtt_topic'], '/') !== $sp_praefix_vorher);
+            $sp_bsatz = sp_bruecke_satz($sp_bs);
+            if ($sp_bsatz !== '') {
+                if (in_array($sp_bs[0], array('start_fehl', 'stop_fehl'), true)) { $sp_hinweise[] = $sp_bsatz; }
+                else { $sp_meldungen[] = $sp_bsatz; }
+            }
         }
         else { $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_SPEICHERN'), sp_e($sp_p['config'])); }
     }
     $sp_tab = 'tab-mqtt';
+}
+
+/* ---------------- HTTP-Endpunkt an/aus (Reiter Einbindung, seit 0.12.7) ----------------
+ * Gruppe 11 (Entwurf 3.6, E4): der Haken "HTTP-Endpunkt fuer Loxone annehmen" sperrt den ganzen Endpunkt. */
+if ($sp_post && isset($_POST['endpunkt_save'])) {
+    $sp_cfg = sp_config();
+    $sp_cfg['endpunkt_ein'] = isset($_POST['endpunkt_ein']) ? 1 : 0;
+    if (sp_config_speichern($sp_cfg)) { $sp_meldungen[] = sp_t('EINST.GESPEICHERT'); }
+    else { $sp_fehler[] = sprintf(sp_t('EINST.FEHLER_SPEICHERN'), sp_e($sp_p['config'])); }
+    $sp_tab = 'tab-loxone';
 }
 
 /* ---------------- Einstellungen speichern ----------------
@@ -1502,7 +1540,10 @@ if ($sp_post && isset($_POST['alias_uebernehmen']) && isset($_POST['alias_ziel']
 if ($sp_post && isset($_POST['dienst'])) {
     $sp_was = sp_post_text('dienst');
     list($sp_ok, $sp_aus) = sp_dienst($sp_was);
-    if ($sp_ok) {
+    if ($sp_ok === 4) {
+        // S6 (0.12.7): ein anderer Start haelt die Startsperre - nichts gestartet, kein Erfolg.
+        $sp_hinweise[] = sp_e($sp_aus) . ' ' . sp_e(sp_t('LIB012.DIENST_BELEGT'));
+    } elseif ($sp_ok) {
         $sp_meldungen[] = sp_t('EINST.DIENST_' . strtoupper($sp_was)) . ' ' . sp_e($sp_aus);
     } else { $sp_fehler[] = sp_e($sp_aus); }
     $sp_tab = 'tab-settings';
@@ -1664,14 +1705,10 @@ $sp_basis = $sp_lb_adr . '/plugins/' . $sp_p['plugin'] . '/index.php';
 $sp_logzeilen = is_file($sp_p['log']) ? sp_log_ende($sp_p['log'], 400) : array();
 list($sp_ruhe_jetzt, $sp_ruhe_grund) = sp_ruhe_aktiv($sp_cfg);
 $sp_praefix = trim((string) $sp_cfg['mqtt_topic'], '/');
-/* A9: fehlt die Abo-Datei fuer das Gateway V1 (frische Installation, oder
- * vor Runde 2 nie geschrieben), wird sie beim Aufbau angelegt - einmal, sie
- * traegt nur das Praefix. Danach schreibt sie nur noch "MQTT speichern". */
+/* A9 / S19 (0.12.7): die Abo-Datei fuer das Gateway V1 legen postinstall.sh und der Dienststart an, wenn sie fehlt;
+ * "MQTT speichern" schreibt sie bei einem neuen Praefix. Bis 0.12.6 legte sie dieser Seitenaufbau an - ein GET, der
+ * schreibt. Hier wird nur noch gelesen. */
 list($sp_abo_lage) = sp_mqtt_abo_lage($sp_cfg);
-if ($sp_abo_lage === 'fehlt') {
-    list($sp_abo_ok) = sp_mqtt_abo_schreiben($sp_cfg);
-    list($sp_abo_lage) = sp_mqtt_abo_lage($sp_cfg);
-}
 
 /* Zwei Reiter kosten etwas: 'Test' fragt vier Ports ab und ruft den eigenen
  * Endpunkt ueber HTTP auf, 'Dienste' startet hardware.py und fragt Docker.
@@ -2352,6 +2389,8 @@ $sp_themen = array(
     'dienste_gesamt' => 'MQTT.B_DIENSTE_GESAMT', 'regeln' => 'MQTT.B_REGELN',
     'ziele' => 'MQTT.B_ZIELE', 'ruhe' => 'MQTT.B_RUHE',
     'letzter_satz_alter' => 'MQTT.B_LETZTER',
+    'status/zaehler' => 'BEFEHL.B_STATUS_ZAEHLER',
+    'ansage_ok' => 'UI013.B_ANSAGE_OK', 'ansage_grund' => 'UI013.B_ANSAGE_GRUND',
 );
 // Die beiden Zielthemen stehen hier mit maskierten spitzen Klammern
 // ('&lt;Thema&gt;/aktion'), weil sie so angezeigt werden. Fuer die
@@ -2398,6 +2437,16 @@ foreach ($sp_themen as $sp_th => $sp_sch) {
   </table>
   </div>
   <div class="sm-hilfe"><?= sp_e(sp_t('UI013.H_MQTT_DAUER_LESEN')) ?></div>
+<?php /* Gruppe 11 (0.12.7, Entwurf 3.7, E5): der alte Befehlsweg <praefix>/cmd/... hinter einem eigenen Haken - beim
+   Update wie bisher (= Dauerverbindung), neu aus. Der Zeitpunkt der letzten Nachricht kommt aus dem Abbild. */
+   $sp_cmd_zl = (isset($sp_lox['mqtt_dauer']['cmd_zuletzt']) && is_numeric($sp_lox['mqtt_dauer']['cmd_zuletzt']))
+              ? (int) $sp_lox['mqtt_dauer']['cmd_zuletzt'] : 0; ?>
+  <label style="display:inline-flex;align-items:center;gap:8px;">
+    <input data-role="none" type="checkbox" name="befehle_cmd_ein" value="1" <?= sp_x2_haken('befehle_cmd_ein', (int) $sp_cfg['befehle_cmd_ein'] === 1) ? 'checked' : '' ?><?= sp_x2_mark('befehle_cmd_ein') ?>>
+    <?= sp_e(sp_t('BEFEHL.L_CMD_EIN')) ?>
+  </label>
+  <div class="sm-hilfe"><?= sp_e(sprintf(sp_t('BEFEHL.H_CMD_EIN'), $sp_praefix)) ?>
+  <?= sp_e($sp_cmd_zl > 0 ? sprintf(sp_t('LOX.CMD_ZULETZT'), date('d.m.Y H:i', $sp_cmd_zl)) : sp_t('LOX.CMD_NIE')) ?></div>
 </div>
 <div class="sm-feld">
   <label for="mqtt_topic"><?= sp_e(sp_t('EINST.L_MQTT_TOPIC')) ?></label>
@@ -2408,6 +2457,26 @@ foreach ($sp_themen as $sp_th => $sp_sch) {
   <input data-role="none" type="number" id="herzschlag_s" name="herzschlag_s" value="<?= sp_e(sp_x2_wert('herzschlag_s', (int) $sp_cfg['herzschlag_s'])) ?>"<?= $sp_mm('herzschlag_s', 0, 3600) ?><?= sp_x2_mark('herzschlag_s') ?>>
   <div class="sm-hilfe"><?= sp_t('MQTT.H_HERZSCHLAG') ?></div>
 </div>
+
+<?php /* Gruppe 11 (0.12.7, Entwurf 3.2-3.5, E1-E3): Befehle aus Loxone ueber die gemeinsame Befehlsbruecke. */ ?>
+<h3><?= sp_e(sp_t('BEFEHL.H')) ?></h3>
+<p class="sm-hilfe"><?= sp_e(sprintf(sp_t('BEFEHL.TEXT'), $sp_praefix . '/befehl/...')) ?></p>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;">
+    <input data-role="none" type="checkbox" name="befehle_mqtt_ein" value="1" <?= sp_x2_haken('befehle_mqtt_ein', (int) $sp_cfg['befehle_mqtt_ein'] === 1) ? 'checked' : '' ?><?= sp_x2_mark('befehle_mqtt_ein') ?>>
+    <?= sp_e(sp_t('BEFEHL.L_EIN')) ?>
+  </label>
+  <div class="sm-hilfe"><?= sp_e(sp_t('BEFEHL.H_EIN')) ?></div>
+</div>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;">
+    <input data-role="none" type="checkbox" name="befehle_mqtt_steuern" value="1" <?= sp_x2_haken('befehle_mqtt_steuern', (int) $sp_cfg['befehle_mqtt_steuern'] === 1) ? 'checked' : '' ?><?= sp_x2_mark('befehle_mqtt_steuern') ?>>
+    <?= sp_e(sp_t('BEFEHL.L_STEUERN')) ?>
+  </label>
+  <div class="sm-hilfe"><?= sp_e(sp_t('BEFEHL.H_STEUERN')) ?></div>
+</div>
+<div class="sm-warnung"><?= sp_e(sp_t('BEFEHL.HEIMNETZ')) ?></div>
+<div class="sm-hinweis"><?= sp_e(sprintf(sp_t('BEFEHL.QUITTUNG'), $sp_praefix . '/befehl/<name>/quittung')) ?></div>
 
 <div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sp_t('LEGENDE.AKTION') ?></span></div>
 <div class="sm-knopfreihe">
@@ -3073,6 +3142,7 @@ if (is_array($sp_lms_liste) && $sp_lms_liste) { ?>
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="lox_holen" value="1"><?= sp_e(sp_t('LOXIMP.K_HOLEN')) ?></button>
 </div>
+<div class="sm-hilfe"><?= sp_e(sp_t('LOXIMP.H_SPERRE')) ?></div>
 </form>
 <h3><?= sp_e(sp_t('UI012.H_LOX_HAND')) ?></h3>
 <?php } ?>
@@ -3095,6 +3165,9 @@ if (is_array($sp_lms_liste) && $sp_lms_liste) { ?>
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="lox_holen" value="1"><?= sp_e(sp_t('LOXIMP.K_HOLEN')) ?></button>
 </div>
+<?php /* E2 (0.12.7, Regeln/04:283): der Hinweis auf die Sperre des Miniservers neben dem Knopf, nicht erst in
+   der Antwort. */ ?>
+<div class="sm-hilfe"><?= sp_e(sp_t('LOXIMP.H_SPERRE')) ?></div>
 </form>
 <?php } else { ?>
 <div class="sm-warnung"><?= sp_t('LOXIMP.PRUEFEN') ?></div>
@@ -3208,158 +3281,74 @@ if ($sp_x3g) { ?>
 
 <?php
 /**
- * Die Baustein-Listen des Reiters "Einbindung in Loxone" - Welle Bild 18 (0.12.5, Hausherr 11.10.2026:
- * Vollausstattung, ein absoluter Laie soll das Maximum leicht uebernehmen koennen; Entwurf Welle 18 ss,
- * E1-E13, 17.10.2026). DREI Seiten wie im LoxBerry-Plugins Musterprojekt (Musterprojekt/baustein_listen.txt,
- * Abschnitte "Sprachsteuerung" 26, "Sprachsteuerung Befehle" 14, "Sprachsteuerung Ansagen" 22 Zeilen),
- * je in dem Schritt, zu dem sie gehoert (2 Zustand, 3 Sprachbefehle, 4 Loxone spricht). Bis 0.12.4 stand hier
- * EINE Liste mit 17 Zeilen (Funktion sp_bausteine). Berichtigt gegen sie: die Texteingaenge des Gateways
- * heissen in Config "Virtueller Texteingang" und muessen GENAU den Gateway-Namen tragen (unter dem
- * Vorschlagsnamen legte das Gateway einen zweiten Eingang an, der Baustein der Liste blieb leer);
- * "Vergleicher (Text)" und "Beleuchtungssteuerung AI/AUS" gibt es in Config nicht (Textvergleich jetzt im
- * Status, Statuswert am Ausgang AQ); die Ausfallerkennung las nur OK und ALTER und meldete bei stehendem
- * LoxBerry nie (jetzt Analogwertvalidierung am Lebenszeichen ZAEHLER); "Nachtmerker der Anlage" war kein
- * baubarer Verweis (jetzt Schaltuhr).
+ * Die Baustein-Listen des Reiters "Einbindung in Loxone" - DREI Seiten wie im LoxBerry-Plugins Musterprojekt
+ * (Musterprojekt/baustein_listen.txt, Abschnitte "Sprachsteuerung" 25, "Sprachsteuerung Befehle" 14, "Sprachsteuerung
+ * Ansagen" 22 Zeilen; Gruppe 11 / MQTT, 0.12.7, Entwurf Gruppe 11 Abschnitt 9), je in dem Schritt, zu dem sie gehoert
+ * (2 Zustand, 3 Sprachbefehle, 4 Loxone spricht). Seit 0.12.7 kommen die Werte als Virtuelle Eingaenge ueber das
+ * MQTT-Gateway (bis 0.12.6 ein Virtueller HTTP-Eingang mit Token, Seite "Sprachsteuerung" 26 Zeilen) und die
+ * Befehle als "publish <praefix>/befehl/..." an den gemeinsamen Ausgang "LoxBerry MQTT-Gateway".
  *
- * Jede Zeile ist EIN Sprachschluessel BAUSTEIN.Z<Seite>_<Nr> "Typ | Name | Parameter | Eingaenge" (Zeilen mit
- * Prozentzeichen dort doppelt und ueber sprintf() geholt, angezeigt mit einem; deutsch wortgleich mit der Liste;
- * Bausteinnamen auch englisch deutsch). DIE NAMEN DER GATEWAY-EINGAENGE WERDEN GEBAUT, NICHT ABGESCHRIEBEN:
- * eine Zeile mit 'gw' traegt den Namen aus sp_gateway_name() - das Gateway bildet ihn aus dem Praefix (Reiter
- * MQTT) und dem Thema, "/", "%" und Leerzeichen als "_" (wie sp_vorlage_ziele()). Mit dem Werkspraefix
- * steht genau der Name der Liste da. Keine Leitung geht ueber eine Seitengrenze; SPRACHSTEUERUNG_RUHE steht auf
- * Seite 3 als weitere Instanz.
+ * Jede Zeile ist EIN Sprachschluessel BAUSTEIN.Z<Seite>_<Nr> "Typ | Name | Parameter | Eingaenge" (deutsch wortgleich
+ * mit der Liste). DIE NAMEN DER GATEWAY-EINGAENGE WERDEN GEBAUT, NICHT ABGESCHRIEBEN: eine Zeile mit 'gw' traegt den
+ * Namen aus sp_gateway_name() - das Gateway bildet ihn aus dem Praefix (Reiter MQTT) und dem Thema, "/", "%" und
+ * Leerzeichen als "_". Zeilen mit 'pf' tragen den Befehl mit dem Praefix: %1$s = Praefix, %2$s = doppeltes
+ * Anfuehrungszeichen (in einer Sprachdatei darf keines stehen), ueber sprintf() geholt. Mit dem Werkspraefix steht
+ * genau die Zeile der Liste da.
  *
- * Rueckgabe: Liste von array('seite', 'bild', 'zeilen' => array(array(Nr, Typ, Name, Parameter, Eingaenge),
- * ...), 'schritte', 'hinweise'). Zellen und Schritte sind Klartext (unten maskiert), die Hinweise
- * freigegebenes HTML aus der Sprachdatei.
+ * Rueckgabe: Liste von array('seite', 'bild', 'zeilen' => array(array(Nr, Typ, Name, Parameter, Eingaenge), ...),
+ * 'schritte', 'hinweise'). Zellen und Schritte sind Klartext (unten maskiert), die Hinweise freigegebenes HTML aus der
+ * Sprachdatei.
  */
 function sp_bausteinliste()
 {
+    $pf = trim((string) sp_config(false)['mqtt_topic'], '/');
+    if ($pf === '') { $pf = 'sprachsteuerung'; }
+    /* Die Zeilen mit Praefix und die mit %% stehen als ausgeschriebene sprintf()-Aufrufe da: sprachplatzhalter_pruefen.py
+     * liest die Aufrufstelle woertlich und saehe einen zusammengesetzten Schluessel nicht. */
+    $q = '"';
+    $fest = array(
+        'BAUSTEIN.Z2_02' => sprintf(sp_t('BAUSTEIN.Z2_02')),
+        'BAUSTEIN.Z3_03' => sprintf(sp_t('BAUSTEIN.Z3_03'), $pf),
+        'BAUSTEIN.Z3_08' => sprintf(sp_t('BAUSTEIN.Z3_08'), $pf, $q),
+        'BAUSTEIN.Z3_10' => sprintf(sp_t('BAUSTEIN.Z3_10'), $pf),
+        'BAUSTEIN.Z3_12' => sprintf(sp_t('BAUSTEIN.Z3_12'), $pf),
+        'BAUSTEIN.Z3_18' => sprintf(sp_t('BAUSTEIN.Z3_18'), $pf),
+    );
+    $z = function ($seite, $n, $art = '') use ($fest) {
+        $k = sprintf('BAUSTEIN.Z%d_%02d', $seite, $n);
+        return array(isset($fest[$k]) ? $fest[$k] : sp_t($k), $art);
+    };
+    $s1 = array();
+    for ($i = 1; $i <= 25; $i++) { $s1[] = $z(1, $i, $i <= 10 ? 'gw' : ''); }
+    $s2 = array();
+    for ($i = 1; $i <= 14; $i++) { $s2[] = $z(2, $i, in_array($i, array(1, 2, 7, 8, 9, 10, 11, 12, 13), true) ? 'gw' : ''); }
+    $s3 = array();
+    for ($i = 1; $i <= 22; $i++) {
+        $s3[] = $z(3, $i, in_array($i, array(1, 19, 20, 21), true) ? 'gw'
+                          : (in_array($i, array(3, 8, 10, 12, 18), true) ? 'pf' : ''));
+    }
     // Seitenname (= Config-Seite im Musterprojekt, deshalb fest), Bild, Zeilen, Kasten, Hinweise
     $seiten = array(
-        array('Sprachsteuerung', 'einbindung_loxone.png', array(
-            array(sp_t('BAUSTEIN.Z1_01')),
-            array(sp_t('BAUSTEIN.Z1_02')),
-            array(sp_t('BAUSTEIN.Z1_03')),
-            array(sp_t('BAUSTEIN.Z1_04')),
-            array(sp_t('BAUSTEIN.Z1_05')),
-            array(sp_t('BAUSTEIN.Z1_06')),
-            array(sp_t('BAUSTEIN.Z1_07')),
-            array(sp_t('BAUSTEIN.Z1_08')),
-            array(sp_t('BAUSTEIN.Z1_09')),
-            array(sp_t('BAUSTEIN.Z1_10')),
-            array(sp_t('BAUSTEIN.Z1_11')),
-            array(sp_t('BAUSTEIN.Z1_12')),
-            array(sp_t('BAUSTEIN.Z1_13')),
-            array(sp_t('BAUSTEIN.Z1_14')),
-            array(sp_t('BAUSTEIN.Z1_15')),
-            array(sp_t('BAUSTEIN.Z1_16')),
-            array(sp_t('BAUSTEIN.Z1_17')),
-            array(sp_t('BAUSTEIN.Z1_18')),
-            array(sp_t('BAUSTEIN.Z1_19')),
-            array(sp_t('BAUSTEIN.Z1_20')),
-            array(sp_t('BAUSTEIN.Z1_21')),
-            array(sp_t('BAUSTEIN.Z1_22')),
-            array(sp_t('BAUSTEIN.Z1_23')),
-            array(sp_t('BAUSTEIN.Z1_24')),
-            array(sp_t('BAUSTEIN.Z1_25')),
-            array(sp_t('BAUSTEIN.Z1_26')),
-        ), array(
-            'BAUSTEIN.SEITE1_SCHRITT1',
-            'BAUSTEIN.SEITE1_SCHRITT2',
-            'BAUSTEIN.SEITE1_SCHRITT3',
-            'BAUSTEIN.SEITE1_SCHRITT4',
-            'BAUSTEIN.SEITE1_SCHRITT5',
-            'BAUSTEIN.SEITE1_SCHRITT6',
-        ), array(
-            'BAUSTEIN.SEITE1_H1',
-            'BAUSTEIN.SEITE1_H2',
-            'BAUSTEIN.SEITE1_H3',
-            'BAUSTEIN.SEITE1_H4',
-            'BAUSTEIN.SEITE1_H5',
-            'BAUSTEIN.SEITE1_H6',
-        )),
-        array('Sprachsteuerung Befehle', 'einbindung_loxone_befehle.png', array(
-            array(sp_t('BAUSTEIN.Z2_01'), 'gw'),
-            array(sprintf(sp_t('BAUSTEIN.Z2_02')), 'gw'),
-            array(sp_t('BAUSTEIN.Z2_03')),
-            array(sp_t('BAUSTEIN.Z2_04')),
-            array(sp_t('BAUSTEIN.Z2_05')),
-            array(sp_t('BAUSTEIN.Z2_06')),
-            array(sp_t('BAUSTEIN.Z2_07'), 'gw'),
-            array(sp_t('BAUSTEIN.Z2_08'), 'gw'),
-            array(sp_t('BAUSTEIN.Z2_09'), 'gw'),
-            array(sp_t('BAUSTEIN.Z2_10'), 'gw'),
-            array(sp_t('BAUSTEIN.Z2_11'), 'gw'),
-            array(sp_t('BAUSTEIN.Z2_12'), 'gw'),
-            array(sp_t('BAUSTEIN.Z2_13'), 'gw'),
-            array(sp_t('BAUSTEIN.Z2_14')),
-        ), array(
-            'BAUSTEIN.SEITE2_SCHRITT1',
-            'BAUSTEIN.SEITE2_SCHRITT2',
-            'BAUSTEIN.SEITE2_SCHRITT3',
-            'BAUSTEIN.SEITE2_SCHRITT4',
-            'BAUSTEIN.SEITE2_SCHRITT5',
-        ), array(
-            'BAUSTEIN.SEITE2_H1',
-            'BAUSTEIN.SEITE2_H2',
-            'BAUSTEIN.SEITE2_H3',
-            'BAUSTEIN.SEITE2_H4',
-            'BAUSTEIN.SEITE2_H5',
-            'BAUSTEIN.SEITE2_H6',
-            'BAUSTEIN.SEITE2_H7',
-        )),
-        array('Sprachsteuerung Ansagen', 'einbindung_loxone_ansagen.png', array(
-            array(sp_t('BAUSTEIN.Z3_01')),
-            array(sp_t('BAUSTEIN.Z3_02')),
-            array(sp_t('BAUSTEIN.Z3_03')),
-            array(sp_t('BAUSTEIN.Z3_04')),
-            array(sp_t('BAUSTEIN.Z3_05')),
-            array(sp_t('BAUSTEIN.Z3_06')),
-            array(sp_t('BAUSTEIN.Z3_07')),
-            array(sp_t('BAUSTEIN.Z3_08')),
-            array(sp_t('BAUSTEIN.Z3_09')),
-            array(sp_t('BAUSTEIN.Z3_10')),
-            array(sp_t('BAUSTEIN.Z3_11')),
-            array(sp_t('BAUSTEIN.Z3_12')),
-            array(sp_t('BAUSTEIN.Z3_13')),
-            array(sp_t('BAUSTEIN.Z3_14')),
-            array(sp_t('BAUSTEIN.Z3_15')),
-            array(sp_t('BAUSTEIN.Z3_16')),
-            array(sp_t('BAUSTEIN.Z3_17')),
-            array(sp_t('BAUSTEIN.Z3_18')),
-            array(sp_t('BAUSTEIN.Z3_19'), 'gw'),
-            array(sp_t('BAUSTEIN.Z3_20'), 'gw'),
-            array(sp_t('BAUSTEIN.Z3_21'), 'gw'),
-            array(sp_t('BAUSTEIN.Z3_22')),
-        ), array(
-            'BAUSTEIN.SEITE3_SCHRITT1',
-            'BAUSTEIN.SEITE3_SCHRITT2',
-            'BAUSTEIN.SEITE3_SCHRITT3',
-            'BAUSTEIN.SEITE3_SCHRITT4',
-            'BAUSTEIN.SEITE3_SCHRITT5',
-        ), array(
-            'BAUSTEIN.SEITE3_H1',
-            'BAUSTEIN.SEITE3_H2',
-            'BAUSTEIN.SEITE3_H3',
-            'BAUSTEIN.SEITE3_H4',
-            'BAUSTEIN.SEITE3_H5',
-            'BAUSTEIN.SEITE3_H6',
-            'BAUSTEIN.SEITE3_H7',
-        )),
+        array('Sprachsteuerung', 'einbindung_loxone.png', $s1, 6, 6),
+        array('Sprachsteuerung Befehle', 'einbindung_loxone_befehle.png', $s2, 5, 7),
+        array('Sprachsteuerung Ansagen', 'einbindung_loxone_ansagen.png', $s3, 5, 8),
     );
     $aus = array();
-    foreach ($seiten as $sp_s) {
+    foreach ($seiten as $sp_n => $sp_s) {
         $sp_zeilen = array();
         foreach ($sp_s[2] as $sp_i => $sp_z) {
             $sp_c = array_pad(explode(' | ', $sp_z[0], 4), 4, '');
-            if (isset($sp_z[1]) && $sp_z[1] === 'gw') {
+            if ($sp_z[1] === 'gw') {
                 $sp_c[1] = sp_gateway_name($sp_c[1]);
             }
             $sp_zeilen[] = array_merge(array($sp_i + 1), $sp_c);
         }
+        $schritte = array();
+        for ($i = 1; $i <= $sp_s[3]; $i++) { $schritte[] = sp_t('BAUSTEIN.SEITE' . ($sp_n + 1) . '_SCHRITT' . $i); }
+        $hinweise = array();
+        for ($i = 1; $i <= $sp_s[4]; $i++) { $hinweise[] = sp_t('BAUSTEIN.SEITE' . ($sp_n + 1) . '_H' . $i); }
         $aus[] = array('seite' => $sp_s[0], 'bild' => $sp_s[1], 'zeilen' => $sp_zeilen,
-                       'schritte' => array_map('sp_t', $sp_s[3]), 'hinweise' => array_map('sp_t', $sp_s[4]));
+                       'schritte' => $schritte, 'hinweise' => $hinweise);
     }
     return $aus;
 }
@@ -3367,11 +3356,9 @@ function sp_bausteinliste()
 /** Gateway-Name eines Eingangs der Liste (dort mit dem Werkspraefix "sprachsteuerung_"). */
 function sp_gateway_name($name)
 {
-    $praefix = trim((string) sp_config(false)['mqtt_topic'], '/');
-    if ($praefix === '') { $praefix = 'sprachsteuerung'; }
     $rest = (string) $name;
     if (strpos($rest, 'sprachsteuerung_') === 0) { $rest = substr($rest, strlen('sprachsteuerung_')); }
-    return str_replace(array('/', '%', ' '), '_', $praefix) . '_' . $rest;
+    return sp_vi_name($rest);
 }
 
 /** Eine Seite: Ueberschrift (= Seitenname in Config), Kasten, Tabelle, Hinweise, Bild, Link. */
@@ -3407,9 +3394,120 @@ function sp_bausteinseite_zeigen($sp_bs)
 <p class="sm-hilfe"><?= sp_t('LOX.MUSTERPROJEKT') ?></p>
 <?php }
 $sp_bl = sp_bausteinliste();
+$sp_namen = sp_mqtt_namen($sp_cfg, $sp_saetze);
+$sp_ep_an = (int) $sp_cfg['endpunkt_ein'] === 1;
 ?>
 <div class="sm-step"><b><?= sp_e(sp_t('LOX.S3_TITEL')) ?></b><br>
 <?= sp_t('LOX.S3_TEXT') ?>
+<?php /* Gruppe 11 (Entwurf 2.4): die Namenstabelle - jeder Name, den das Gateway fuer ein Thema dieses Plugins
+   vergibt, mit Art, retained, V2-Haken (N = Noncached) und Seite im Musterprojekt. EINE Quelle: sp_mqtt_namen(). */ ?>
+<div class="sm-roll">
+<table class="sm-tbl" id="sp_namen">
+<tr><th><?= sp_e(sp_t('MQTT.T_THEMA')) ?></th><th><?= sp_e(sp_t('BEFEHL.T_NAME')) ?></th><th><?= sp_e(sp_t('BEFEHL.T_ART')) ?></th>
+    <th><?= sp_e(sp_t('MQTT.T_RETAIN')) ?></th><th><?= sp_e(sp_t('BEFEHL.T_V2')) ?></th><th><?= sp_e(sp_t('BEFEHL.T_MUSTER')) ?></th></tr>
+<?php foreach ($sp_namen as $sp_nz) { ?>
+<tr><td><span class="sm-mono"><?= sp_e($sp_nz['voll']) ?></span></td><td><span class="sm-mono"><?= sp_e($sp_nz['name']) ?></span></td>
+    <td><?= sp_e(sp_t($sp_nz['art'] === 'text' ? 'BEFEHL.A_TEXT' : 'BEFEHL.A_ZAHL')) ?></td>
+    <td><?= sp_e(sp_t($sp_nz['retained'] ? 'ALLG.JA' : 'ALLG.NEIN')) ?></td>
+    <td><?= $sp_nz['muster'] !== '' ? sp_e($sp_nz['v2'] === 'N' ? sp_t('BEFEHL.A_HAKEN_N') : sp_t('BEFEHL.A_HAKEN')) : '' ?></td>
+    <td><?= sp_e($sp_nz['muster']) ?></td></tr>
+<?php } ?>
+</table>
+</div>
+<div class="sm-hinweis"><?= sp_e(sp_t('BEFEHL.NAMEN_HINWEIS')) ?></div>
+<?php sp_bausteinseite_zeigen($sp_bl[0]); ?>
+</div>
+
+<div class="sm-step"><b><?= sp_e(sp_t('LOX.SB_TITEL')) ?></b><br>
+<?= sp_t('LOX.SB_TEXT') ?>
+<?php /* Welle Bild 18 (0.12.5, Entwurf Welle 18 ss Abschnitt 4): die Namen der Gateway-Eingaenge je Ziel,
+   GERECHNET aus dem Praefix (Reiter MQTT) und dem Thema des Ziels (Satzdatei) - seit 0.12.7 ueber sp_vi_name(). */
+$sp_gw_z = (isset($sp_saetze['ziele']) && is_array($sp_saetze['ziele'])) ? $sp_saetze['ziele'] : array();
+$sp_gw_zeilen = array();
+foreach ($sp_gw_z as $sp_gw_k => $sp_gw_e) {
+    $sp_gw_t = sp_ziel_thema($sp_gw_k, $sp_gw_e);
+    if ($sp_gw_t === '') { continue; }
+    $sp_gw_n = (is_array($sp_gw_e) && isset($sp_gw_e['name']) && is_scalar($sp_gw_e['name'])) ? (string) $sp_gw_e['name'] : (string) $sp_gw_k;
+    $sp_gw_zeilen[] = array($sp_gw_n, sp_vi_name($sp_gw_t . '/aktion', $sp_cfg), sp_vi_name($sp_gw_t . '/wert', $sp_cfg));
+}
+if (!$sp_gw_zeilen) { ?>
+<div class="sm-hinweis"><?= sp_e(sp_t('LOX.SB_KEINE_ZIELE')) ?></div>
+<?php } else { ?>
+<div class="sm-roll">
+<table class="sm-tbl">
+<tr><th><?= sp_e(sp_t('LOX.T_ZIEL')) ?></th><th><?= sp_e(sp_t('LOX.T_GW_AKTION')) ?></th><th><?= sp_e(sp_t('LOX.T_GW_WERT')) ?></th></tr>
+<?php foreach ($sp_gw_zeilen as $sp_gw_r) { ?>
+<tr><td><?= sp_e($sp_gw_r[0]) ?></td><td><span class="sm-mono"><?= sp_e($sp_gw_r[1]) ?></span></td>
+    <td><span class="sm-mono"><?= sp_e($sp_gw_r[2]) ?></span></td></tr>
+<?php } ?>
+</table>
+</div>
+<?php } ?>
+<?php /* E1 (0.12.7, Regeln/04 "Vorlage-Knoepfe im Reiter Einbindung in Loxone sind grau", R2_022): bis 0.12.6 gruen. */ ?>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-technik"></i> <?= sp_t('LEGENDE.TECHNIK') ?></span></div>
+<div class="sm-knopfreihe">
+  <form action="index.php" method="post" data-ajax="false">
+    <?php $sp_hidden('tab-loxone'); ?>
+    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="vorlage" value="ziele"><?= sp_e(sp_t('LOX.K_VORLAGE_ZIELE')) ?></button>
+  </form>
+</div>
+<div class="sm-hinweis"><?= sp_e(sp_t('LOX.SB_UDP')) ?> <?= sp_e(sprintf(sp_t('UI013.VORLAGE_ZIELE'), 'VIU_Sprachsteuerung_Ziele.xml', sp_mqtt_gateway_udpport())) ?></div>
+<div class="sm-hinweis"><?= sp_e(sprintf(sp_t('UI013.VORLAGE_NONCACHED'), $sp_praefix)) ?></div>
+<?php sp_bausteinseite_zeigen($sp_bl[1]); ?>
+</div>
+
+<div class="sm-step"><b><?= sp_e(sp_t('LOX.S4_TITEL')) ?></b><br>
+<?= sp_t('LOX.S4_TEXT') ?>
+<?php /* Gruppe 11 (Entwurf 3.2, 6): die MQTT-Befehle - EINE Quelle sp_mqtt_befehle() fuer Tabelle und Vorlage. */ ?>
+<div class="sm-roll">
+<table class="sm-tbl" id="sp_mqtt_befehle">
+<tr><th><?= sp_e(sp_t('BEFEHL.T_TITEL')) ?></th><th><?= sp_e(sp_t('BEFEHL.T_THEMA')) ?></th><th><?= sp_e(sp_t('BEFEHL.T_BEI_AUS')) ?></th>
+    <th><?= sp_e(sp_t('BEFEHL.T_EINGREIFEND')) ?></th></tr>
+<?php foreach (sp_mqtt_befehle() as $sp_mb) { ?>
+<tr><td><?= sp_e($sp_mb['titel']) ?></td><td><span class="sm-mono"><?= sp_e(sp_mqtt_befehl_text($sp_praefix, $sp_mb['name'], $sp_mb['ein'])) ?></span></td>
+    <td><span class="sm-mono"><?= $sp_mb['aus'] !== '' ? sp_e(sp_mqtt_befehl_text($sp_praefix, $sp_mb['name'], $sp_mb['aus'])) : '&ndash;' ?></span></td>
+    <td><?= sp_e(sp_t($sp_mb['eingreifend'] ? 'BEFEHL.T_JA_ZWEITER' : 'BEFEHL.T_NEIN')) ?></td></tr>
+<?php } ?>
+</table>
+</div>
+<div class="sm-hinweis"><?= sp_e(sprintf(sp_t('BEFEHL.T_ADRESSE'), sp_udp_host(), sp_udp_eingang())) ?> <?= sp_e(sp_t('BEFEHL.GATEWAY_NICHTS')) ?></div>
+<div class="sm-warnung"><?= sp_e(sp_t('BEFEHL.HEIMNETZ')) ?> <?= sp_e(sp_t('BEFEHL.UMLAUTE')) ?></div>
+<div class="sm-hinweis"><?= sp_e(sprintf(sp_t('BEFEHL.QUITTUNG'), $sp_praefix . '/befehl/<name>/quittung')) ?></div>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-technik"></i> <?= sp_t('LEGENDE.TECHNIK') ?></span></div>
+<div class="sm-knopfreihe">
+  <form action="index.php" method="post" data-ajax="false">
+    <?php $sp_hidden('tab-loxone'); ?>
+    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="vorlage" value="mqtt"><?= sp_e(sp_t('LOX.K_VORLAGE_MQTT')) ?></button>
+  </form>
+</div>
+<?= sp_t('LOX.S4_ANSAGE') ?>
+<?php sp_bausteinseite_zeigen($sp_bl[2]); ?>
+</div>
+
+<?php /* Gruppe 11 (Entwurf 2.5, 3.6, E4): der HTTP-Endpunkt fuer bestehende Anlagen, zugeklappt und hinter dem Haken
+   endpunkt_ein. Die bisherigen Vorlagen bleiben byte-gleich, erscheinen aber nur mit gesetztem Haken. */ ?>
+<details class="sm-step" id="sp_http"<?= $sp_tab === 'tab-loxone' && sp_get_text('teil') === 'http' ? ' open' : '' ?>>
+<summary><b><?= sp_e(sp_t('LOX.H_HTTP')) ?></b></summary>
+<p><?= sp_t('LOX.HTTP_TEXT') ?></p>
+<form action="index.php" method="post" data-ajax="false">
+<?php $sp_hidden('tab-loxone'); ?>
+<input data-role="none" type="hidden" name="endpunkt_save" value="1">
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;">
+    <input data-role="none" type="checkbox" name="endpunkt_ein" value="1" <?= $sp_ep_an ? 'checked' : '' ?>>
+    <?= sp_e(sp_t('LOX.L_ENDPUNKT_EIN')) ?>
+  </label>
+  <div class="sm-hilfe"><?= sp_e(sp_t('LOX.H_ENDPUNKT_EIN')) ?></div>
+</div>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sp_t('LEGENDE.AKTION') ?></span></div>
+<div class="sm-knopfreihe">
+  <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sp_e(sp_t('ALLG.SPEICHERN')) ?></button>
+</div>
+</form>
+<?php if (!$sp_ep_an) { ?>
+<div class="sm-hinweis"><?= sp_e(sp_t('LOX.ERST_HAKEN')) ?></div>
+<?php } else { ?>
+<h3><?= sp_e(sp_t('LOX.H_HTTP_ZUSTAND')) ?></h3>
 <div class="sm-roll">
 <table class="sm-tbl">
 <tr><th><?= sp_e(sp_t('LOX.T_ADRESSE')) ?></th>
@@ -3425,59 +3523,14 @@ $sp_bl = sp_bausteinliste();
 </table>
 </div>
 <div class="sm-warnung"><?= sp_t('LOX.IMPORT_WARNUNG') ?></div>
-<div class="sm-legende"><span><i class="sm-punkt sm-b-lesen"></i> <?= sp_t('LEGENDE.LESEN') ?></span></div>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-technik"></i> <?= sp_t('LEGENDE.TECHNIK') ?></span></div>
 <div class="sm-knopfreihe">
   <form action="index.php" method="post" data-ajax="false">
     <?php $sp_hidden('tab-loxone'); ?>
-    <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="vorlage" value="eingang"><?= sp_e(sp_t('LOX.K_VORLAGE')) ?></button>
+    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="vorlage" value="eingang"><?= sp_e(sp_t('LOX.K_VORLAGE')) ?></button>
   </form>
 </div>
-<?php /* Welle Bild 18 (0.12.5): Knopf Ziele mit seinen Hinweisen jetzt in Schritt 3,
-   Knopf Ausgang in Schritt 4 - je bei der Seite, die ihn braucht. */
-sp_bausteinseite_zeigen($sp_bl[0]); ?>
-</div>
-
-<div class="sm-step"><b><?= sp_e(sp_t('LOX.SB_TITEL')) ?></b><br>
-<?= sp_t('LOX.SB_TEXT') ?>
-<?php /* Welle Bild 18 (0.12.5, Entwurf Welle 18 ss Abschnitt 4): die Namen der Gateway-Eingaenge je Ziel,
-   GERECHNET aus dem Praefix (Reiter MQTT) und dem Thema des Ziels (Satzdatei) - so wie sp_vorlage_ziele() sie
-   bildet und das Gateway V1 im HTTP-Betrieb sie vergibt ("/", "%" und Leerzeichen als "_"). */
-$sp_gw_p = str_replace(array('/', '%', ' '), '_', $sp_praefix !== '' ? $sp_praefix : 'sprachsteuerung');
-$sp_gw_z = (isset($sp_saetze['ziele']) && is_array($sp_saetze['ziele'])) ? $sp_saetze['ziele'] : array();
-$sp_gw_zeilen = array();
-foreach ($sp_gw_z as $sp_gw_k => $sp_gw_e) {
-    $sp_gw_t = sp_ziel_thema($sp_gw_k, $sp_gw_e);
-    if ($sp_gw_t === '') { continue; }
-    $sp_gw_n = (is_array($sp_gw_e) && isset($sp_gw_e['name']) && is_scalar($sp_gw_e['name'])) ? (string) $sp_gw_e['name'] : (string) $sp_gw_k;
-    $sp_gw_zeilen[] = array($sp_gw_n, $sp_gw_p . '_' . str_replace(array('/', '%', ' '), '_', $sp_gw_t));
-}
-if (!$sp_gw_zeilen) { ?>
-<div class="sm-hinweis"><?= sp_e(sp_t('LOX.SB_KEINE_ZIELE')) ?></div>
-<?php } else { ?>
-<div class="sm-roll">
-<table class="sm-tbl">
-<tr><th><?= sp_e(sp_t('LOX.T_ZIEL')) ?></th><th><?= sp_e(sp_t('LOX.T_GW_AKTION')) ?></th><th><?= sp_e(sp_t('LOX.T_GW_WERT')) ?></th></tr>
-<?php foreach ($sp_gw_zeilen as $sp_gw_r) { ?>
-<tr><td><?= sp_e($sp_gw_r[0]) ?></td><td><span class="sm-mono"><?= sp_e($sp_gw_r[1] . '_aktion') ?></span></td>
-    <td><span class="sm-mono"><?= sp_e($sp_gw_r[1] . '_wert') ?></span></td></tr>
-<?php } ?>
-</table>
-</div>
-<?php } ?>
-<div class="sm-legende"><span><i class="sm-punkt sm-b-lesen"></i> <?= sp_t('LEGENDE.LESEN') ?></span></div>
-<div class="sm-knopfreihe">
-  <form action="index.php" method="post" data-ajax="false">
-    <?php $sp_hidden('tab-loxone'); ?>
-    <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="vorlage" value="ziele"><?= sp_e(sp_t('LOX.K_VORLAGE_ZIELE')) ?></button>
-  </form>
-</div>
-<div class="sm-hinweis"><?= sp_e(sp_t('LOX.SB_UDP')) ?> <?= sp_e(sprintf(sp_t('UI013.VORLAGE_ZIELE'), 'VIU_Sprachsteuerung_Ziele.xml', sp_mqtt_gateway_udpport())) ?></div>
-<div class="sm-hinweis"><?= sp_e(sprintf(sp_t('UI013.VORLAGE_NONCACHED'), $sp_praefix)) ?></div>
-<?php sp_bausteinseite_zeigen($sp_bl[1]); ?>
-</div>
-
-<div class="sm-step"><b><?= sp_e(sp_t('LOX.S4_TITEL')) ?></b><br>
-<?= sp_t('LOX.S4_TEXT') ?>
+<h3><?= sp_e(sp_t('LOX.H_HTTP_AUSGANG')) ?></h3>
 <div class="sm-roll">
 <table class="sm-tbl">
 <tr><th><?= sp_e(sp_t('ALLG.EIGENSCHAFT')) ?></th><th><?= sp_e(sp_t('ALLG.WERT')) ?></th></tr>
@@ -3494,13 +3547,6 @@ if (!$sp_gw_zeilen) { ?>
     <td><span class="sm-mono">/plugins/<?= sp_e($sp_p['plugin']) ?>/index.php?token=<?= sp_e($sp_token) ?>&amp;aktion=ruhe&amp;wert=1</span></td></tr>
 </table>
 </div>
-<?= sp_t('LOX.S4_ANSAGE') ?>
-<?php /* D (Runde 2): Ansage trotz Ruhezeit mit dringend=1 - als vollstaendige
-   Adresse - und das Token ausserhalb der Adresse (Kopf X-Token oder
-   POST-Feld token): der Endpunkt nimmt beides seit 0.12.0 an. Aktion und
-   Text bleiben in der Adresse, nur das Token zieht um - so steht es nicht im
-   Zugriffsprotokoll des Webservers. Ein virtueller Ausgang in Loxone kann
-   meist nur GET und bleibt bei ?token=. */ ?>
 <div class="sm-roll">
 <table class="sm-tbl">
 <tr><th><?= sp_e(sp_t('UI013.T_BEISPIEL')) ?></th><th><?= sp_e(sp_t('ALLG.WERT')) ?></th></tr>
@@ -3515,36 +3561,14 @@ if (!$sp_gw_zeilen) { ?>
 </table>
 </div>
 <div class="sm-hinweis"><?= sp_e(sp_t('UI013.HINWEIS_TOKEN_POST')) ?></div>
-<div class="sm-legende"><span><i class="sm-punkt sm-b-lesen"></i> <?= sp_t('LEGENDE.LESEN') ?></span></div>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-technik"></i> <?= sp_t('LEGENDE.TECHNIK') ?></span></div>
 <div class="sm-knopfreihe">
   <form action="index.php" method="post" data-ajax="false">
     <?php $sp_hidden('tab-loxone'); ?>
-    <button data-role="none" class="sm-btn sm-b-lesen" type="submit" name="vorlage" value="ausgang"><?= sp_e(sp_t('LOX.K_VORLAGE_AUSGANG')) ?></button>
+    <button data-role="none" class="sm-btn sm-b-technik" type="submit" name="vorlage" value="ausgang"><?= sp_e(sp_t('LOX.K_VORLAGE_AUSGANG')) ?></button>
   </form>
 </div>
-<?php sp_bausteinseite_zeigen($sp_bl[2]); ?>
-</div>
-
-<div class="sm-step"><b><?= sp_e(sp_t('LOX.S5_TITEL')) ?></b>
-<div class="sm-roll">
-<table class="sm-tbl">
-<tr><th><?= sp_e(sp_t('ALLG.EIGENSCHAFT')) ?></th><th><?= sp_e(sp_t('ALLG.WERT')) ?></th></tr>
-<tr><td><?= sp_e(sp_t('LOX.T_TOKEN')) ?></td><td><span class="sm-mono"><?= sp_e($sp_token) ?></span></td></tr>
-<tr><td><?= sp_e(sp_t('LOX.T_SELFTEST')) ?></td>
-    <td><span class="sm-mono"><?= sp_e($sp_basis) ?>?selftest=1&amp;token=<?= sp_e($sp_token) ?></span></td></tr>
-</table>
-</div>
-<?= sp_t('LOX.S5_TEXT') ?>
-<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sp_t('LEGENDE.AKTION_TOKEN') ?></span></div>
-<div class="sm-knopfreihe">
-  <form action="index.php" method="post" data-ajax="false">
-    <?php $sp_hidden('tab-loxone'); ?>
-    <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="token_neu" value="1"><?= sp_e(sp_t('LOX.K_TOKEN_NEU')) ?></button>
-  </form>
-</div>
-</div>
-
-<div class="sm-step"><b><?= sp_e(sp_t('LOX.S7_TITEL')) ?></b><br>
+<h3><?= sp_e(sp_t('LOX.S7_TITEL')) ?></h3>
 <?= sp_t('LOX.S7_TEXT') ?>
 <div class="sm-roll">
 <table class="sm-tbl">
@@ -3561,7 +3585,35 @@ if (!$sp_gw_zeilen) { ?>
     <td><?= sp_t('LOX.A_DIAG') ?></td></tr>
 </table>
 </div>
+<?php } ?>
+<h3><?= sp_e(sp_t('LOX.S5_TITEL')) ?></h3>
+<div class="sm-roll">
+<table class="sm-tbl">
+<tr><th><?= sp_e(sp_t('ALLG.EIGENSCHAFT')) ?></th><th><?= sp_e(sp_t('ALLG.WERT')) ?></th></tr>
+<tr><td><?= sp_e(sp_t('LOX.T_TOKEN')) ?></td><td><span class="sm-mono"><?= sp_e($sp_token) ?></span></td></tr>
+<tr><td><?= sp_e(sp_t('LOX.T_SELFTEST')) ?></td>
+    <td><span class="sm-mono"><?= sp_e($sp_basis) ?>?selftest=1&amp;token=<?= sp_e($sp_token) ?></span></td></tr>
+</table>
 </div>
+<?= sp_t('LOX.S5_TEXT') ?>
+<div class="sm-legende"><span><i class="sm-punkt sm-b-aktion"></i> <?= sp_t('LEGENDE.AKTION_TOKEN') ?></span></div>
+<div class="sm-knopfreihe">
+  <form action="index.php" method="post" data-ajax="false">
+    <?php $sp_hidden('tab-loxone'); ?>
+    <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="token_neu" value="1"><?= sp_e(sp_t('LOX.K_TOKEN_NEU')) ?></button>
+  </form>
+</div>
+</details>
+
+<?php /* Gruppe 11 (Entwurf 3.7, E5): der alte Befehlsweg <praefix>/cmd/... - geschaltet im Reiter MQTT. */
+$sp_cmd_zl = (isset($sp_lox['mqtt_dauer']['cmd_zuletzt']) && is_numeric($sp_lox['mqtt_dauer']['cmd_zuletzt']))
+           ? (int) $sp_lox['mqtt_dauer']['cmd_zuletzt'] : 0; ?>
+<details class="sm-step" id="sp_cmd">
+<summary><b><?= sp_e(sprintf(sp_t('LOX.H_CMD'), $sp_praefix)) ?></b></summary>
+<p><?= sp_e(sp_t('LOX.CMD_TEXT')) ?></p>
+<div class="<?= (int) $sp_cfg['befehle_cmd_ein'] === 1 ? 'sm-warnung' : 'sm-hinweis' ?>"><?= sp_e(sp_t((int) $sp_cfg['befehle_cmd_ein'] === 1 ? 'LOX.CMD_AN' : 'LOX.CMD_AUS')) ?>
+<?= sp_e($sp_cmd_zl > 0 ? sprintf(sp_t('LOX.CMD_ZULETZT'), date('d.m.Y H:i', $sp_cmd_zl)) : sp_t('LOX.CMD_NIE')) ?></div>
+</details>
 </div>
 
 <!-- ================= Reiter: Test ================= -->

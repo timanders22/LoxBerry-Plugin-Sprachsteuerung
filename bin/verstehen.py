@@ -1497,7 +1497,9 @@ if __name__ == "__main__":
             % Path(__file__).resolve().parent)
         sys.exit(1)
     kandidaten = [Path(p) for p in (
-        _wurzel + "/config/plugins/sprachsteuerung/saetze.json",
+        # S9 (0.12.7): der Ordnername aus LBPPLUGINDIR bzw. dem eigenen Ablageort, nicht fest.
+        _wurzel + "/config/plugins/" + (os.environ.get("LBPPLUGINDIR") or Path(__file__).resolve().parent.name)
+        + "/saetze.json",
         str(Path(__file__).resolve().parent.parent / "templates" / "saetze_de.json"),
     )]
     quelle = next((k for k in kandidaten if k.is_file()), kandidaten[-1])

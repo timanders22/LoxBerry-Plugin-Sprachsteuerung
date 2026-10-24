@@ -23,6 +23,11 @@ ARGV3=$3
 ARGV5=$5
 PFOLDER="${ARGV3:-sprachsteuerung}"
 BASE="${ARGV5:-$LBHOMEDIR}"
+# S3 (0.12.7, Pruefbericht): der Ordnername darf keinen Pfadtrenner und kein ".." tragen - dieselbe Schranke wie in
+# preupgrade.sh und preinstall.sh (plugininstall.pl laesst ohnehin nur [A-Za-z0-9_-] zu; Einheitlichkeit).
+case "$PFOLDER" in
+    ''|*/*|*..*) echo "<WARNING> postupgrade: unzulaessiger Ordnername '$PFOLDER' - es wurde nichts geaendert."; exit 1 ;;
+esac
 # Dieselbe Wurzelregel wie in postinstall.sh (Regeln/06). Bis 0.11.9 stand
 # hier der feste Rueckfall "$SELF/../..": gemessen am 25.09.2026 in WSL
 # (Pruefung-Sprachsteuerung-0.11.10, Fall W4) loeschte das Skript aus

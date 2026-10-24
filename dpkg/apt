@@ -2,4 +2,8 @@
 # installiert (sbin/plugininstall.pl liest dpkg/apt, Zeilen mit # sind
 # Kommentar). python3-venv bringt ensurepip mit; ohne das bricht
 # "python3 -m venv" auf Debian 12 (Python 3.11) und 13 (Python 3.13) ab.
+#
+# mosquitto-clients (seit 0.12.7): gebraucht von der Befehlsbruecke (bin/befehlsbruecke.php) - sie abonniert
+# <praefix>/befehl/# mit mosquitto_sub und quittiert mit mosquitto_pub.
 python3-venv
+mosquitto-clients

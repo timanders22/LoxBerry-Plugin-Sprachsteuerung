@@ -50,6 +50,10 @@
     "mqtt_ein": 1,
     "mqtt_topic": "sprachsteuerung",
     "mqtt_dauer_ein": 0,
+    "befehle_mqtt_ein": 0,
+    "befehle_mqtt_steuern": 0,
+    "befehle_cmd_ein": 0,
+    "endpunkt_ein": 0,
 
     "miniserver_url": "",
     "aktionstoken": "",
@@ -154,6 +158,20 @@
     "tts_volume ist die Grenze fuer tts.volume, kein eigener Schluessel."
   ],
 
+  "_hinweis_gruppe11": [
+    "Seit 0.12.7 (Gruppe 11 / MQTT), alle ab Werk aus (0):",
+    "  befehle_mqtt_ein      Befehle ueber MQTT annehmen (Befehlsbruecke,",
+    "                        <praefix>/befehl/sprechen|alarm|satz|ruhe)",
+    "  befehle_mqtt_steuern  Ansagen und Saetze ueber MQTT zulassen (sprechen,",
+    "                        alarm, satz - der zweite Haken)",
+    "  befehle_cmd_ein       alter Befehlsweg <praefix>/cmd/... (nur mit",
+    "                        mqtt_dauer_ein); beim Update = mqtt_dauer_ein",
+    "  endpunkt_ein          HTTP-Endpunkt fuer Loxone annehmen; beim Update 1,",
+    "                        wenn ein Aktionstoken gesetzt ist (postinstall.sh)",
+    "status/zaehler ist das Lebenszeichen des Herzschlags (0-999, laeuft um) - nie",
+    "zurueckbehalten."
+  ],
+
   "retain": {
     "themen": {
       "satz": 1, "absicht": 1, "aktion": 1, "ziel": 1, "wert": 1,
@@ -167,6 +185,7 @@
       "dienste_ok": 0, "dienste_gesamt": 1,
       "regeln": 1, "ziele": 1, "ruhe": 0,
       "letzter_satz_alter": 0,
+      "status/zaehler": 0,
 
       "ansage_ok": 0, "ansage_grund": 0
     },

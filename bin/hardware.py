@@ -464,16 +464,24 @@ def wy_senden(sock: socket.socket, typ: str, daten: dict | None = None,
         sock.sendall(nutzlast)
 
 
+# S11 (0.12.7, Pruefbericht): Grenzen wie im Dienst - eine Kopfzeile hoechstens 64 KiB, Zusatz und Nutzlast je
+# 0 bis 16 MiB. Bis 0.12.6 ergab data_length = 10**12 einen MemoryError, den messen_*() nicht fing; jetzt ein
+# ValueError, und der Reiter Dienste zeigt einen Messfehler statt einer Rueckverfolgung.
+WY_GRENZE = 16 * 1024 * 1024
+
+
 def wy_lesen(datei) -> dict | None:
-    zeile = datei.readline()
+    zeile = datei.readline(65536)
     if not zeile:
         return None
     kopf = json.loads(zeile.decode("utf-8"))
     laenge = int(kopf.get("data_length") or 0)
+    nutz = int(kopf.get("payload_length") or 0)
+    if not (0 <= laenge <= WY_GRENZE and 0 <= nutz <= WY_GRENZE):
+        raise ValueError("Antwort zu gross")
     if laenge:
         zusatz = json.loads(datei.read(laenge).decode("utf-8"))
         kopf.setdefault("data", {}).update(zusatz)
-    nutz = int(kopf.get("payload_length") or 0)
     kopf["_payload"] = datei.read(nutz) if nutz else b""
     return kopf
 

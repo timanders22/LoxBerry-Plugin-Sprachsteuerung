@@ -30,6 +30,11 @@ ARGV3=$3
 ARGV5=$5
 PFOLDER="${ARGV3:-sprachsteuerung}"
 BASE="${ARGV5:-$LBHOMEDIR}"
+# S3 (0.12.7, Pruefbericht): der Ordnername darf keinen Pfadtrenner und kein ".." tragen - dieselbe Schranke wie in
+# preupgrade.sh und preinstall.sh (plugininstall.pl laesst ohnehin nur [A-Za-z0-9_-] zu; Einheitlichkeit).
+case "$PFOLDER" in
+    ''|*/*|*..*) echo "<FAIL> postinstall: unzulaessiger Ordnername '$PFOLDER' - es wurde nichts eingerichtet."; exit 1 ;;
+esac
 # Die Wurzel nach Hausregel (Regeln/06): was der Installer uebergibt oder
 # $LBHOMEDIR, wenn darunter config/plugins liegt; sonst vom eigenen Ablageort
 # aufwaerts ein Verzeichnis mit config/plugins, data/plugins UND
@@ -118,7 +123,7 @@ sp_ist_dienst() {   # $1 Prozessnummer, $2 Dienstpfad
         IFS= read -r a2 && exit 1
         case "${a0##*/}" in python|python3|python3.*) ;; *) exit 1 ;; esac
         # Auch gegen den physischen Pfad (0.12.0): bin/dienst.sh startet mit
-        # 'pwd -P'. Ist die Wurzel ein Verweis (etwa /opt/loxberry), fand
+        # 'pwd -P'. Ist die Wurzel ein Verweis (so auf vielen Anlagen), fand
         # der Vergleich mit dem zusammengesetzten Pfad den Dienst nicht.
         [ "$a1" = "$2" ] || { [ -n "$SP_DIENST_P" ] && [ "$a1" = "$SP_DIENST_P" ]; }
     }
@@ -263,8 +268,89 @@ for f in sprachsteuerung.json saetze.json; do
     fi
 done
 
+
+# ---------- Uebergang der Haken auf 0.12.7 (Gruppe 11, Entscheidungen E4/E5) ----------
+# NUR BEI EINER AKTUALISIERUNG und nur fuer Schluessel, die in der Datei noch FEHLEN (ein zweiter Anlauf nach einem
+# Abbruch aendert nichts mehr): der HTTP-Endpunkt war bis 0.12.6 immer an - wer ein Aktionstoken (>= 16 Zeichen) hat,
+# behaelt ihn (endpunkt_ein = 1; ohne Token konnte niemand ihn nutzen: 0). Der alte Befehlsweg <praefix>/cmd/...
+# wirkte nur mit der dauerhaften Broker-Verbindung - befehle_cmd_ein bekommt deren Wert, so behaelt genau, wer ihn
+# heute hat, den Weg. Neuinstallation: nichts geschrieben, es gilt die Vorgabe 0 (templates/vorgaben.json).
+# Geschrieben ueber python3 in eine Nebendatei, geprueft (lesbar, Schluesselzahl +n, Token gleich), dann mv, 0600 -
+# fuer die Konfiguration UND ihre Zweitschrift. Scheitert es, gilt die Vorgabe 0 (Endpunkt und alter Weg aus).
+# Muss VOR dem ersten Seitenaufbau stehen: die Oberflaeche ergaenzt fehlende Schluessel mit der Vorgabe 0.
+sp_haken_uebergang() {   # $1 Datei
+    python3 - "$1" <<'SP_UEBERGANG'
+import json, os, sys
+f = sys.argv[1]
+try:
+    with open(f, encoding="utf-8") as h:
+        d = json.load(h)
+except Exception:
+    sys.exit(3)
+if not isinstance(d, dict) or not d:
+    sys.exit(3)
+neu = dict(d)
+gesetzt = []
+if "endpunkt_ein" not in d:
+    neu["endpunkt_ein"] = 1 if len(str(d.get("aktionstoken") or "").strip()) >= 16 else 0
+    gesetzt.append("endpunkt_ein=%d" % neu["endpunkt_ein"])
+if "befehle_cmd_ein" not in d:
+    neu["befehle_cmd_ein"] = 1 if str(d.get("mqtt_dauer_ein")).strip().lower() in ("1", "true") else 0
+    gesetzt.append("befehle_cmd_ein=%d" % neu["befehle_cmd_ein"])
+if not gesetzt:
+    print("nichts")
+    sys.exit(0)
+tmp = f + ".uebergang"
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w", encoding="utf-8") as h:
+    json.dump(neu, h, ensure_ascii=False, indent=4)
+os.chmod(tmp, 0o600)
+with open(tmp, encoding="utf-8") as h:
+    c = json.load(h)
+if len(c) != len(d) + len(gesetzt) or c.get("aktionstoken") != d.get("aktionstoken"):
+    os.unlink(tmp)
+    sys.exit(4)
+os.replace(tmp, f)
+print(", ".join(gesetzt))
+SP_UEBERGANG
+}
+if [ -n "$MARKE_GILT" ]; then
+    for SP_HF in "$PCONFIG/sprachsteuerung.json" "$BASE/config/plugins/$PFOLDER.backup.sprachsteuerung.json"; do
+        [ -f "$SP_HF" ] || continue
+        if SP_HA=$(sp_haken_uebergang "$SP_HF" 2>&1); then
+            [ "$SP_HA" = nichts ] || echo "<OK> Uebergang auf 0.12.7 ($(basename "$SP_HF")): $SP_HA."
+        else
+            echo "<WARNING> Die Haken endpunkt_ein und befehle_cmd_ein liessen sich in $(basename "$SP_HF") nicht setzen - es gilt die Vorgabe 0 (HTTP-Endpunkt und alter Befehlsweg aus)."
+            echo "<INFO> Abhilfe: im Plugin Reiter Einbindung den Haken 'HTTP-Endpunkt fuer Loxone annehmen' bzw. im Reiter MQTT den alten Befehlsweg setzen."
+        fi
+    done
+fi
+
 [ -f "$PCONFIG/sprachsteuerung.json" ] || echo '{}' > "$PCONFIG/sprachsteuerung.json"
 chmod 600 "$PCONFIG/sprachsteuerung.json"
+
+# ---------- Abo-Datei fuer das MQTT-Gateway V1 (0.12.7, S19) ----------
+# Bis 0.12.6 legte sie erst der erste Seitenaufbau der Oberflaeche an (ein GET, der schreibt). Jetzt hier und beim
+# Dienststart: config/plugins/<ordner>/mqtt_subscriptions.cfg = "<praefix>/#" (Praefix aus der Konfiguration, sonst
+# sprachsteuerung - dieselbe Regel wie sp_mqtt_abo_inhalt()), 0644, nur wenn sie fehlt. Das Gateway V2 liest sie nicht.
+SP_ABO="$PCONFIG/mqtt_subscriptions.cfg"
+if [ ! -e "$SP_ABO" ]; then
+    SP_PRAEFIX=$(python3 -c 'import json, re, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as h:
+        p = str(json.load(h).get("mqtt_topic") or "").strip("/")
+except Exception:
+    p = ""
+print(p if re.fullmatch(r"[A-Za-z0-9_/\-]{1,64}", p) else "sprachsteuerung")' "$PCONFIG/sprachsteuerung.json" 2>/dev/null)
+    [ -n "$SP_PRAEFIX" ] || SP_PRAEFIX=sprachsteuerung
+    if printf '%s/#\n' "$SP_PRAEFIX" > "$SP_ABO.tmp.$$" 2>/dev/null && chmod 644 "$SP_ABO.tmp.$$" \
+       && mv -f "$SP_ABO.tmp.$$" "$SP_ABO"; then
+        echo "<INFO> Abo-Datei fuer das MQTT-Gateway V1 angelegt: $SP_PRAEFIX/#"
+    else
+        rm -f "$SP_ABO.tmp.$$" 2>/dev/null
+        echo "<WARNING> Die Abo-Datei fuer das MQTT-Gateway V1 liess sich nicht anlegen ($SP_ABO) - der Dienst versucht es beim Start erneut."
+    fi
+fi
 # Die Satzdatei ist Nutzerinhalt: nur anlegen, nie ueberschreiben. Nach der
 # Schleife oben greift das nur noch bei einer Neuinstallation.
 if [ ! -f "$PCONFIG/saetze.json" ]; then
@@ -692,7 +778,9 @@ else
     exit 1
 fi
 
-chmod 755 "$PBIN/dienst.sh" "$PBIN/sprachsteuerung_dienst.py" "$PBIN/hardware.py" 2>/dev/null
+# Gruppe 11 (0.12.7): dazu die Befehlsbruecke. KEIN Start hier - der Waechter in cron.01min startet sie binnen
+# einer Minute, wenn "Befehle ueber MQTT annehmen" gesetzt ist (und nie, solange die Marke liegt).
+chmod 755 "$PBIN/dienst.sh" "$PBIN/sprachsteuerung_dienst.py" "$PBIN/hardware.py" "$PBIN/befehlsbruecke.sh" 2>/dev/null
 # Bis 0.11.15 stand hier "chown -R loxberry:loxberry" ueber Plugin-, Daten-,
 # Protokoll- und Konfigurationsordner. Das Skript laeuft aber als loxberry:
 # was es anlegt, gehoert loxberry ohnehin, und was root gehoert (etwa von

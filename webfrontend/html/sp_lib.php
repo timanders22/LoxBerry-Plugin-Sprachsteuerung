@@ -616,6 +616,12 @@ function sp_config($erzeugen = true)
         $cfg[$feld] = sp_zahl_in_grenzen($wert, $g[0], $g[1], $vorgabe);
     }
 
+    /* Gruppe 11 (0.12.7): die vier Haken der Umstellung nur als 0 oder 1 - wie SCHALTER_0_1 im Dienst. Ein Text wie
+     * "nein" oder eine Liste ist AUS, nicht "irgendwie wahr". */
+    foreach (array('befehle_mqtt_ein', 'befehle_mqtt_steuern', 'befehle_cmd_ein', 'endpunkt_ein') as $sp_h) {
+        $sp_w = isset($cfg[$sp_h]) ? $cfg[$sp_h] : 0;
+        $cfg[$sp_h] = ($sp_w === 1 || $sp_w === true || $sp_w === '1') ? 1 : 0;
+    }
     if (!in_array($cfg['antwortweg'], sp_auswahl('antwortweg') ?: array('satellit', 'loxone', 'beide'), true)) {
         $cfg['antwortweg'] = 'beide';
     }
@@ -1210,7 +1216,17 @@ function sp_ist_dienst($pid)
     if (preg_match('#^python[0-9.]*$#', $a0) !== 1) {
         return false;
     }
-    return $argv[1] === sp_paths()['bindir'] . '/sprachsteuerung_dienst.py';
+    /* S13 + E4 (0.12.7, Pruefbericht): auch gegen den PHYSISCHEN Pfad - bin/dienst.sh startet den Dienst mit dem
+     * Pfad aus 'pwd -P'. Ist die Wurzel ein Verweis (so auf vielen Anlagen), meldete diese Funktion bis
+     * 0.12.6 den laufenden Dienst als gestoppt: der Endpunkt antwortete 503, OK= der Statuszeile stand auf 0 und
+     * jeder Befehl - auch ueber die Befehlsbruecke - scheiterte. Dieselbe Doppelpruefung wie die Hakenskripte seit
+     * 0.12.0. */
+    $soll = sp_paths()['bindir'] . '/sprachsteuerung_dienst.py';
+    if ($argv[1] === $soll) {
+        return true;
+    }
+    $r = @realpath(sp_paths()['bindir']);
+    return $r !== false && $argv[1] === $r . '/sprachsteuerung_dienst.py';
 }
 
 function sp_dienst_soll()
@@ -1257,6 +1273,11 @@ function sp_dienst($befehl)
     $text = trim($aus . ($err !== '' ? "\n" . $err : ''));
     if (sp_ct_zeitablauf($code)) {
         $text = trim($text . "\n" . sprintf(sp_t('LIB012.ZEITABLAUF'), 'dienst.sh ' . $befehl, 60));
+    }
+    /* S6 (0.12.7): 4 = ein anderer Start haelt die Startsperre - kein Erfolg, sondern ein Hinweis (Hausform Heimkino
+     * H5); bis 0.12.6 kam hier 0 an und die Oberflaeche meldete "gestartet". */
+    if ($code === 4) {
+        return array(4, $text);
     }
     return array($code === 0 ? 1 : 0, $text);
 }
@@ -1330,7 +1351,8 @@ function sp_befehl_absetzen($befehl, $wartezeit = null, $quelle = '')
      * fuehrt Rueckfrage und Kontext je Herkunft (befehl_herkunft()); bis
      * hierher musste er sie raten ("raum" mitgeschickt = Reiter Test). Nur
      * die beiden bekannten Werte; ein anderer Aufrufer laesst das Feld weg. */
-    if (is_array($befehl) && in_array($quelle, array('web', 'endpunkt'), true)) {
+    // Gruppe 11 (0.12.7): dazu 'mqtt' - die Befehlsbruecke (sp_bb_tun() -> sp_steuern()).
+    if (is_array($befehl) && in_array($quelle, array('web', 'endpunkt', 'mqtt'), true)) {
         $befehl['quelle'] = $quelle;
     }
     if ($wartezeit === null) {
@@ -1350,6 +1372,12 @@ function sp_befehl_absetzen($befehl, $wartezeit = null, $quelle = '')
      * Der Dienst arbeitet den Befehl trotzdem zu Ende - die Warteschlange
      * liegt im Dateisystem, nicht in dieser Anfrage. */
     $wartezeit = max(0, min(SP_WARTEN_WEB, (int) $wartezeit));
+    /* Gruppe 11 (0.12.7, Entwurf 3.4): wer nicht wartet (die Befehlsbruecke bei sprechen, alarm, satz), bekommt
+     * keine Antwortdatei - der Dienst schreibt dann nur die Protokollzeile. Sonst laegen je Ansage 900 s lang
+     * Dateien in antworten/, die niemand liest. */
+    if ($wartezeit === 0 && is_array($befehl)) {
+        $befehl['ohne_antwort'] = 1;
+    }
 
     /* Laeuft der Dienst ueberhaupt? Ohne diese Frage wartete die Anfrage die
      * volle Zeit auf eine Antwort, die niemand schreiben kann - gemessen
@@ -1399,6 +1427,693 @@ function sp_befehl_absetzen($befehl, $wartezeit = null, $quelle = '')
         usleep(100000);
     }
     return array(2, sprintf(sp_t('LIB012.BEFEHL_OHNE_ANTWORT'), $wartezeit), array());
+}
+
+/* ==================================================================
+ * Gruppe 11 / MQTT (0.12.7; Entwurf Musterprojekt/entwurf_gruppe11_sp.txt 2.4, 3.2-3.9; Entscheidungen Gruppe 11):
+ * EINE Pruefung fuer HTTP-Endpunkt und Befehlsbruecke, die Uebergabe der Bruecke an die Warteschlange, Namenstabelle,
+ * V2-Hakenliste, Vorlage MQTT-Befehle und die Pruefzeilen der Umstellung.
+ * ================================================================== */
+
+/**
+ * Liegt die Marke "Aktualisierung laeuft" (preupgrade.sh)? Dieselbe Regel wie sperre_gilt() in bin/dienst.sh: eine
+ * Unixzeit, juenger als 3600 s und hoechstens 300 s aus der Zukunft. Im Archivmodus gibt es keine Marke.
+ */
+function sp_upgrade_marke_liegt()
+{
+    $p = sp_paths();
+    if ($p['home'] === '') { return false; }
+    $f = $p['home'] . '/data/plugins/' . $p['plugin'] . '.upgrade_laeuft';
+    if (!is_file($f)) { return false; }
+    $seit = trim((string) @file_get_contents($f));
+    if (!preg_match('/^[0-9]{1,12}\z/', $seit)) { return false; }     // ohne ctype (nicht auf jeder Anlage geladen)
+    $alter = time() - (int) $seit;
+    return $alter >= -300 && $alter < 3600;
+}
+
+/**
+ * Text, Zone, Mikrofon und Dringlichkeit pruefen - EINE Stelle fuer den HTTP-Endpunkt (html/index.php, dort vor den
+ * lesenden Aktionen, wie bis 0.12.6) und die Befehlsbruecke (sp_steuern() ueber sp_bb_tun()). $hol($name) liefert den
+ * Rohwert eines Feldes als Zeichenkette ('' = fehlt); der Endpunkt reicht seinen Parameterleser durch, der ein Feld,
+ * das kein Skalar ist, selbst mit 400 abweist - die Reihenfolge der Abweisungen bleibt dieselbe wie bis 0.12.6.
+ * Rueckgabe: array('ok' => true, 'text', 'zone', 'mikrofon', 'dringend') oder array('ok' => false, 'http' => 400,
+ * 'grund', 'ausgabe' = die Antwortzeilen des Endpunkts, byte-gleich wie bis 0.12.6).
+ */
+function sp_eingaben_pruefen($hol)
+{
+    $fehl = function ($grund, $satz) {
+        return array('ok' => false, 'http' => 400, 'grund' => $grund,
+                     'ausgabe' => 'FEHLER;OK=0;GRUND=' . $grund . "\n" . $satz);
+    };
+    /* Der gesprochene Text wird NICHT gefiltert - nur Steuerzeichen fallen weg. Ein hartes Filtern zerstoerte gueltige
+     * Saetze, und was ein Satz enthalten darf, weiss hier niemand besser als der Sprecher. */
+    $sauber = preg_replace('/[\x00-\x1F\x7F]/u', ' ', (string) call_user_func($hol, 'text'));
+    if ($sauber === null) {
+        // Abweisen und benennen, nicht zurechtbiegen: bis 0.10.1 wurde aus ungueltigem UTF-8 stillschweigend ein
+        // leerer Text, und die Antwort lautete TEXT_FEHLT - der Text fehlte aber nicht.
+        return $fehl('TEXT_UNGUELTIG', "Der Text ist kein gueltiges UTF-8.\n");
+    }
+    $text = trim($sauber);
+    // Gezaehlt werden ZEICHEN, nicht Bytes (ein Umlaut belegt in UTF-8 zwei).
+    if (sp_zeichen($text) > 400) {
+        return $fehl('TEXT_ZU_LANG', "Mehr als 400 Zeichen nimmt der Endpunkt nicht an.\n");
+    }
+    /* Zonen wie in der Sprachausgabe (ansage_zonen_ok()): Zahl[~Lautstaerke 1-100], durch Komma getrennt; Leerraum um
+     * die Kommas faellt weg. */
+    $zone = (string) call_user_func($hol, 'zone');
+    if ($zone !== '' && (strlen($zone) > 80 || !ansage_zonen_ok($zone))) {
+        return $fehl('ZONE_UNGUELTIG', "Zonen bestehen aus Ziffern, Komma und der Tilde, zum Beispiel 2,4 oder 2~15.\n");
+    }
+    $zone = (string) preg_replace('/\s+/', '', $zone);
+    $mikro = preg_replace('/[\x00-\x1F\x7F]/u', '', (string) call_user_func($hol, 'mikrofon'));
+    if ($mikro === null) {
+        // Ein still weggefallenes Mikrofon schickt die Ansage an ALLE Lautsprecher statt an einen.
+        return $fehl('MIKROFON_UNGUELTIG', '');
+    }
+    $mikro = trim($mikro);
+    if (sp_zeichen($mikro) > 40) {
+        return $fehl('MIKROFON_ZU_LANG', '');
+    }
+    $dringend = call_user_func($hol, 'dringend') === '1' ? 1 : 0;
+    return array('ok' => true, 'text' => $text, 'zone' => $zone, 'mikrofon' => $mikro, 'dringend' => $dringend);
+}
+
+/** Grund einer Ablehnung durch sp_befehl_absetzen() - ASCII, ohne Text und ohne Adresse (fuer die Quittung). */
+function sp_steuern_grund(array $erg)
+{
+    if ((int) $erg[0] !== 0) { return ''; }
+    if (sp_dienst_pid() === 0) { return 'DIENST_LAEUFT_NICHT'; }
+    return array_key_exists(2, $erg) ? 'NICHT_AUSGEFUEHRT' : 'ABLEGEN';
+}
+
+/**
+ * Die schaltenden Aktionen satz, sprechen und ruhe - EINE Logik fuer den HTTP-Endpunkt (Quelle 'endpunkt') und die
+ * Befehlsbruecke (Quelle 'mqtt', Entwurf 3.4, Bauart Matter2Lox mt_steuern()). Bis 0.12.6 standen diese Zeilen in
+ * html/index.php; der Endpunkt gibt 'ausgabe' mit 'http' byte-gleich wie bisher aus.
+ *   $hol     Leser der Rohfelder text, zone, mikrofon, dringend, wert (siehe sp_eingaben_pruefen())
+ *   $warten  Wartezeit fuer sp_befehl_absetzen() (null = Konfiguration, 0 = nur einreihen)
+ *   $ein     schon gepruefte Eingaben (der Endpunkt prueft sie vor den lesenden Aktionen)
+ * Rueckgabe array('code' => 1 erledigt | 2 eingereiht ohne Antwort | 0 abgelehnt, 'grund', 'meldung', 'http',
+ * 'ausgabe').
+ */
+function sp_steuern($aktion, $hol, $quelle = 'endpunkt', $warten = null, $ein = null)
+{
+    $r = function ($code, $grund, $meldung, $http, $ausgabe) {
+        return array('code' => (int) $code, 'grund' => (string) $grund, 'meldung' => (string) $meldung,
+                     'http' => (int) $http, 'ausgabe' => (string) $ausgabe);
+    };
+    $aktion = (string) $aktion;
+    if (!in_array($aktion, array('satz', 'sprechen', 'ruhe'), true)) {
+        return $r(0, 'UNBEKANNTE_AKTION', '', 400, "FEHLER;OK=0;GRUND=UNBEKANNTE_AKTION\n");
+    }
+    if (!is_array($ein)) {
+        $ein = sp_eingaben_pruefen($hol);
+    }
+    if (empty($ein['ok'])) {
+        return $r(0, $ein['grund'], '', $ein['http'], $ein['ausgabe']);
+    }
+    if (sp_dienst_pid() === 0) {
+        return $r(0, 'DIENST_LAEUFT_NICHT', '', 503, "SET;OK=0;GRUND=DIENST_LAEUFT_NICHT\n"
+            . "Der Dienst laeuft nicht. Reiter Einstellungen, Knopf 'Dienst starten'.\n");
+    }
+    if ($aktion === 'ruhe') {
+        $wert = (string) call_user_func($hol, 'wert');
+        if (!in_array($wert, array('0', '1'), true)) {
+            return $r(0, 'WERT_UNGUELTIG', '', 400, "SET;OK=0;GRUND=WERT_UNGUELTIG\nErlaubt ist wert=0 oder wert=1.\n");
+        }
+        /* Auch das geht ueber die Warteschlange: der DIENST schreibt ruhe.json, nicht der unangemeldete Endpunkt und
+         * nicht die Bruecke. */
+        $erg = sp_befehl_absetzen(array('aktion' => 'ruhe', 'wert' => (int) $wert), $warten, $quelle);
+        return $r($erg[0], sp_steuern_grund($erg), $erg[1], (int) $erg[0] === 0 ? 500 : 200,
+            sprintf("SET;OK=%d;AKTION=ruhe;WERT=%d;MELDUNG=%s\n", $erg[0], (int) $wert,
+                    str_replace(array("\r", "\n", ';'), ' ', $erg[1])));
+    }
+    if ($ein['text'] === '') {
+        return $r(0, 'TEXT_FEHLT', '', 400, "SET;OK=0;GRUND=TEXT_FEHLT\n");
+    }
+    $befehl = array('aktion' => $aktion, ($aktion === 'satz' ? 'satz' : 'text') => $ein['text']);
+    if ($aktion === 'sprechen') {
+        if ($ein['zone'] !== '')     { $befehl['zone'] = $ein['zone']; }
+        if ($ein['mikrofon'] !== '') { $befehl['mikrofon'] = $ein['mikrofon']; }
+        if ($ein['dringend'])        { $befehl['dringend'] = 1; }
+    }
+    /* S9: der Dienst erfaehrt, woher der Befehl kommt (quelle endpunkt bzw. mqtt) - Rueckfrage und Kontext haengen
+     * daran. Nr. 40 / Entwurf 3.6: zu einer Ansage nennt die Antwort ihre Laenge (TEXTLAENGE), nie den Text. */
+    $erg = sp_befehl_absetzen($befehl, $warten, $quelle);
+    return $r($erg[0], sp_steuern_grund($erg), $erg[1], (int) $erg[0] === 0 ? 500 : 200,
+        sprintf("SET;OK=%d;AKTION=%s;%sMELDUNG=%s\n", $erg[0], $aktion,
+                $aktion === 'sprechen' ? 'TEXTLAENGE=' . ansage_zeichen($ein['text']) . ';' : '',
+                str_replace(array("\r", "\n", ';'), ' ', $erg[1])));
+}
+
+/* ------------------------------------------------------------------
+ * Befehlsbruecke (Entwurf 3.3-3.5)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Einstellungen fuer die Zuordnung (bin/befehle_zuordnung.php): Praefix = mqtt_topic ohne Schraegstriche am Rand
+ * (wie praefix_von() im Dienst), annehmen = "Befehle ueber MQTT annehmen", eingreifend = "Ansagen und Saetze ueber
+ * MQTT zulassen", mqtt_ein = "MQTT" (status/befehle nur dann). sp_config(false): liest nur, schreibt nie - und ohne
+ * Zwischenspeicher, die Bruecke sieht einen neuen Haken ohne Neustart.
+ */
+function sp_bb_einstellungen()
+{
+    $c = sp_config(false);
+    $p = trim((string) (isset($c['mqtt_topic']) && is_scalar($c['mqtt_topic']) ? $c['mqtt_topic'] : ''), '/');
+    return array('praefix' => $p !== '' ? $p : 'sprachsteuerung',
+                 'annehmen' => (int) $c['befehle_mqtt_ein'] === 1,
+                 'eingreifend' => (int) $c['befehle_mqtt_steuern'] === 1,
+                 'mqtt_ein' => !empty($c['mqtt_ein']));
+}
+
+/** Protokoll der Befehlsbruecke: die Logdatei des Plugins (sp_log), mit Stufe. */
+function sp_bb_protokoll($stufe, $text)
+{
+    sp_log('[' . (string) $stufe . '] ' . (string) $text);
+}
+
+/**
+ * Ein Befehl der Befehlsbruecke (tun() in bin/befehle_zuordnung.php). $name sprechen | alarm | satz | ruhe, $wert der
+ * von der Bruecke gepruefte Wert (Text ohne Steuerzeichen bzw. 0/1). Upgrade-Marke -> AKTUALISIERUNG; sprechen und
+ * alarm lesen eine Nutzlast, die mit "{" beginnt, als JSON {"text", "zone", "mikrofon"} (JSON_UNGUELTIG,
+ * JSON_OHNE_TEXT); alarm setzt dringend (nur ueber diesen Namen, E1). Dann sp_steuern() mit Quelle 'mqtt': ruhe wartet
+ * hoechstens 3 s auf den Dienst, die anderen werden nur eingereiht (die Befehlsdatei traegt dann 'ohne_antwort').
+ * Kein HTTP auf sich selbst, kein Kindprozess. Rueckgabe array(bool ok, string grund).
+ */
+function sp_bb_tun($name, $wert)
+{
+    $name = (string) $name;
+    $wert = (string) $wert;
+    if (sp_upgrade_marke_liegt()) {
+        return array(false, 'AKTUALISIERUNG');
+    }
+    $f = array();
+    if ($name === 'ruhe') {
+        $aktion = 'ruhe';
+        $f['wert'] = $wert;
+    } elseif (in_array($name, array('sprechen', 'alarm', 'satz'), true)) {
+        $aktion = $name === 'satz' ? 'satz' : 'sprechen';
+        if ($aktion === 'sprechen' && substr(ltrim($wert), 0, 1) === '{') {
+            $j = json_decode($wert, true);
+            if (!is_array($j)) {
+                return array(false, 'JSON_UNGUELTIG');
+            }
+            if (!isset($j['text']) || !is_string($j['text'])) {
+                return array(false, 'JSON_OHNE_TEXT');
+            }
+            $f['text'] = $j['text'];
+            if (isset($j['zone'])) {
+                if (!is_scalar($j['zone'])) { return array(false, 'ZONE_UNGUELTIG'); }
+                $f['zone'] = (string) $j['zone'];
+            }
+            if (isset($j['mikrofon'])) {
+                if (!is_string($j['mikrofon'])) { return array(false, 'MIKROFON_UNGUELTIG'); }
+                $f['mikrofon'] = $j['mikrofon'];
+            }
+        } else {
+            $f['text'] = $wert;
+        }
+        if ($name === 'alarm') {
+            $f['dringend'] = '1';
+        }
+    } else {
+        return array(false, 'UNBEKANNT');
+    }
+    $hol = function ($feld) use ($f) {
+        return isset($f[$feld]) ? (string) $f[$feld] : '';
+    };
+    $r = sp_steuern($aktion, $hol, 'mqtt', $name === 'ruhe' ? 3 : 0);
+    if ($r['code'] === 1 || $r['code'] === 2) {
+        return array(true, '');
+    }
+    return array(false, $r['grund'] !== '' ? $r['grund'] : 'ABGELEHNT');
+}
+
+/** Wo liegt eine Datei unter bin/? Installiert bin/plugins/<ordner>/, im Archiv <wurzel>/bin/. '' = fehlt. */
+function sp_bin_datei($name)
+{
+    foreach (array(sp_paths()['bindir'] . '/' . $name, dirname(dirname(__DIR__)) . '/bin/' . $name) as $k) {
+        if (@is_file($k)) {
+            return $k;
+        }
+    }
+    return '';
+}
+
+/** Die Bruecke als Bibliothek laden (BB_NUR_LADEN: kein Hauptteil). */
+function sp_bruecke_laden()
+{
+    if (function_exists('bb_waechter')) {
+        return true;
+    }
+    $f = sp_bin_datei('befehlsbruecke.php');
+    if ($f === '') {
+        return false;
+    }
+    if (!defined('BB_NUR_LADEN')) {
+        define('BB_NUR_LADEN', true);
+    }
+    require_once $f;
+    return function_exists('bb_waechter');
+}
+
+/** Taugt das Praefix fuer die Befehlsbruecke (je Ebene [A-Za-z0-9_-], hoechstens 5 Ebenen a 40, 100 Zeichen)? */
+function sp_bb_praefix_ok($p)
+{
+    $p = trim((string) $p, '/');
+    if (sp_bruecke_laden() && function_exists('bb_praefix_gueltig')) {
+        return bb_praefix_gueltig($p);
+    }
+    return strlen($p) <= 100 && (bool) preg_match('#^[A-Za-z0-9_\-]{1,40}(/[A-Za-z0-9_\-]{1,40}){0,4}\z#', $p);
+}
+
+/**
+ * Direktstart bzw. -stopp der Bruecke beim Speichern im Reiter MQTT (Entwurf 3.5, Bauart mt/hk):
+ * befehlsbruecke.sh start startet nur nach --soll, nie als root, nie waehrend eines Updates, nie doppelt; der
+ * Waechter in cron.01min startet hoechstens alle 600 s neu. $neustart: Praefix gewechselt (stop, dann start).
+ * Rueckgabe array(''|'ein'|'aus'|'start_fehl'|'stop_fehl', Ausgabe).
+ */
+function sp_bruecke_schalten($neustart = false)
+{
+    if (DIRECTORY_SEPARATOR === '\\' || sp_paths()['home'] === '' || !sp_bruecke_laden()) {
+        return array('', '');
+    }
+    $p = bb_pfade();
+    if (!$p) {
+        return array('', '');
+    }
+    $e = sp_bb_einstellungen();
+    $laeuft = (bool) bb_dienste();
+    if ($e['annehmen']) {
+        if ($laeuft && !$neustart) {
+            return array('', '');
+        }
+        if ($laeuft) {
+            bb_sh($p, 'stop');
+        }
+        list($rc, $aus) = bb_sh($p, 'start');
+        return array(($rc === 0 && bb_dienste()) ? 'ein' : 'start_fehl', $aus);
+    }
+    if (!$laeuft) {
+        return array('', '');
+    }
+    list($rc, $aus) = bb_sh($p, 'stop');
+    return array(($rc === 0 && !bb_dienste()) ? 'aus' : 'stop_fehl', $aus);
+}
+
+/** Ein Satz zum Ergebnis von sp_bruecke_schalten() ('' = nichts zu sagen), maskiert. */
+function sp_bruecke_satz(array $r)
+{
+    $a = $r[1] !== '' ? trim((string) $r[1]) : '-';
+    switch ($r[0]) {
+        case 'ein':
+            return sp_e(sprintf(sp_t('BEFEHL.M_GESTARTET'), $a));
+        case 'aus':
+            return sp_e(sprintf(sp_t('BEFEHL.M_ANGEHALTEN'), $a));
+        case 'start_fehl':
+            return sp_e(sprintf(sp_t('BEFEHL.M_START_FEHL'), $a));
+        case 'stop_fehl':
+            return sp_e(sprintf(sp_t('BEFEHL.M_STOP_FEHL'), $a));
+    }
+    return '';
+}
+
+/* ------------------------------------------------------------------
+ * MQTT-Befehle fuer Loxone (Entwurf 3.2, 3.8; Musterprojekt Abschnitt 6)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Die vier Befehle des Musterprojekts (Seite "Sprachsteuerung Ansagen") - EINE Quelle fuer die Tabelle im Reiter
+ * Einbindung und die Vorlage MQTT-Befehle. Titel und Ansagetexte fest deutsch (Sprachregel 13.10.2026), die Nutzlast
+ * ohne Umlaute, bis gemessen ist, wie Loxone sie ueber UDP sendet (Entwurf 11). Der Titel mit Umlaut steht als
+ * UTF-8-Bytes: diese Datei bleibt in ihrem Code ASCII. Je Zeile: titel, name (Bruecke), ein (Nutzlast bei EIN), aus
+ * (bei AUS, '' = keiner), eingreifend.
+ */
+function sp_mqtt_befehle()
+{
+    return array(
+        array('titel' => "Sprachsteuerung: Ansage T\xc3\xbcrklingel", 'name' => 'sprechen',
+              'ein' => 'Es hat an der Haustuer geklingelt', 'aus' => '', 'eingreifend' => true),
+        array('titel' => 'Sprachsteuerung: Ansage', 'name' => 'sprechen',
+              'ein' => 'Das Garagentor steht seit einer Stunde offen', 'aus' => '', 'eingreifend' => true),
+        array('titel' => 'Sprachsteuerung: Alarmansage', 'name' => 'alarm',
+              'ein' => 'Wasseralarm im Keller', 'aus' => '', 'eingreifend' => true),
+        array('titel' => 'Sprachsteuerung: Satz schicken', 'name' => 'satz',
+              'ein' => 'schalte das licht im wohnzimmer aus', 'aus' => '', 'eingreifend' => true),
+        array('titel' => 'Sprachsteuerung: Ansagen stilllegen', 'name' => 'ruhe',
+              'ein' => '1', 'aus' => '0', 'eingreifend' => false),
+    );
+}
+
+/** "publish <praefix>/befehl/<name> <wert>" - nie retain (Regeln/07). */
+function sp_mqtt_befehl_text($praefix, $name, $wert)
+{
+    return 'publish ' . trim((string) $praefix, '/') . '/befehl/' . $name . ' ' . $wert;
+}
+
+/** Der Rechner, an den Loxone die UDP-Befehle schickt: die LAN-Adresse aus sp_lb_adresse(), sonst "loxberry". */
+function sp_udp_host()
+{
+    $h = (string) parse_url(sp_lb_adresse(), PHP_URL_HOST);
+    $h = trim($h, '[]');
+    return preg_match('/^[A-Za-z0-9.\-:]{1,120}\z/', $h) ? $h : 'loxberry';
+}
+
+/** Der UDP-Eingang des MQTT-Gateways (general.json Mqtt.Udpinport), sonst 11884. */
+function sp_udp_eingang()
+{
+    $m = sp_mqtt_zustand();
+    $port = (int) $m['udpport'];
+    return ($port >= 1 && $port <= 65535) ? $port : 11884;
+}
+
+/**
+ * Vorlage "MQTT-Befehle" (Entwurf 3.8): ein Virtueller Ausgang an /dev/udp/<LoxBerry>/<UDP-Eingang des Gateways>,
+ * CloseAfterSend, je Zeile aus sp_mqtt_befehle() ein digitaler Befehl "publish <praefix>/befehl/<name> <wert>" (nie
+ * retain); "Ansagen stilllegen" mit Befehl bei AUS. Rueckgabe array(Dateiname, Inhalt).
+ */
+function sp_vorlage_mqtt_out($cfg = null)
+{
+    if (!is_array($cfg)) { $cfg = sp_config(false); }
+    $praefix = trim((string) (isset($cfg['mqtt_topic']) && is_scalar($cfg['mqtt_topic']) ? $cfg['mqtt_topic'] : ''), '/');
+    if ($praefix === '') { $praefix = 'sprachsteuerung'; }
+    $cmds = array();
+    foreach (sp_mqtt_befehle() as $b) {
+        $cmds[] = array('title' => $b['titel'],
+                        'comment' => substr($b['titel'], strlen('Sprachsteuerung: ')),
+                        'cmdon' => sp_mqtt_befehl_text($praefix, $b['name'], $b['ein']),
+                        'cmdoff' => $b['aus'] === '' ? '' : sp_mqtt_befehl_text($praefix, $b['name'], $b['aus']));
+    }
+    return array('VQ_Sprachsteuerung_MQTT.xml', sp_xml_virtual_out(array(
+        'title'   => 'Sprachsteuerung Befehle (MQTT)',
+        'address' => '/dev/udp/' . sp_udp_host() . '/' . sp_udp_eingang(),
+        'comment' => sprintf(sp_t('LOX.VORLAGE_KOMMENTAR'), date('d.m.Y')),
+        'close'   => true,
+    ), $cmds));
+}
+
+/* ------------------------------------------------------------------
+ * Namenstabelle und V2-Hakenliste (Entwurf 2.4, E8)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Der Name, den das MQTT-Gateway einem Thema gibt: Praefix und Thema, "/", "%" und Leerzeichen als "_"
+ * (build_vi_name() in V2, V1 ohne Leerzeichen - dieselbe Rechnung wie sp_vorlage_ziele()). EINE Stelle.
+ */
+function sp_vi_name($thema, $cfg = null)
+{
+    if (!is_array($cfg)) { $cfg = sp_config(false); }
+    $p = trim((string) (isset($cfg['mqtt_topic']) && is_scalar($cfg['mqtt_topic']) ? $cfg['mqtt_topic'] : ''), '/');
+    if ($p === '') { $p = 'sprachsteuerung'; }
+    return str_replace(array('/', '%', ' '), '_', $p . '/' . trim((string) $thema, '/'));
+}
+
+/**
+ * V2-Hakenliste des Musterprojekts (Praefix sprachsteuerung, 22 Haken, 5 Noncached): Thema relativ zum Praefix =>
+ * array(N|'', Seite im Musterprojekt).
+ */
+function sp_mqtt_hakenliste_muster()
+{
+    $s1 = 'Sprachsteuerung';
+    $s2 = 'Sprachsteuerung Befehle';
+    $s3 = 'Sprachsteuerung Ansagen';
+    return array(
+        'online' => array('N', $s1), 'status/zaehler' => array('', $s1), 'mikrofone' => array('', $s1),
+        'bereit' => array('N', $s1), 'dienste_ok' => array('N', $s1), 'dienste_gesamt' => array('', $s1),
+        'regeln' => array('', $s1), 'ziele' => array('', $s1), 'ruhe' => array('N', $s1),
+        'letzter_satz_alter' => array('N', $s1),
+        'ansage_ok' => array('', $s3), 'ansage_grund' => array('', $s3), 'ansage' => array('', $s3),
+        'wohnzimmer/licht/aktion' => array('', $s2), 'wohnzimmer/licht/wert' => array('', $s2),
+        'wohnzimmer/heizung/wert' => array('', $s2), 'ok' => array('', $s2), 'satz' => array('', $s2),
+        'grund' => array('', $s2), 'antwort' => array('', $s2), 'mikrofon' => array('', $s2), 'ziel' => array('', $s2),
+    );
+}
+
+/** Die Themen, die der Dienst sendet: die Retain-Tabelle aus templates/vorgaben.json (EINE Tabelle fuer Dienst und
+ * Oberflaeche, status/zaehler seit 0.12.7) und je Ziel <thema>/aktion und <thema>/wert; dazu status/befehle der Bruecke. */
+function sp_mqtt_themen($saetze = null)
+{
+    $d = sp_vorgabendatei();
+    $r = isset($d['retain']['themen']) && is_array($d['retain']['themen']) ? $d['retain']['themen'] : array();
+    $aus = array_map('strval', array_keys($r));
+    if (!is_array($saetze)) { $saetze = sp_saetze(false); }
+    $ziele = isset($saetze['ziele']) && is_array($saetze['ziele']) ? $saetze['ziele'] : array();
+    foreach ($ziele as $k => $z) {
+        $t = sp_ziel_thema($k, $z);
+        if ($t === '') { continue; }
+        foreach (array('/aktion', '/wert') as $e) {
+            if (!in_array($t . $e, $aus, true)) { $aus[] = $t . $e; }
+        }
+    }
+    $aus[] = 'status/befehle';
+    return $aus;
+}
+
+/**
+ * Die Namenstabelle - EINE Quelle fuer Reiter Einbindung, Reiter MQTT und die Pruefzeile. Je Zeile: thema (relativ
+ * zum Praefix), voll, name (Gateway-Name, sp_vi_name()), art (zahl|text), retained, v2 (N|''), muster (Seite im
+ * Musterprojekt oder ''), bedeutung (Sprachschluessel). Die Themen des Musterprojekts zuerst, in der Reihenfolge der
+ * Hakenliste; dann die uebrigen.
+ */
+function sp_mqtt_namen($cfg = null, $saetze = null)
+{
+    if (!is_array($cfg)) { $cfg = sp_config(false); }
+    $p = trim((string) (isset($cfg['mqtt_topic']) && is_scalar($cfg['mqtt_topic']) ? $cfg['mqtt_topic'] : ''), '/');
+    if ($p === '') { $p = 'sprachsteuerung'; }
+    $texte = array('satz', 'absicht', 'aktion', 'ziel', 'einheit', 'quelle', 'mikrofon', 'zeit', 'antwort', 'grund',
+                   'ansage', 'ansage_grund');
+    $bed = array(
+        'satz' => 'MQTT.B_SATZ', 'absicht' => 'MQTT.B_ABSICHT', 'aktion' => 'MQTT.B_AKTION', 'ziel' => 'MQTT.B_ZIEL',
+        'wert' => 'MQTT.B_WERT', 'einheit' => 'MQTT.B_EINHEIT', 'quelle' => 'MQTT.B_QUELLE',
+        'mikrofon' => 'MQTT.B_MIKROFON', 'zeit' => 'MQTT.B_ZEIT', 'antwort' => 'MQTT.B_ANTWORT', 'ok' => 'MQTT.B_OK',
+        'grund' => 'MQTT.B_GRUND', 'ansage' => 'MQTT.B_ANSAGE', 'online' => 'MQTT.B_ONLINE', 'ts' => 'MQTT.B_TS',
+        'mikrofone' => 'MQTT.B_MIKROFONE', 'bereit' => 'MQTT.B_BEREIT', 'dienste_ok' => 'MQTT.B_DIENSTE_OK',
+        'dienste_gesamt' => 'MQTT.B_DIENSTE_GESAMT', 'regeln' => 'MQTT.B_REGELN', 'ziele' => 'MQTT.B_ZIELE',
+        'ruhe' => 'MQTT.B_RUHE', 'letzter_satz_alter' => 'MQTT.B_LETZTER', 'ansage_ok' => 'UI013.B_ANSAGE_OK',
+        'ansage_grund' => 'UI013.B_ANSAGE_GRUND', 'status/zaehler' => 'BEFEHL.B_STATUS_ZAEHLER',
+        'status/befehle' => 'BEFEHL.B_STATUS_BEFEHLE');
+    $muster = sp_mqtt_hakenliste_muster();
+    $themen = sp_mqtt_themen($saetze);
+    $folge = array();
+    foreach (array_keys($muster) as $t) {
+        if (in_array($t, $themen, true)) { $folge[] = $t; }
+    }
+    foreach ($themen as $t) {
+        if (!in_array($t, $folge, true)) { $folge[] = $t; }
+    }
+    $aus = array();
+    foreach ($folge as $t) {
+        $endung = substr($t, -7) === '/aktion' ? '/aktion' : (substr($t, -5) === '/wert' ? '/wert' : '');
+        $art = (in_array($t, $texte, true) || $endung === '/aktion') ? 'text' : 'zahl';
+        $b = isset($bed[$t]) ? $bed[$t] : ($endung === '/aktion' ? 'MQTT.B_ZIELTHEMA' : 'MQTT.B_ZIELWERT');
+        $aus[] = array('thema' => $t, 'voll' => $p . '/' . $t,
+                       'name' => sp_vi_name($t, $cfg), 'art' => $art,
+                       'retained' => $t === 'status/befehle' ? false : sp_retain_fuer($t),
+                       'v2' => isset($muster[$t]) ? $muster[$t][0] : '',
+                       'muster' => isset($muster[$t]) ? $muster[$t][1] : '', 'bedeutung' => $b);
+    }
+    return $aus;
+}
+
+/* ------------------------------------------------------------------
+ * Pruefzeilen der Umstellung (Reiter Test; Entwurf 3.5). Alle lesen nur.
+ * Rueckgabe je array(stand, HTML): 1 in Ordnung, 0 Befund, -1 Hinweis bzw. nicht feststellbar.
+ * ------------------------------------------------------------------ */
+
+/** Laeuft die Befehlsbruecke? status/befehle und letzte Quittung aus ihrer zustand.json. Haken aus ist grau. */
+function sp_pruef_bruecke($cfg)
+{
+    if (!sp_bruecke_laden()) {
+        return array(0, sp_e(sp_t('BEFEHL.T_FEHLT')));
+    }
+    list($z, $fehler) = bb_zuordnung_laden(sp_bin_datei('befehle_zuordnung.php'));
+    if ($z === null) {
+        return array(0, sp_e(sprintf(sp_t('BEFEHL.T_DEFEKT'), $fehler)));
+    }
+    list($f) = bb_zuordnung_pruefen($z);
+    if ($f) {
+        return array(0, sp_e(sprintf(sp_t('BEFEHL.T_DEFEKT'), $f[0])));
+    }
+    if ((int) $cfg['befehle_mqtt_ein'] !== 1) {
+        return array(-1, sp_e(sp_t('BEFEHL.T_AUS')));
+    }
+    if (DIRECTORY_SEPARATOR === '\\' || sp_paths()['home'] === '' || !bb_pfade()) {
+        return array(-1, sp_e(sp_t('BEFEHL.T_ARCHIV')));
+    }
+    $zu = bb_zustand_lesen();
+    $alter = ($zu && isset($zu['ts'])) ? time() - (int) $zu['ts'] : null;
+    if (!bb_dienste()) {
+        return array(0, sp_e(sp_t('BEFEHL.T_STEHT')));
+    }
+    if ($alter === null || $alter > BB_WACHE_GRENZE) {
+        return array(0, sp_e(sprintf(sp_t('BEFEHL.T_HAENGT'), (int) $alter)));
+    }
+    if (empty($zu['abo'])) {
+        return array(0, sp_e(sprintf(sp_t('BEFEHL.T_OHNE_ABO'), isset($zu['fehler']) ? (string) $zu['fehler'] : '')));
+    }
+    $zl = (isset($zu['zaehler']) && is_array($zu['zaehler'])) ? $zu['zaehler'] : array();
+    $letzte = (!empty($zu['letzter']) && is_array($zu['letzter']))
+        ? (string) $zu['letzter']['name'] . ': ' . (string) $zu['letzter']['ergebnis'] . ' (vor '
+          . max(0, time() - (int) $zu['letzter']['zeit']) . ' s)' : '-';
+    return array(1, sp_e(sprintf(sp_t('BEFEHL.T_LAEUFT'),
+        date('d.m.Y H:i', isset($zu['start']) ? (int) $zu['start'] : time()),
+        isset($zl['angenommen']) ? (int) $zl['angenommen'] : 0,
+        isset($zl['abgelehnt']) ? (int) $zl['abgelehnt'] : 0, $letzte)));
+}
+
+/** "befehlsbruecke.php --pruefen" (mosquitto_sub/_pub = mosquitto-clients, Zuordnung) als EINE Zeile. */
+function sp_pruef_bruecke_einrichtung($cfg)
+{
+    if (!sp_bruecke_laden()) {
+        return array(0, sp_e(sp_t('BEFEHL.T_FEHLT')));
+    }
+    ob_start();
+    bb_pruefen();
+    $aus = array_values(array_filter(explode("\n", (string) ob_get_clean()), 'strlen'));
+    if (!$aus) {
+        return array(-1, sp_e(sp_t('BEFEHL.T_UNKLAR')));
+    }
+    $fehl = array_values(preg_grep('/^\[FEHL\]/', $aus));
+    if ($fehl) {
+        // Fehlende mosquitto-clients bei ausgeschaltetem Haken: ein Hinweis, kein Kreuz.
+        return array((int) $cfg['befehle_mqtt_ein'] === 1 ? 0 : -1,
+                     sp_e(implode(' | ', $fehl) . ' ' . sp_t('BEFEHL.T_EINRICHTUNG')));
+    }
+    return array(1, sp_e(implode(' | ', array($aus[0], end($aus)))));
+}
+
+/** Praefix der Befehle in der Grenze der Bruecke? Mit Haken aus ein Hinweis. */
+function sp_pruef_praefix($cfg)
+{
+    $pr = trim((string) $cfg['mqtt_topic'], '/');
+    if ($pr === '') { $pr = 'sprachsteuerung'; }
+    if (sp_bb_praefix_ok($pr)) {
+        return array(1, sp_e(sprintf(sp_t('BEFEHL.T_PRAEFIX_OK'), $pr)));
+    }
+    return array((int) $cfg['befehle_mqtt_ein'] === 1 ? 0 : -1, sp_e(sprintf(sp_t('BEFEHL.T_PRAEFIX'), $pr)));
+}
+
+/**
+ * Namensfilter (F1): Bruecke und Dienst teilen data/plugins/<ordner>/befehle/. Der Dienst nimmt nur ^[0-9a-f]{16}.json
+ * als Befehl; daneben duerfen nur die Dateien der Bruecke liegen (zustand.json, waechter.json, *.lock, mosquitto/,
+ * Nebendateien .tmp.<pid>). $liste fuer die Gegenprobe. Ein Befehl, der laenger als 60 s liegt, heisst: der Dienst
+ * arbeitet nicht ab.
+ */
+function sp_pruef_namensfilter($liste = null)
+{
+    $o = sp_paths()['datadir'] . '/befehle';
+    if ($liste === null) {
+        if (!is_dir($o)) {
+            return array(1, sp_e(sp_t('BEFEHL.T_WS_LEER')));
+        }
+        $liste = array();
+        foreach ((@scandir($o) ?: array()) as $f) {
+            if ($f === '.' || $f === '..') { continue; }
+            $liste[$f] = (int) @filemtime($o . '/' . $f);
+        }
+    }
+    $zahl = 0;
+    $aeltest = 0;
+    $fremd = array();
+    foreach ($liste as $f => $mtime) {
+        if (preg_match('/^[0-9a-f]{16}\.json\z/', $f)) {
+            $zahl++;
+            $aeltest = max($aeltest, time() - (int) $mtime);
+        } elseif (!preg_match('/^(zustand\.json|waechter\.json|dienst\.lock|waechter\.lock|mosquitto'
+                              . '|[0-9a-f]{16}\.json\.tmp|(zustand|waechter)\.json\.tmp\.[0-9]+)\z/', $f)) {
+            $fremd[] = $f;
+        }
+    }
+    if ($fremd) {
+        return array(0, sp_e(sprintf(sp_t('BEFEHL.T_WS_FREMD'), implode(', ', array_slice($fremd, 0, 10)))));
+    }
+    if ($zahl === 0) {
+        return array(1, sp_e(sp_t('BEFEHL.T_WS_LEER')));
+    }
+    return array($aeltest > 60 ? 0 : 1, sp_e(sprintf(sp_t('BEFEHL.T_WS_ZAHL'), $zahl, (int) $aeltest)));
+}
+
+/**
+ * Lebenszeichen (E5): der Dienst legt bei jedem Herzschlag status/zaehler (0-999) mit Zeit und Vorwert im Abbild ab
+ * (loxone.json, Block herzschlag). Gruen, wenn er in drei Takten gezaehlt hat und sich gegen den Vorwert bewegt.
+ */
+function sp_pruef_herzschlag($cfg, $abbild = null)
+{
+    $takt = (int) $cfg['herzschlag_s'];
+    if (empty($cfg['mqtt_ein']) || $takt <= 0) {
+        return array(-1, sp_e(sp_t('BEFEHL.T_HERZ_AUS')));
+    }
+    if (!is_array($abbild)) { $abbild = sp_loxone(); }
+    $h = isset($abbild['herzschlag']) && is_array($abbild['herzschlag']) ? $abbild['herzschlag'] : array();
+    if (!isset($h['zaehler'], $h['ts'])) {
+        return array(sp_dienst_pid() > 0 ? 0 : -1, sp_e(sp_t('BEFEHL.T_HERZ_NIE')));
+    }
+    $alter = time() - (int) $h['ts'];
+    $bewegt = !isset($h['vorher']) || (int) $h['vorher'] !== (int) $h['zaehler'];
+    $ok = $alter <= 3 * $takt + 60 && $bewegt;
+    return array($ok ? 1 : 0, sp_e(sprintf(sp_t('BEFEHL.T_HERZ'), (int) $h['zaehler'],
+        isset($h['vorher']) ? (string) (int) $h['vorher'] : '-', max(0, $alter))));
+}
+
+/**
+ * Namenstabelle (Entwurf 2.4): jeder Name ist der Gateway-Name seines Themas (Gegenrechnung ohne sp_vi_name()), und
+ * jedes Thema ist eines, das der Dienst sendet (sp_mqtt_themen()). $namen: Liste array(voll, name, thema) fuer die
+ * Gegenprobe - ein verdrehter Name muss rot werden.
+ */
+function sp_pruef_namen($namen = null)
+{
+    if ($namen === null) {
+        $namen = array();
+        foreach (sp_mqtt_namen() as $z) {
+            $namen[] = array($z['voll'], $z['name'], $z['thema']);
+        }
+    }
+    $themen = sp_mqtt_themen();
+    $falsch = array();
+    foreach ($namen as $z) {
+        if (!in_array($z[2], $themen, true) || $z[1] !== strtr($z[0], array('/' => '_', '%' => '_', ' ' => '_'))) {
+            $falsch[] = $z[1];
+        }
+    }
+    return $falsch ? array(0, sp_e(sprintf(sp_t('BEFEHL.T_NAMEN_FEHL'), implode(', ', $falsch))))
+                   : array(1, sp_e(sprintf(sp_t('BEFEHL.T_NAMEN_OK'), count($namen), count(sp_mqtt_hakenliste_muster()))));
+}
+
+/** Abo-Datei des Gateways V1: config/plugins/<ordner>/mqtt_subscriptions.cfg = "<praefix>/#" (S19). */
+function sp_pruef_abo($cfg)
+{
+    list($lage) = sp_mqtt_abo_lage($cfg);
+    $soll = trim(sp_mqtt_abo_inhalt($cfg));
+    if ($lage === 'passt') {
+        return array(1, sp_e(sprintf(sp_t('BEFEHL.T_ABO_OK'), $soll)));
+    }
+    return array($lage === 'fehlt' ? -1 : 0, sp_e(sprintf(sp_t('BEFEHL.T_ABO_FALSCH'), $lage, $soll)));
+}
+
+/** Vorlage MQTT-Befehle: laedt als XML, kein Titel heisst wie ein Gateway-Eingang. $titel fuer die Gegenprobe. */
+function sp_pruef_vorlage_mqtt($titel = null)
+{
+    if (!function_exists('simplexml_load_string')) {
+        return array(-1, sp_e(sp_t('BEFEHL.T_VORLAGE_UNKLAR')));
+    }
+    list(, $xml) = sp_vorlage_mqtt_out();
+    $alt = libxml_use_internal_errors(true);
+    $doc = simplexml_load_string($xml);
+    libxml_use_internal_errors($alt);
+    if ($doc === false) {
+        return array(0, sp_e(sp_t('BEFEHL.T_VORLAGE_KAPUTT')));
+    }
+    if ($titel === null) {
+        $titel = array();
+        foreach ($doc->VirtualOutCmd as $c) { $titel[] = (string) $c['Title']; }
+    }
+    $namen = array();
+    foreach (sp_mqtt_namen() as $z) { $namen[] = $z['name']; }
+    $gleich = array_values(array_intersect($titel, $namen));
+    if ($gleich) {
+        return array(0, sp_e(sprintf(sp_t('BEFEHL.T_VORLAGE_NAME'), implode(', ', $gleich))));
+    }
+    return array(1, sp_e(sprintf(sp_t('BEFEHL.T_VORLAGE_OK'), count($titel))));
 }
 
 /* ---------------- MQTT-Gateway des LoxBerry ----------------
@@ -2013,7 +2728,8 @@ function sp_xml_virtual_out($kopf, $cmds)
     $o .= 'Comment="' . sp_x(isset($kopf['comment']) ? $kopf['comment'] : '') . '" ';
     $o .= 'Address="' . sp_x(isset($kopf['address']) ? $kopf['address'] : '') . '" ';
     $o .= 'CmdInit="" ';
-    $o .= 'CloseAfterSend="false" ';
+    // Gruppe 11: die Vorlage MQTT-Befehle (UDP) schliesst nach jedem Senden; die HTTP-Vorlage bleibt byte-gleich.
+    $o .= 'CloseAfterSend="' . (!empty($kopf['close']) ? 'true' : 'false') . '" ';
     $o .= 'CmdSep=""';
     $o .= '>' . $crlf;
     $o .= "\t" . '<Info templateType="3" minVersion="17010727"/>' . $crlf;
@@ -4688,6 +5404,11 @@ function sp_trockenlauf($satz, $raum = '')
 function sp_endpunkt_probe()
 {
     $p = sp_paths();
+    /* Gruppe 11 (0.12.7, Entwurf 3.6): ohne den Haken "HTTP-Endpunkt fuer Loxone annehmen" ist der Endpunkt aus -
+     * gewollt, kein Fehler (grau). */
+    if ((int) sp_config(false)['endpunkt_ein'] !== 1) {
+        return array(-1, sp_t('TEST.A_ENDPUNKT_AUS'));
+    }
     /* Der Selbstaufruf geht an 127.0.0.1 und den Webport des LoxBerry, nicht
      * an den Namen aus der Adresszeile (bis 0.11.15 sp_hostname()): hinter
      * einem Tunnel oder einer Weiterleitung zeigt der woandershin, und das

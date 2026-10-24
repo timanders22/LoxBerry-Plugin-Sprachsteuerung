@@ -270,6 +270,12 @@ DATEI_ANSAGEN = PDATA / "ansagen.json"
 DATEI_RUHE = PDATA / "ruhe.json"
 DATEI_MITSCHNITT = PLOG / "mitschnitt.log"
 ORDNER_BEFEHLE = PDATA / "befehle"
+# Gruppe 11 (0.12.7, F1/E6): der Name einer Befehlsdatei der Warteschlange - sp_befehl_absetzen() schreibt seit
+# jeher bin2hex(random_bytes(8)), 16 Kleinbuchstaben/Ziffern. Die Befehlsbruecke legt zustand.json, waechter.json
+# und ihre Sperren in DENSELBEN Ordner; ohne den Filter naehme der Dienst sie als Befehl, loeschte sie
+# (warteschlange()) und verwuerfe sie beim Start (veraltetes_verwerfen()) - Probe probe_namensfilter.py.
+KENNUNG = re.compile(r"^[0-9a-f]{16}$")
+DATEI_ABO = PCONFIG / "mqtt_subscriptions.cfg"
 ORDNER_ANTWORTEN = PDATA / "antworten"
 ORDNER_TIMER = PDATA / "timer"
 DATEI_LOG = PLOG / "sprachsteuerung.log"
@@ -328,7 +334,10 @@ TTS_VORLAGE_MS4H = "http://{ip}:{port}/tts?text={text}&zone={zones}&vol={vol}"
 #   musik_ducken     Music-Server-Zone waehrend des Zuhoerens leiser
 #   musik_steuern    "lauter", "pause", "naechster titel" fuer die Zone
 #   docker_neustart  haengenden eigenen Container neu starten
-SCHALTER_0_1 = ("mqtt_dauer_ein", "musik_ducken", "musik_steuern", "docker_neustart")
+# Gruppe 11 (0.12.7): dazu die vier Haken der Umstellung - befehle_mqtt_ein/_steuern liest die Befehlsbruecke
+# (PHP), befehle_cmd_ein der Dienst (alter Weg <praefix>/cmd/...), endpunkt_ein der HTTP-Endpunkt.
+SCHALTER_0_1 = ("mqtt_dauer_ein", "musik_ducken", "musik_steuern", "docker_neustart",
+                "befehle_mqtt_ein", "befehle_mqtt_steuern", "befehle_cmd_ein", "endpunkt_ein")
 
 _LAUF = True
 _LOG = logging.getLogger("sprachsteuerung")
@@ -3383,6 +3392,10 @@ class MqttDauer:
         self._nummer = 0
         self._zuletzt_gesendet = 0.0
         self.zustaende: dict = {}
+        # Gruppe 11 (0.12.7, E5): der alte Befehlsweg <praefix>/cmd/... nur mit befehle_cmd_ein (dauer_abgleichen()
+        # setzt den Merker bei jedem Schleifenlauf); cmd_zuletzt fuer den Hinweis in der Oberflaeche.
+        self.cmd_ein = False
+        self.cmd_zuletzt = 0
 
     # ---- von aussen ----
     def starten(self) -> None:
@@ -3567,7 +3580,7 @@ class MqttDauer:
         return lief
 
     def _abos_abgleichen(self) -> None:
-        cmd = {"%s/cmd/%s" % (self.praefix, a) for a in DAUER_BEFEHLE}
+        cmd = {"%s/cmd/%s" % (self.praefix, a) for a in DAUER_BEFEHLE} if self.cmd_ein else set()
         with self._werte_sperre:
             soll = cmd | self._soll
             neu = sorted(soll - self._abonniert)
@@ -3601,6 +3614,12 @@ class MqttDauer:
         nutzlast = bytes(r[versatz:])
         zurueck = bool(k & 1)
         if thema.startswith(self.praefix + "/cmd/"):
+            if not self.cmd_ein:
+                # Wechsel in der Schwebe (UNSUBSCRIBE noch unterwegs): verwerfen.
+                melde_gebremst("mqtt_cmd_aus", "MQTT: Nachricht auf %s verworfen - der alte Befehlsweg ist aus "
+                                               "(befehle_cmd_ein)." % thema, 3600)
+                return
+            self.cmd_zuletzt = int(time.time())
             if zurueck:
                 melde_gebremst("mqtt_cmd_retain", "MQTT: zurueckbehaltene Nachricht auf %s "
                                                   "verworfen - ein Befehl wird nur ausgefuehrt, "
@@ -3729,6 +3748,11 @@ def dauer_abgleichen(cfg: dict, v) -> None:
         _DAUER.starten()
     if _DAUER is not None:
         _DAUER.themen_setzen(dauer_themen(v))
+        cmd = bool(cfg.get("befehle_cmd_ein"))
+        if cmd != _DAUER.cmd_ein:
+            _DAUER.cmd_ein = cmd
+            _LOG.info("Alter Befehlsweg %s/cmd/... %s (befehle_cmd_ein).", _DAUER.praefix,
+                      "an" if cmd else "aus")
 
 
 def sonos_lage(tts: dict) -> tuple:
@@ -4882,8 +4906,13 @@ def _aktion_zuruecksetzen(thema_aktion: str, stand: int, praefix: str, cfg: dict
     with _AKTION_SPERRE:
         if _AKTION_STAND.get(thema_aktion) != stand:
             return          # ein neuerer Befehl fuer dasselbe Ziel setzt selbst zurueck
+        # S8 (0.12.7, Pruefbericht): die Konfiguration FRISCH lesen - wurde binnen der 2 s das Praefix gewechselt
+        # oder MQTT abgeschaltet, geht kein "-" mehr an das alte Praefix bzw. trotz Abschaltung hinaus.
+        c = config()
+        if not c.get("mqtt_ein") or praefix_von(c) != praefix:
+            return
         try:
-            mqtt_senden({thema_aktion: "-"}, praefix, cfg)
+            mqtt_senden({thema_aktion: "-"}, praefix, c)
         except Exception as err:  # noqa: BLE001 - ein Faden darf nicht still sterben
             melde_gebremst("aktion_zurueck", "MQTT: %s/%s liess sich nicht auf '-' "
                            "zuruecksetzen (%s)." % (praefix, thema_aktion, fehlertext(err)), 3600)
@@ -5811,6 +5840,8 @@ def veraltetes_verwerfen() -> tuple:
     befehle = timer = 0
     if ORDNER_BEFEHLE.is_dir():
         for datei in sorted(ORDNER_BEFEHLE.glob("*.json")):
+            if not KENNUNG.match(datei.stem):
+                continue        # F1: die Dateien der Befehlsbruecke bleiben liegen
             try:
                 alter = jetzt - datei.stat().st_mtime
             except OSError:
@@ -7072,7 +7103,7 @@ def ansage_ablegen(pcm: bytes, rate: int, format_: dict = None) -> tuple:
         rate = int(rate or ESPHOME_RATE)
         zielrate = int((format_ or {}).get("rate") or 0) or rate
         ziel.write_bytes(wav_bauen(pcm_umrechnen(pcm, rate, zielrate), zielrate))
-        return "http://%s/plugins/%s/ansagen/%s" % (eigene_adresse(), PNAME, name), ziel
+        return ansage_url(name), ziel
     except OSError as err:
         melde_gebremst("ansage_ablegen",
                        "Die Antwort liess sich nicht unter einer Adresse ablegen "
@@ -7088,10 +7119,16 @@ def eigene_adresse() -> str:
     benutzt, und eine, die ein anderes Geraet anspricht, sind zwei
     verschiedene Dinge (REGELN_1, EVCC-Sitzung). Genommen wird die Adresse
     der Schnittstelle, ueber die der Rechner nach aussen geht.
+
+    S7 (0.12.7, Pruefbericht): gemerkt wird nur ein ECHTER Treffer. Der Rueckfall auf gethostname() (kein Netz,
+    etwa beim Booten) wurde bis 0.12.6 bis zum Neustart festgehalten - jetzt wird er nicht gespeichert und
+    hoechstens einmal je 60 s neu versucht.
     """
-    global _EIGENE_ADRESSE
+    global _EIGENE_ADRESSE, _EIGENE_RUECKFALL_BIS
     if _EIGENE_ADRESSE:
         return _EIGENE_ADRESSE
+    if time.monotonic() < _EIGENE_RUECKFALL_BIS:
+        return socket.gethostname()
     s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -7099,7 +7136,8 @@ def eigene_adresse() -> str:
         s.connect(("192.0.2.1", 9))
         _EIGENE_ADRESSE = s.getsockname()[0]
     except OSError:
-        _EIGENE_ADRESSE = socket.gethostname()
+        _EIGENE_RUECKFALL_BIS = time.monotonic() + 60
+        return socket.gethostname()
     finally:
         if s is not None:
             s.close()
@@ -7107,6 +7145,17 @@ def eigene_adresse() -> str:
 
 
 _EIGENE_ADRESSE = ""
+_EIGENE_RUECKFALL_BIS = 0.0
+
+
+def ansage_url(name: str) -> str:
+    """S7 (0.12.7): die Adresse einer abgelegten Ansage mit dem Webport des LoxBerry (general.json, webport()) -
+    bis 0.12.6 ohne Port, bei 8080 holte ein ESPHome-Media-Player die WAV nicht. IPv6 in Klammern."""
+    adr = eigene_adresse()
+    if ":" in adr and not adr.startswith("["):
+        adr = "[%s]" % adr
+    p = webport()
+    return "http://%s%s/plugins/%s/ansagen/%s" % (adr, "" if p == 80 else ":%d" % p, PNAME, name)
 
 
 async def esphome_ereignis(mikro: "EsphomeMikrofon", art, daten=None) -> None:
@@ -7216,7 +7265,7 @@ async def esphome_sprechen(mikro: "EsphomeMikrofon", cfg: dict, text: str) -> tu
                            "die liess sich nicht ablegen")
         # Ohne Media Player wird die Adresse nie abgerufen - sie muss nur
         # dasein. Das wird gesagt, nicht verschwiegen.
-        url = "http://%s/plugins/%s/ansagen/keine.wav" % (eigene_adresse(), PNAME)
+        url = ansage_url("keine.wav")
 
     # DIE REIHENFOLGE: erst der Text (startet den Lautsprecher), dann die
     # Adresse (wechselt in STREAMING_RESPONSE), DANN erst das Audio. In
@@ -7805,6 +7854,8 @@ def befehle_der_reihe_nach() -> list:
     """
     liste = []
     for datei in ORDNER_BEFEHLE.glob("*.json"):
+        if not KENNUNG.match(datei.stem):
+            continue            # F1: zustand.json, waechter.json der Befehlsbruecke sind kein Befehl
         try:
             liste.append((datei.stat().st_mtime_ns, datei.name, datei))
         except OSError:
@@ -7837,6 +7888,10 @@ async def warteschlange(cfg: dict, holen_v) -> None:
             datei.unlink()
         except OSError:
             pass
+        # Gruppe 11 (0.12.7, Entwurf 3.4): ein Befehl der Befehlsbruecke ohne Wartezeit (sprechen, alarm, satz)
+        # traegt ohne_antwort - niemand wartet auf die Antwortdatei; es bleibt die Protokollzeile wie bei
+        # mqtt_befehle() (Aktion, Textlaenge, ausgefuehrt/nicht).
+        ohne = bool(b.get("ohne_antwort")) if isinstance(b, dict) else False
         if alter > AUFTRAG_VERALTET_S:
             # Auch zur LAUFZEIT, nicht nur beim Start (veraltetes_verwerfen()):
             # hing der Dienst, etwa an einem langen Satz, wartet der Aufrufer
@@ -7845,16 +7900,23 @@ async def warteschlange(cfg: dict, holen_v) -> None:
             _LOG.warning("Befehl %s verworfen: %d s alt (hoechstens %d s) - der Aufrufer "
                          "wartet nicht mehr darauf.", str(b.get("aktion") or "?")[:20],
                          int(alter), AUFTRAG_VERALTET_S)
-            antwort_schreiben(kennung, 0, "Verworfen: der Befehl war %d s alt." % int(alter))
+            if not ohne:
+                antwort_schreiben(kennung, 0, "Verworfen: der Befehl war %d s alt." % int(alter))
             continue
         if not b:
             antwort_schreiben(kennung, 0, "Befehlsdatei war leer oder unlesbar.")
             continue
         try:
             ok, meldung, zusatz = await befehl_bearbeiten(cfg, holen_v, b)
-            antwort_schreiben(kennung, ok, meldung, zusatz)
         except Exception as err:  # noqa: BLE001
-            antwort_schreiben(kennung, 0, fehlertext(err))
+            ok, meldung, zusatz = 0, fehlertext(err), None
+        if ohne:
+            _LOG.info("MQTT-Befehl %s (%d Zeichen, Befehlsbruecke): %s", str(b.get("aktion") or "?")[:20],
+                      len(str(b.get("text") or b.get("satz") or "")), "ausgefuehrt" if ok else "nicht ausgefuehrt")
+            if not ok:
+                _LOG.debug("MQTT-Befehl %s: %s", str(b.get("aktion") or "?")[:20], str(meldung)[:200])
+        else:
+            antwort_schreiben(kennung, ok, meldung, zusatz)
 
 
 async def mqtt_befehle(cfg: dict, holen_v) -> int:
@@ -8072,6 +8134,8 @@ def abbild_schreiben(cfg: dict, sats: dict | None = None) -> dict:
                   for k, z in (saetze.get("ziele") or {}).items()},
         "verlauf": verlauf[:10],
     }
+    if _HERZ:
+        daten["herzschlag"] = dict(_HERZ)     # Gruppe 11: Lebenszeichen fuer den Reiter Test
     # Fuer den Reiter Test: Zustand der Dauerverbindung und das Ergebnis der
     # letzten zusaetzlichen Ansage (ok -1 = gesendet, Ausgang unklar). Die
     # Feldnamen liest webfrontend/htmlauth/sp_test.php.
@@ -8080,7 +8144,9 @@ def abbild_schreiben(cfg: dict, sats: dict | None = None) -> dict:
         daten["mqtt_dauer"] = {
             "verbunden": 1 if (d is not None and d.verbunden) else 0,
             "seit": int(d.verbunden_seit) if (d is not None and d.verbunden) else 0,
-            "grund": "" if d is None else str(d.fehler or "")[:200]}
+            "grund": "" if d is None else str(d.fehler or "")[:200],
+            # Gruppe 11 (0.12.7): wann zuletzt etwas auf dem alten Weg <praefix>/cmd/... kam (0 = nie).
+            "cmd_zuletzt": int(getattr(d, "cmd_zuletzt", 0) or 0) if d is not None else 0}
     letzte = json_lesen(DATEI_AUSGABE)
     if letzte.get("ts"):
         daten["letzte_ansage"] = {
@@ -8113,6 +8179,13 @@ def abbild_schreiben(cfg: dict, sats: dict | None = None) -> dict:
     return daten
 
 
+# Gruppe 11 (0.12.7, E5/E7): das Lebenszeichen status/zaehler - je Herzschlag +1, 0 bis 999, laeuft um, nie
+# retained. Deckt auch einen haengenden Dienst ab (dann kommt kein Herzschlag) und ersetzt im Musterprojekt ALTER.
+# _HERZ legt Zaehler, Zeit und Vorwert fuer die Pruefzeile im Reiter Test ins Abbild (loxone.json).
+_HERZ_ZAEHLER = -1
+_HERZ: dict = {}
+
+
 def herzschlag(cfg: dict, abbild: dict) -> None:
     """Dieselben Werte wie die Statuszeile, aber ueber MQTT - und ohne Anlass.
 
@@ -8121,10 +8194,14 @@ def herzschlag(cfg: dict, abbild: dict) -> None:
     komplette Ausfallerkennung: ein totes Mikrofon war von einem stillen Haus
     nicht zu unterscheiden.
     """
+    global _HERZ_ZAEHLER
     if not cfg.get("mqtt_ein"):
         return
+    _HERZ_ZAEHLER = (_HERZ_ZAEHLER + 1) % 1000
+    _HERZ.update({"vorher": _HERZ.get("zaehler"), "zaehler": _HERZ_ZAEHLER, "ts": int(time.time())})
     paare = {
         "online": 1,
+        "status/zaehler": _HERZ_ZAEHLER,
         "ts": abbild["ts"],
         "mikrofone": abbild["anzahl_mikrofone"],
         "bereit": abbild["bereit"],
@@ -8225,11 +8302,38 @@ async def zustaende_aufgabe() -> None:
         await asyncio.sleep(0.25)
 
 
+def abo_datei_anlegen(cfg: dict) -> bool:
+    """S19 (0.12.7): die Abo-Datei fuer das MQTT-Gateway V1 beim Dienststart anlegen, wenn sie fehlt - "<praefix>/#",
+    0644, atomar (dieselbe Regel wie sp_mqtt_abo_inhalt() und postinstall.sh). Bis 0.12.6 legte sie erst der erste
+    Seitenaufbau der Oberflaeche an. Rueckgabe: geschrieben."""
+    if DATEI_ABO.exists():
+        return False
+    p = praefix_von(cfg)
+    if not re.fullmatch(r"[A-Za-z0-9_/\-]{1,64}", p):
+        p = "sprachsteuerung"
+    tmp = DATEI_ABO.with_name(DATEI_ABO.name + ".tmp.%d" % os.getpid())
+    try:
+        tmp.write_text(p + "/#\n", encoding="utf-8")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, DATEI_ABO)
+    except OSError as err:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        melde_gebremst("abo_datei", "Die Abo-Datei fuer das MQTT-Gateway liess sich nicht anlegen (%s)."
+                       % fehlertext(err), 3600)
+        return False
+    _LOG.info("Abo-Datei fuer das MQTT-Gateway angelegt: %s (%s/#).", DATEI_ABO, p)
+    return True
+
+
 async def dienst() -> int:
     global _SCHLEIFE, _DAUER
     _SCHLEIFE = asyncio.get_running_loop()
     veraltetes_verwerfen()
     cfg = config()
+    abo_datei_anlegen(cfg)
     # Im Faden: bei einer unlesbaren Konfiguration meldet es ueber das
     # PHP-Zwischenstueck.
     fehlten = await im_faden(cfg_vervollstaendigen)
@@ -8585,7 +8689,8 @@ def selbsttest() -> int:
                       "der Grund nach %s/grund" % (praefix, praefix, praefix))
         takt = int(cfg.get("herzschlag_s") or 0)
         if takt > 0:
-            zeilen.append("[OK]   Herzschlag alle %d s nach %s/online" % (takt, praefix))
+            zeilen.append("[OK]   Herzschlag alle %d s nach %s/online, Lebenszeichen %s/status/zaehler"
+                          % (takt, praefix, praefix))
         else:
             zeilen.append("[INFO] Der Herzschlag ist abgeschaltet - ein toter Dienst ist "
                           "ueber MQTT dann nicht von einem stillen Haus zu unterscheiden.")
@@ -8600,11 +8705,10 @@ def selbsttest() -> int:
         else:
             ok, grund = dienst_erreichbar(z["host"], z["port"])
             zeilen.append(("[OK]   " if ok else "[FEHL] ")
-                          + "Dauerhafte Broker-Verbindung: Broker %s:%d %s; Befehle unter "
-                            "%s/cmd/sprechen|satz|ruhe." % (z["host"], z["port"],
-                                                            "antwortet" if ok else
-                                                            "antwortet nicht (%s)" % grund,
-                                                            praefix_von(cfg)))
+                          + "Dauerhafte Broker-Verbindung: Broker %s:%d %s; alter Befehlsweg "
+                            "%s/cmd/sprechen|satz|ruhe %s (befehle_cmd_ein)."
+                          % (z["host"], z["port"], "antwortet" if ok else "antwortet nicht (%s)" % grund,
+                             praefix_von(cfg), "an" if cfg.get("befehle_cmd_ein") else "aus"))
             if not ok:
                 fehler += 1
     if cfg.get("musik_ducken") or cfg.get("musik_steuern"):

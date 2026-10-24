@@ -102,6 +102,12 @@
  *               Hinweis ART_HINWEIS_WERK (mit dem Namen der Art), die Wahl
  *               'aus' O_AUS_SCHLICHT und die Wahl der Werksart O_WERK. Eine
  *               Umlenkung ueber 'schluessel' (ART_HINWEIS, O_AUS) gewinnt.
+ *   'absender'  (seit 1.1.3) Name der Linie fuer die Absenderuebersicht von
+ *               Alexa NG; gesendet nur an Alexa NG (Art alexang) und nur, wenn
+ *               er /^[a-z0-9_\-]{1,32}\z/ trifft - sonst weggelassen, nie
+ *               abgewiesen (Alexa NG antwortete auf einen ungueltigen mit 400).
+ *               SignalBot versteht 'absender' anders, die Sprachsteuerung
+ *               kennt ihn nicht, Chromecast uebergeht ihn - deshalb nur alexang.
  *   'transport' nur fuer ansage_selbsttest(): function ($anfrage) -> Antwort
  *   'jetzt'     nur fuer ansage_selbsttest(): function () -> Zeitstempel
  *
@@ -143,6 +149,20 @@
  *     bleibt unveraendert.
  *   - ansage_zeichen() zaehlt auch bei ungueltigem UTF-8 Zeichen statt Bytes
  *     (mb_strlen, ohne mbstring ein Muster); gueltiger Text wie bisher.
+ *
+ * 1.1.3 (Intercom-Bau 2.2.23, Pruefbericht S3-S5), nur ergaenzend:
+ *   - Kontext 'absender' (S3, siehe oben): nur an Alexa NG, nur in gueltiger
+ *     Form; ohne den Kontext ist die Feldliste wie in 1.1.2.
+ *   - ansage_kuerzen() (S4): Byte-Schnitt, der kein UTF-8-Zeichen halbiert
+ *     (bis zu 3 Bytes zurueck); fuer die Kennung TTS_EINTRAG und fuer
+ *     'zeile'/'roh' der Antwort. Gueltige Eingaben bis zur Grenze bleiben
+ *     byte-gleich; eine schon ungueltige Eingabe bleibt beim Byte-Schnitt.
+ *     ansage_letzte_merken() schreibt mit JSON_INVALID_UTF8_SUBSTITUTE - eine
+ *     ungueltige Antwortzeile ergab bis 1.1.2 eine leere <art>_letzte.json.
+ *   - ansage_cli() reicht 'dringend' aus dem JSON durch (S5: true, 1 oder
+ *     "1"); ohne das Feld wie bisher.
+ * Ein Prozess, der 1.1.2 zuerst geladen hat (zwei Abschriften), sendet eben
+ * keinen Absender und kuerzt wie bisher - es fehlt nur das Neue.
  */
 
 /* Kein Endpunkt (Regeln/03): die Datei liegt meist im unangemeldeten Baum
@@ -161,7 +181,7 @@ if (PHP_SAPI !== 'cli') {
 
 if (!defined('ANSAGE_FASSUNG')) {
 
-define('ANSAGE_FASSUNG', '1.1.2');
+define('ANSAGE_FASSUNG', '1.1.3');
 
 /** Hoechstlaenge eines Ansagetexts in Zeichen (Schnittstelle Alexa-NG/Chromecast: 1-1000). */
 define('ANSAGE_TEXT_MAX', 1000);
@@ -465,6 +485,25 @@ function ansage_laut_pruefen($w, &$grund = '')
 }
 
 /**
+ * Hoechstens $n Bytes, ohne ein UTF-8-Zeichen zu halbieren (seit 1.1.3, S4).
+ * Byte-Schnitt wie substr(); ist das Ergebnis kein gueltiges UTF-8, die
+ * Eingabe aber schon, werden bis zu 3 Bytes zurueckgenommen, bis es passt.
+ * War die Eingabe schon ungueltig, bleibt es beim Byte-Schnitt (nichts
+ * erfinden). Gueltige Eingaben bis $n Bytes kommen byte-gleich zurueck.
+ */
+function ansage_kuerzen($s, $n)
+{
+    $s = (string) $s;
+    $b = (string) substr($s, 0, max(0, (int) $n));
+    if ($b === $s || @preg_match('//u', $b) === 1 || @preg_match('//u', $s) !== 1) { return $b; }
+    for ($i = 1; $i <= 3 && strlen($b) > 0; $i++) {
+        $b = (string) substr($b, 0, -1);
+        if (@preg_match('//u', $b) === 1) { return $b; }
+    }
+    return $b;
+}
+
+/**
  * Taugt dieser Block (oder ein Teil davon)? Rueckgabe: der gepruefte Block
  * (nur die vorhandenen Schluessel, Zahlen als int) oder null mit einer
  * Kennung in $grund. $modi schraenkt die erlaubten Ausgabearten ein.
@@ -570,7 +609,7 @@ function ansage_wert_pruefen($tts, &$grund = '', $modi = null)
                 $aus[$s] = $w;
                 break;
             default:
-                $grund = 'TTS_EINTRAG|' . str_replace('|', '/', substr((string) $s, 0, 40));
+                $grund = 'TTS_EINTRAG|' . str_replace('|', '/', ansage_kuerzen((string) $s, 40));
                 return null;
         }
     }
@@ -1219,7 +1258,7 @@ function ansage_ng_rufen($url, array $felder, $tmo, array $k, $praefix = '')
         $erste = str_replace($felder['token'], '***', $erste);
     }
     $erste = (string) preg_replace('/[\x00-\x1F\x7F]/', '', $erste);
-    return array('code' => $a['code'], 'zeile' => substr($erste, 0, 200), 'roh' => substr($erste, 0, 1000),
+    return array('code' => $a['code'], 'zeile' => ansage_kuerzen($erste, 200), 'roh' => ansage_kuerzen($erste, 1000),
                  'grund_id' => $gid, 'tmo' => (int) $tmo);
 }
 
@@ -1359,6 +1398,11 @@ function ansage_sprechen($text, array $tts, array $k = array(), array $opt = arr
         if ($g !== '') { $f['geraet'] = $g; }
         if ($laut >= 1) { $f['laut'] = $laut; }
         if ($dringend) { $f['dringend'] = '1'; }
+        // seit 1.1.3 (S3): Absender nur an Alexa NG und nur in gueltiger Form - sonst weggelassen, nie abgewiesen.
+        if ($modus === 'alexang' && isset($k['absender']) && is_string($k['absender'])
+            && preg_match('/^[a-z0-9_\-]{1,32}\z/', $k['absender'])) {
+            $f['absender'] = $k['absender'];
+        }
         $f['text'] = $text;
         $url = ansage_adresse($modus, ansage_k_port($k), ansage_k_home($k));
         $a = ansage_ng_rufen($url, $f, ANSAGE_TMO, $k, 'SPRECHEN');
@@ -1480,7 +1524,7 @@ function ansage_letzte_merken(array $r, array $k)
     $jetzt = isset($k['jetzt']) && is_callable($k['jetzt']) ? (int) call_user_func($k['jetzt']) : time();
     $inhalt = (string) json_encode(array('zeit' => $jetzt, 'ok' => $r['stand'] === 1 ? 1 : 0,
         'stand' => (int) $r['stand'], 'grund_id' => (string) $r['kennung'], 'code' => (int) $r['http'],
-        'zeile' => (string) $r['zeile']));
+        'zeile' => (string) $r['zeile']), JSON_INVALID_UTF8_SUBSTITUTE);
     $datei = rtrim($o, '/\\') . '/' . ansage_letzte_datei(ansage_letzte_art($r['art']));
     $neben = $datei . '.' . getmypid() . '.neu';
     if (@file_put_contents($neben, '') === false) { return $r; }
@@ -2083,7 +2127,10 @@ function ansage_sprachschluessel()
  * bin/<kuerzel>_ansage.php an, das ihre Bibliothek und diese Datei laedt, den
  * Block tts und den Kontext baut und ansage_cli(stdin) aufruft. Der Text
  * kommt als JSON {"text": "..."} ueber die Standardeingabe - nie auf der
- * Kommandozeile, dort saehe ihn jeder in der Prozessliste.
+ * Kommandozeile, dort saehe ihn jeder in der Prozessliste. Seit 1.1.3 (S5)
+ * wahlfrei {"text": "...", "dringend": true}: true, 1 oder "1" sendet die
+ * Ansage dringend (wie $opt['dringend'] in ansage_sprechen()); alles andere
+ * und ein fehlendes Feld wie bisher.
  * Rueckgabe: array(Rueckgabewert, eine Zeile fuer stdout):
  *   0 gesendet, 1 gescheitert, 3 nichts gesendet ohne Fehler, 2 Aufruf falsch.
  * Zeile: ANSAGE;STAND=..;ART=..;KENNUNG=..;HTTP=..;ZEICHEN=.. (ASCII, ohne Text und Token).
@@ -2094,7 +2141,9 @@ function ansage_cli($eingabe, array $tts, array $k = array())
     if (!is_array($d) || !array_key_exists('text', $d)) {
         return array(2, 'ANSAGE;STAND=0;KENNUNG=AUFRUF');
     }
-    $r = ansage_sprechen($d['text'], $tts, $k);
+    $opt = array('dringend' => isset($d['dringend'])
+        && ($d['dringend'] === true || $d['dringend'] === 1 || $d['dringend'] === '1'));
+    $r = ansage_sprechen($d['text'], $tts, $k, $opt);
     $z = 'ANSAGE;STAND=' . (int) $r['stand'] . ';ART=' . $r['art'] . ';KENNUNG='
        . ($r['kennung'] !== '' ? str_replace(';', ',', $r['kennung']) : '-')
        . ';HTTP=' . (int) $r['http'] . ';ZEICHEN=' . (int) $r['zeichen'];
@@ -2834,6 +2883,85 @@ function ansage_selbsttest()
     $r = ansage_sprechen("Grüße \xC3", $msx, $k);
     $pruef('112 zeichen im protokoll', array($r['kennung'], $r['zeichen'], strpos(ansage_kurz($r), ' zeichen=7 ') !== false, count($log)),
            array('TEXT_UTF8', 7, true, 0));
+
+    // ================= seit 1.1.3 =================
+
+    // --- S4: ansage_kuerzen() ---
+    $u = 'x' . str_repeat('ä', 25);
+    $kz = ansage_kuerzen($u, 40);
+    $pruef('113 kuerzen umlaut', array(preg_match('//u', $kz), strlen($kz) <= 40, strpos($u, $kz) === 0, strlen($kz)),
+           array(1, true, true, 39));
+    $pruef('113 kuerzen ascii', ansage_kuerzen(str_repeat('a', 50), 40), str_repeat('a', 40));
+    $pruef('113 kuerzen kurz gleich', array(ansage_kuerzen('Grüße', 40), ansage_kuerzen('', 5), ansage_kuerzen(7, 5)),
+           array('Grüße', '', '7'));
+    $pruef('113 kuerzen ungueltig bleibt byte-schnitt', ansage_kuerzen("ab\xC3\x28cdef", 4), "ab\xC3\x28");
+    $pruef('113 kuerzen genau grenze', ansage_kuerzen('aä', 3), 'aä');
+    // --- S4: Kennung TTS_EINTRAG mit Umlautschluessel ---
+    ansage_wert_pruefen(array($u => 'y'), $g);
+    $pruef('113 tts_eintrag utf8', array(strpos($g, 'TTS_EINTRAG|x') === 0, preg_match('//u', $g),
+           htmlspecialchars($g, ENT_QUOTES, 'UTF-8') !== '', json_encode($g) !== false), array(true, 1, true, true));
+    // --- S4: Antwortzeile 199 Byte + Umlaut ---
+    $zl = str_pad('SPRECHEN;OK=0;GRUND=BESCHAEFTIGT;', 199, 'a') . 'ä';
+    $antworten = array(array('code' => 200, 'rumpf' => $zl . "\n"));
+    $r = ansage_sprechen($TEXT, $ax, $k);
+    $pruef('113 zeile 199', array(strlen($r['zeile']), preg_match('//u', $r['zeile']), $r['kennung']),
+           array(199, 1, 'ALEXA_ANTWORT|200|BESCHAEFTIGT'));
+    // --- S4: letzte_merken mit ungueltiger Zeile ---
+    $lo = @tempnam(sys_get_temp_dir(), 'ansage113');
+    if (is_string($lo) && @unlink($lo) && @mkdir($lo, 0700)) {
+        ansage_letzte_merken(array('stand' => 0, 'kennung' => 'X', 'art' => 'alexang', 'http' => 200,
+                                   'zeile' => "ab\xC3"), array('ordner' => $lo));
+        $lf = $lo . '/' . ansage_letzte_datei('alexa');
+        $lj = is_file($lf) ? json_decode((string) file_get_contents($lf), true) : null;
+        $pruef('113 letzte ungueltig', array(is_file($lf) && filesize($lf) > 0, is_array($lj),
+               is_array(ansage_letzte('alexa', array('ordner' => $lo)))), array(true, true, true));
+        @unlink($lf);
+        @rmdir($lo);
+    } else {
+        $pruef('113 letzte ungueltig (nicht messbar)', true, true);
+    }
+    // --- S3: absender nur an Alexa NG, nur gueltig ---
+    $ka = array('absender' => 'intercom') + $k;
+    $antworten = array(array('code' => 200, 'rumpf' => "SPRECHEN;OK=1\n"));
+    $log = array();
+    ansage_sprechen($TEXT, $ax, $ka);
+    parse_str((string) $log[0]['koerper'], $kf);
+    $pruef('113 absender alexang', array(isset($kf['absender']) ? $kf['absender'] : '-', array_keys($kf)),
+           array('intercom', array('aktion', 'token', 'geraet', 'laut', 'absender', 'text')));
+    $antworten = array(array('code' => 200, 'rumpf' => "SPRECHEN;OK=1\n"));
+    $log = array();
+    ansage_sprechen($TEXT, $gx, $ka);
+    parse_str((string) $log[0]['koerper'], $kf);
+    $pruef('113 absender nicht an cc4lox', isset($kf['absender']), false);
+    foreach (array('Intercom', 'a b', str_repeat('a', 33), '', array('x'), 7) as $ab) {
+        $antworten = array(array('code' => 200, 'rumpf' => "SPRECHEN;OK=1\n"));
+        $log = array();
+        $r = ansage_sprechen($TEXT, $ax, array('absender' => $ab) + $k);
+        parse_str((string) $log[0]['koerper'], $kf);
+        $pruef('113 absender ungueltig ' . json_encode($ab), array($r['stand'], isset($kf['absender'])), array(1, false));
+    }
+    $antworten = array(array('code' => 200, 'rumpf' => "SPRECHEN;OK=1\n"));
+    $log = array();
+    ansage_sprechen($TEXT, $ax, $k);
+    parse_str((string) $log[0]['koerper'], $kf);
+    $pruef('113 ohne absender wie 1.1.2', array_keys($kf), array('aktion', 'token', 'geraet', 'laut', 'text'));
+    // --- S5: ansage_cli mit dringend ---
+    foreach (array('true' => true, '1' => 1, '"1"' => '1') as $dn => $dw) {
+        $antworten = array(array('code' => 200, 'rumpf' => "SPRECHEN;OK=1\n"));
+        $log = array();
+        $c = ansage_cli(json_encode(array('text' => $TEXT, 'dringend' => $dw)), $ax, $k);
+        parse_str((string) $log[0]['koerper'], $kf);
+        $pruef('113 cli dringend ' . $dn, array($c[0], isset($kf['dringend']) ? $kf['dringend'] : '-'), array(0, '1'));
+    }
+    foreach (array('"ja"' => 'ja', 'false' => false, '2' => 2, 'fehlt' => null) as $dn => $dw) {
+        $antworten = array(array('code' => 200, 'rumpf' => "SPRECHEN;OK=1\n"));
+        $log = array();
+        $d = array('text' => $TEXT);
+        if ($dw !== null) { $d['dringend'] = $dw; }
+        $c = ansage_cli(json_encode($d), $ax, $k);
+        parse_str((string) $log[0]['koerper'], $kf);
+        $pruef('113 cli nicht dringend ' . $dn, array($c[0], isset($kf['dringend'])), array(0, false));
+    }
 
     // --- Sprachschluessel: eindeutig ---
     $sl = ansage_sprachschluessel();

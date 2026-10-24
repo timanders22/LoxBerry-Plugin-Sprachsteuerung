@@ -69,8 +69,10 @@ SELF=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)          # <home>/bin/plugi
 # nachweislich eine Wurzel IST - config/plugins, data/plugins UND
 # config/system/general.json (ohne den dritten Nachweis gilt ein fremder Baum
 # mit den beiden Ordnern als Wurzel, Fall F16).
+# S10 (0.12.7): dazu webfrontend - derselbe Wurzelbegriff wie im Dienst und in sp_lib.php. Ohne den Ordner
+# brach bis 0.12.6 erst der Dienst ab ("kein LoxBerry-Wurzelverzeichnis"); jetzt sagt es dienst.sh selbst.
 sp_wurzel_taugt() {          # $1 Kandidat
-    [ -n "$1" ] && [ -d "$1/config/plugins" ] && [ -d "$1/data/plugins" ]
+    [ -n "$1" ] && [ -d "$1/config/plugins" ] && [ -d "$1/data/plugins" ] && [ -d "$1/webfrontend" ]
 }
 sp_wurzel_suchen() {
     sp_v="$SELF"
@@ -109,7 +111,7 @@ fi
 if [ -z "$LBHOMEDIR" ] || [ ! -d "$LBHOMEDIR" ]; then
     echo "FEHLER: Es wurde kein LoxBerry-Wurzelverzeichnis gefunden."
     echo "        \$LBHOMEDIR ist nicht gesetzt, und oberhalb von $SELF traegt"
-    echo "        kein Verzeichnis config/plugins, data/plugins und"
+    echo "        kein Verzeichnis config/plugins, data/plugins, webfrontend und"
     echo "        config/system/general.json. Es wurde nichts angelegt."
     exit 1
 fi
@@ -191,13 +193,21 @@ PY="$PBIN/venv/bin/python3"
 # Sperre im PHP-Dienst, die sich an Kindprozesse vererbte).
 # Ohne flock (kein util-linux) bleibt es beim Verhalten bis 0.11.12.
 # Bauart: Bewaesserung 0.9.35 (startsperre_nehmen), Chromecast4lox 1.3.13.
+#
+# S6 (0.12.7, Pruefbericht; Hausform Heimkino 1.3.30 H4/H5, Matter2Lox 0.9.44): die Sperre liegt auf einer eigenen
+# Datei NEBEN dem Datenordner, nicht mehr auf $0. Ein Update ersetzt dienst.sh (neuer Inode), und zwei Inodes heben
+# die gegenseitige Sperre auf (gemessen: der zweite Start bekam die Sperre nach 1 s, waehrend der erste sie auf der
+# alten Datei hielt). Laesst sich die Datei nicht anlegen, geht es wie bisher ohne Sperre weiter; die
+# Deinstallation raeumt sie ab. Belegt sie ein anderer Start laenger als 15 s, gibt starten() 4 zurueck und restart
+# 1 - "nichts gestartet" ist kein Erfolg (bis 0.12.6 Rueckgabe 0, die Oberflaeche meldete "gestartet").
 SP_SPERRE_GEHALTEN=0
+STARTSPERRE="$LBHOMEDIR/data/plugins/$PNAME.startsperre"
 startsperre_nehmen() {
     [ "$SP_SPERRE_GEHALTEN" = "1" ] && return 0
     command -v flock >/dev/null 2>&1 || return 0
-    SP_SPERRDATEI=$(readlink -f "$0" 2>/dev/null)
-    [ -n "$SP_SPERRDATEI" ] && [ -r "$SP_SPERRDATEI" ] || return 0
-    exec 8<"$SP_SPERRDATEI"
+    touch "$STARTSPERRE" 2>/dev/null
+    [ -f "$STARTSPERRE" ] && [ -w "$STARTSPERRE" ] || return 0
+    { exec 8<>"$STARTSPERRE"; } 2>/dev/null || return 0
     if flock -w 15 8; then
         SP_SPERRE_GEHALTEN=1
         return 0
@@ -257,7 +267,36 @@ sp_prio_vorsatz() {
     fi
 }
 
+# S5 (0.12.7, Pruefbericht; Hausform Heimkino 1.3.30 dienste()): ein eigener Dienst OHNE PID-Datei (Waise:
+# purge_installation loescht data/plugins/<ordner> samt dienst.pid, der Prozess laeuft weiter; oder die Datei wurde
+# geloescht) zaehlt als laufend. Bis 0.12.6 meldete stop dann "laeuft nicht", der Dienst lief weiter, und ein
+# zweites start startete einen zweiten (gemessen, dienst_probe.sh: 2 Prozesse). Gesucht wird wie in preupgrade.sh
+# (sp_ist_dienst/sp_dienste_suchen): argumentweise, argv[0] ein Python, argv[1] genau $SKRIPT, genau zwei
+# Argumente, und der Prozess gehoert diesem Benutzer.
+sp_ist_dienst() {   # $1 Prozessnummer
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    [ -r "/proc/$1/cmdline" ] || return 1
+    tr '\0' '\n' 2>/dev/null < "/proc/$1/cmdline" | {
+        IFS= read -r a0 || exit 1
+        IFS= read -r a1 || exit 1
+        IFS= read -r a2 && exit 1
+        case "${a0##*/}" in python|python3|python3.*) ;; *) exit 1 ;; esac
+        [ "$a1" = "$SKRIPT" ]
+    }
+}
+dienste() {
+    sp_uid=$(id -u)
+    for sp_d in /proc/[0-9]*; do
+        [ "$(stat -c %u "$sp_d" 2>/dev/null)" = "$sp_uid" ] || continue
+        sp_ist_dienst "${sp_d#/proc/}" && echo "${sp_d#/proc/}"
+    done
+    return 0
+}
 laeuft() {
+    laeuft_pid || [ -n "$(dienste)" ]
+}
+
+laeuft_pid() {
     [ -f "$PID" ] || return 1
     P=$(cat "$PID" 2>/dev/null)
     [ -n "$P" ] || return 1
@@ -308,10 +347,19 @@ sperre_gilt() {
 starten() {
     if ! startsperre_nehmen; then
         echo "Ein anderer Start dieses Plugins laeuft seit ueber 15 Sekunden - jetzt wird nichts gestartet."
+        return 4
+    fi
+    if laeuft_pid; then
+        echo "laeuft bereits (PID $(cat "$PID"))"
         return 0
     fi
-    if laeuft; then
-        echo "laeuft bereits (PID $(cat "$PID"))"
+    # S5: eine Waise zaehlt als laufend; ihre Nummer kommt in die PID-Datei zurueck (Oberflaeche und Endpunkt
+    # sehen den Dienst ueber sie).
+    SP_WAISE=$(dienste | head -n 1)
+    if [ -n "$SP_WAISE" ]; then
+        ordner_anlegen
+        echo "$SP_WAISE" > "$PID" 2>/dev/null
+        echo "laeuft bereits (PID $SP_WAISE, ohne PID-Datei - Nummer zurueckgeschrieben)"
         return 0
     fi
     # VOR dem Sollmerker: was in der Luecke gestartet wuerde, schriebe in
@@ -377,22 +425,27 @@ anhalten() {
     startsperre_nehmen \
         || echo "Ein anderer Start dieses Plugins laeuft seit ueber 15 Sekunden - es wird trotzdem angehalten."
     rm -f "$SOLL"
-    if ! laeuft; then
+    # S5: ALLE eigenen Dienste, auch Waisen ohne PID-Datei. Vor dem harten Signal neu gesucht - nie nach blossem
+    # kill -0 auf eine alte Nummer.
+    SP_ZIELE=$(dienste)
+    if [ -z "$SP_ZIELE" ]; then
         rm -f "$PID"
         echo "laeuft nicht"
         return 0
     fi
-    P=$(cat "$PID")
-    kill "$P" 2>/dev/null
+    for P in $SP_ZIELE; do kill "$P" 2>/dev/null; done
     for i in 1 2 3 4 5 6 7 8 9 10; do
-        laeuft || break
+        [ -n "$(dienste)" ] || break
         sleep 1
     done
-    if laeuft; then
-        kill -9 "$P" 2>/dev/null
-        sleep 1
-    fi
+    for P in $(dienste); do kill -9 "$P" 2>/dev/null; done
+    [ -n "$(dienste)" ] && sleep 1
     rm -f "$PID"
+    SP_REST=$(dienste | tr '\n' ' ')
+    if [ -n "$SP_REST" ]; then
+        echo "FEHLER: laesst sich nicht anhalten (PID ${SP_REST% })"
+        return 1
+    fi
     echo "angehalten"
     return 0
 }
@@ -406,12 +459,17 @@ case "$1" in
         # danach einen zweiten.
         if ! startsperre_nehmen; then
             echo "Ein anderer Start dieses Plugins laeuft seit ueber 15 Sekunden - jetzt wird nichts neu gestartet."
-            exit 0
+            exit 1
         fi
         anhalten; sleep 1; starten ;;
     status)
-        if laeuft; then
+        if laeuft_pid; then
             echo "laeuft $(cat "$PID")"
+            exit 0
+        fi
+        SP_LAUFEND=$(dienste | tr '\n' ' ')
+        if [ -n "$SP_LAUFEND" ]; then
+            echo "laeuft ${SP_LAUFEND% } (ohne PID-Datei)"
             exit 0
         fi
         echo "gestoppt"

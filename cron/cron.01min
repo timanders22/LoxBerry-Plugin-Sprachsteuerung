@@ -14,6 +14,12 @@
 # schreiben, laeuft der Waechter ohne Fehlerprotokoll - lieber das als gar
 # nicht.
 mkdir -p "REPLACELBPLOGDIR" 2>/dev/null
+# Gruppe 11 (0.12.7, Entwurf 3.5): zuerst der Waechter der Befehlsbruecke - er startet sie jede Minute, wenn
+# "Befehle ueber MQTT annehmen" gesetzt ist, und haelt sie sonst an (befehlsbruecke.php --waechter: misst
+# zustand.json, nie waehrend einer Aktualisierung, hoechstens alle 600 s ein Neustart). Kein Start in den
+# Hakenskripten. Er steht VOR dem Waechter des Dienstes, der die Startsperre nimmt.
+BBSH="REPLACELBPBINDIR/befehlsbruecke.sh"
+[ -f "$BBSH" ] && /bin/bash "$BBSH" waechter >/dev/null 2>>"REPLACELBPLOGDIR/start.log"
 if [ -w "REPLACELBPLOGDIR/start.log" ] || touch "REPLACELBPLOGDIR/start.log" 2>/dev/null; then
     "REPLACELBPBINDIR/dienst.sh" waechter >/dev/null 2>>"REPLACELBPLOGDIR/start.log"
 else

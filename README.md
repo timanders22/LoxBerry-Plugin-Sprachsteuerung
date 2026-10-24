@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.12.6
+Version 0.12.7
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,37 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.12.7
+
+* **Werte und Befehle über MQTT** (Gruppe 11 der Umstellung). Der Zustand der Anlage kommt mit dem Herzschlag
+  über das MQTT-Gateway als Virtuelle Eingänge in Loxone an – neu mit dem Lebenszeichen `status/zaehler`
+  (0–999, je Herzschlag eins weiter, nie zurückbehalten); es erkennt auch einen hängenden Dienst. Ansagen,
+  Sätze und die Stilllegung schickt Loxone als `publish <präfix>/befehl/sprechen|alarm|satz|ruhe …` an die
+  gemeinsame **Befehlsbrücke**; sie prüft wie der HTTP-Endpunkt (EINE Prüfung, `sp_steuern()`), reiht in die
+  Warteschlange des Dienstes und quittiert unter `…/quittung`. Zwei Haken im Reiter MQTT, ab Werk aus:
+  „Befehle über MQTT annehmen“ (genügt für `ruhe`) und „Ansagen und Sätze über MQTT zulassen“ (`sprechen`,
+  `alarm` – dringend –, `satz`). Neu `bin/befehlsbruecke.php/.sh` (Stammfassung) und `bin/befehle_zuordnung.php`,
+  Paket `mosquitto-clients`.
+* **HTTP-Endpunkt hinter einem Haken.** „HTTP-Endpunkt für Loxone annehmen“ (Reiter Einbindung, zugeklappt
+  unter „Bestehende Anlagen“) sperrt den ganzen Endpunkt; ohne ihn 403 `ENDPUNKT_AUS`. Beim Update ist er an,
+  wenn ein Token gesetzt war; neu installiert aus. Die Vorlagen „Sprachsteuerung lokal“ bleiben byte-gleich.
+* **Alter Befehlsweg `<präfix>/cmd/…`** hinter dem Haken „befehle_cmd_ein“ (Reiter MQTT); beim Update wie
+  bisher (= dauerhafte Verbindung), neu aus.
+* **Reiter Einbindung** nach dem Musterprojekt (Seite „Sprachsteuerung“ 25 statt 26 Zeilen, Gateway-Eingänge,
+  Befehle „Sprachsteuerung: …“), Namenstabelle mit V2-Haken, Vorlage „MQTT-Befehle“; Vorlage-Knöpfe grau
+  (Regeln/04). Neue Prüfzeilen im Reiter Test (Befehlsbrücke, Präfix, Warteschlange, Lebenszeichen, Namen,
+  Abo-Datei, Vorlage).
+* **Korrekturen:** der Dienst wird auch über eine Verweis-Wurzel erkannt (S13); `dienst.sh` findet Waisen ohne
+  PID-Datei (S5) und sperrt auf eine eigene Datei neben dem Datenordner, „belegt“ ist kein Erfolg mehr (S6);
+  Ansage-Adresse mit Webport, Adressrückfall nicht mehr festgehalten (S7); das Rücksetzen der Aktion liest die
+  Einstellungen frisch (S8); die Abo-Datei legen postinstall und der Dienststart an, nicht mehr ein Seitenaufruf
+  (S19); Wortwecker ohne Wyoming-Mikrofon grau, ein fremder Dienst auf dem Port rot (S14, S15); englische
+  Beispielsätze: Heizung 5–30 °C (S24, nur bei Neuinstallation); Texte S16, S20–S23; Sperrhinweis neben
+  „Vorschläge holen“ (E2); weitere kleine Schranken (S3, S9–S11). Sprachmodul 1.1.3.
+* Am Gerät noch ungemessen: Befehle über UDP 11884 → Brücke → Dienst, Umlaute in der Nutzlast, die Statusformen
+  des Musterprojekts nach dem Anordnen.
+
 
 ## Neu in 0.12.6
 

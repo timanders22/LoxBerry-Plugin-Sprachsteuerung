@@ -198,6 +198,10 @@ function sp_wert_pruefen($pfad, $wert)
         case 'mqtt_ein':
         case 'ruhe.ein':
         case 'mqtt_dauer_ein':
+        case 'befehle_mqtt_ein':
+        case 'befehle_mqtt_steuern':
+        case 'befehle_cmd_ein':
+        case 'endpunkt_ein':
         case 'musik_ducken':
         case 'musik_steuern':
         case 'docker_neustart':
@@ -434,7 +438,9 @@ function sp_cfg_pruefen(array $cfg)
                      'miniserver_url', 'llm_ein', 'antwort_sprechen', 'mqtt_ein', 'antwortweg',
                      'whisper_modell', 'piper_stimme', 'llm_modell',
                      // Runde 2 (S3, S5-S7): fehlen sie (aeltere Sicherung), ist das kein Fehler.
-                     'mqtt_dauer_ein', 'musik_ducken', 'musik_ducken_laut', 'musik_steuern', 'docker_neustart');
+                     'mqtt_dauer_ein', 'musik_ducken', 'musik_ducken_laut', 'musik_steuern', 'docker_neustart',
+                     // Gruppe 11 (0.12.7): fehlen sie (Sicherung bis 0.12.6), ist das kein Fehler.
+                     'befehle_mqtt_ein', 'befehle_mqtt_steuern', 'befehle_cmd_ein', 'endpunkt_ein');
     foreach ($einfach as $k) {
         if (!array_key_exists($k, $cfg)) { continue; }
         $t = sp_wert_pruefen($k, $cfg[$k]);

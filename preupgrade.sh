@@ -80,6 +80,16 @@ else
     exit 2
 fi
 
+# ---------- Die Befehlsbruecke anhalten (seit 0.12.7, Gruppe 11) ----------
+# NACH der Marke: befehlsbruecke.sh start und der Waechter pruefen dieselbe Marke und starten nicht, solange sie
+# liegt. Beim Umstieg von 0.12.6 und aelter gibt es die Bruecke noch nicht - dann nichts. Den Neustart besorgt der
+# Waechter in cron.01min binnen einer Minute nach dem Update (nur mit "Befehle ueber MQTT annehmen").
+SP_BB="$BASE/bin/plugins/$PFOLDER/befehlsbruecke.sh"
+if [ -f "$SP_BB" ] && command -v bash >/dev/null 2>&1; then
+    SP_BB_AUS=$(timeout 40 bash "$SP_BB" stop 2>&1 | head -n 1)
+    echo "<INFO> Befehlsbruecke: ${SP_BB_AUS:-angehalten}"
+fi
+
 # ---------- Den laufenden Dienst anhalten ----------
 # Bis 0.11.7 gingen BEIDE Signale - das weiche und das harte - ungeprueft an
 # die Nummer aus der PID-Datei. Prozessnummern werden aber wiederverwendet:
@@ -108,7 +118,7 @@ sp_ist_dienst() {   # $1 Prozessnummer, $2 Dienstpfad
         case "${a0##*/}" in python|python3|python3.*) ;; *) exit 1 ;; esac
         # Gegen den Pfad, wie er hier zusammengesetzt ist, UND gegen den
         # physischen (0.12.0): bin/dienst.sh startet den Dienst mit dem
-        # Pfad aus 'pwd -P'. Ist die Wurzel ein Verweis (etwa /opt/loxberry),
+        # Pfad aus 'pwd -P'. Ist die Wurzel ein Verweis (so auf vielen Anlagen),
         # unterschieden sich beide, und der Dienst wurde bis 0.11.15 hier
         # nicht gefunden - er lief durch das ganze Update weiter.
         [ "$a1" = "$2" ] || { [ -n "$SP_DIENST_P" ] && [ "$a1" = "$SP_DIENST_P" ]; }

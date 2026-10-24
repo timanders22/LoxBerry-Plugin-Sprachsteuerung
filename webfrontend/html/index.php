@@ -39,6 +39,12 @@
  * erzeugte Konfiguration samt Token.
  *
  * Der Endpunkt spricht NIE selbst mit einem Mikrofon oder Sprachdienst.
+ *
+ * SEIT 0.12.7 (Gruppe 11 / MQTT, Entscheidung 1, E4) steht der GANZE Endpunkt hinter dem Haken "HTTP-Endpunkt
+ * fuer Loxone annehmen" (endpunkt_ein, ab Werk aus; beim Update an, wenn ein Token gesetzt ist). Ohne ihn: 403
+ * ENDPUNKT_AUS, vor der Tokenpruefung und vor jeder Wirkung. Der Standardweg ist MQTT (Werte ueber das Gateway,
+ * Befehle ueber die Befehlsbruecke). Die schaltenden Aktionen pruefen und reihen seit 0.12.7 in sp_steuern()
+ * (sp_lib.php) ein - EINE Logik fuer HTTP und Bruecke; die Antworten sind byte-gleich wie bis 0.12.6.
  */
 
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_NOTICE);
@@ -49,6 +55,20 @@ header('Content-Type: text/plain; charset=utf-8');
 header('Cache-Control: no-store');
 
 $sp_cfg = sp_config(false);
+
+/* ---------------- Haken endpunkt_ein (0.12.7) ----------------
+ * Vor der Tokenpruefung: ohne Haken nimmt der Endpunkt nichts an, auch keinen Selbsttest und keine lesende
+ * Aktion (Entwurf 3.6, E4). Es wird nichts angelegt (sp_config(false)). Text in ASCII wie die uebrigen Antworten. */
+if ((int) $sp_cfg['endpunkt_ein'] !== 1) {
+    http_response_code(403);
+    if (isset($_GET['selftest'])) {
+        echo "SELFTEST;OK=0;ERR=ENDPUNKT_AUS\n";
+        exit;
+    }
+    echo "FEHLER;OK=0;GRUND=ENDPUNKT_AUS\n";
+    echo "Im Plugin Reiter Einbindung den Haken 'HTTP-Endpunkt fuer Loxone annehmen' setzen.\n";
+    exit;
+}
 
 /* ---------------- Die Parameter EINMAL einsammeln ----------------
  *
@@ -130,60 +150,17 @@ if (!in_array($sp_aktion, array_merge($sp_lesend, $sp_schaltend), true)) {
     exit;
 }
 
-/* Der gesprochene Text wird NICHT gefiltert - nur Steuerzeichen fallen weg.
- * Ein hartes Filtern zerstoerte gueltige Saetze, und was ein Satz enthalten
- * darf, weiss hier niemand besser als der Sprecher. */
-$sp_text = $sp_par('text');
-$sp_sauber = preg_replace('/[\x00-\x1F\x7F]/u', ' ', $sp_text);
-if ($sp_sauber === null) {
-    // Abweisen und benennen, nicht zurechtbiegen: bis 0.10.1 wurde aus
-    // ungueltigem UTF-8 stillschweigend ein leerer Text, und die Antwort
-    // lautete TEXT_FEHLT - der Text fehlte aber nicht.
-    http_response_code(400);
-    echo "FEHLER;OK=0;GRUND=TEXT_UNGUELTIG\n";
-    echo "Der Text ist kein gueltiges UTF-8.\n";
+/* Text, Zone, Mikrofon und Dringlichkeit - seit 0.12.7 EINE Pruefung fuer diesen Endpunkt und die Befehlsbruecke
+ * (sp_eingaben_pruefen() in sp_lib.php). Sie steht an derselben Stelle wie bisher, also auch vor den lesenden
+ * Aktionen, liest die Felder ueber $sp_par in derselben Reihenfolge und antwortet byte-gleich: der Text wird nicht
+ * gefiltert (nur Steuerzeichen fallen weg), gezaehlt werden Zeichen (hoechstens 400), Zonen wie in der Sprachausgabe
+ * (ansage_zonen_ok()), das Mikrofon hoechstens 40 Zeichen, ungueltiges UTF-8 wird benannt statt geleert. */
+$sp_ein = sp_eingaben_pruefen($sp_par);
+if (!$sp_ein['ok']) {
+    http_response_code($sp_ein['http']);
+    echo $sp_ein['ausgabe'];
     exit;
 }
-$sp_text = trim($sp_sauber);
-/* Gezaehlt werden ZEICHEN, nicht Bytes. strlen() zaehlt Bytes, und ein
- * Umlaut belegt in UTF-8 zwei davon. Nachgemessen: 201 Umlaute sind 201
- * Zeichen, aber 402 Bytes - und wurden bis 0.9.1 abgewiesen. */
-if (sp_zeichen($sp_text) > 400) {
-    http_response_code(400);
-    echo "FEHLER;OK=0;GRUND=TEXT_ZU_LANG\n";
-    echo "Mehr als 400 Zeichen nimmt der Endpunkt nicht an.\n";
-    exit;
-}
-
-/* Zone, Mikrofon und Dringlichkeit: enge Muster, alles andere abgewiesen.
- * Zonen wie in der Sprachausgabe (ansage_zonen_ok()): Zahl[~Lautstaerke 1-100],
- * durch Komma getrennt. Bis 0.11.15 stand dort [0-9~,] mit $ - ein Zeilenende
- * (%0A) und "2~" gingen durch und endeten als kaputte Adresse und irrefuehrendes
- * HTTP_NETZ|3. Leerraum um die Kommas faellt weg. */
-$sp_zone = $sp_par('zone');
-if ($sp_zone !== '' && (strlen($sp_zone) > 80 || !ansage_zonen_ok($sp_zone))) {
-    http_response_code(400);
-    echo "FEHLER;OK=0;GRUND=ZONE_UNGUELTIG\n";
-    echo "Zonen bestehen aus Ziffern, Komma und der Tilde, zum Beispiel 2,4 oder 2~15.\n";
-    exit;
-}
-$sp_zone = (string) preg_replace('/\s+/', '', $sp_zone);
-$sp_mikro = $sp_par('mikrofon');
-$sp_mikro_sauber = preg_replace('/[\x00-\x1F\x7F]/u', '', $sp_mikro);
-if ($sp_mikro_sauber === null) {
-    // Ein still weggefallenes Mikrofon schickt die Ansage an ALLE
-    // Lautsprecher statt an einen.
-    http_response_code(400);
-    echo "FEHLER;OK=0;GRUND=MIKROFON_UNGUELTIG\n";
-    exit;
-}
-$sp_mikro = trim($sp_mikro_sauber);
-if (sp_zeichen($sp_mikro) > 40) {
-    http_response_code(400);
-    echo "FEHLER;OK=0;GRUND=MIKROFON_ZU_LANG\n";
-    exit;
-}
-$sp_dringend = $sp_par('dringend') === '1' ? 1 : 0;
 
 $sp_lox = sp_loxone();
 $sp_sats = sp_satelliten();
@@ -267,8 +244,11 @@ if ($sp_aktion === 'diag') {
             printf("%-20s: abgeschaltet\n", $sp_d);
             continue;
         }
+        /* S15 (0.12.7): ein offener Port ist noch kein Sprachdienst - erkannt wird wie in der Ampel des Reiters
+         * Dienste (sp_dienst_erkennen()). Bis 0.12.6 hiess ein fremder Dienst auf dem Port "antwortet". */
+        list($sp_st, $sp_gr) = sp_dienst_erkennen($sp_d, $sp_h, $sp_pt, 2.0);
         printf("%-20s: %s auf %s:%d\n", $sp_d,
-            sp_port_offen($sp_h, $sp_pt, 2.0) ? 'antwortet' : 'ANTWORTET NICHT',
+            $sp_st === 1 ? 'antwortet' : ($sp_st === 2 ? 'FALSCHER DIENST (' . $sp_gr . ')' : 'ANTWORTET NICHT'),
             $sp_h, $sp_pt);
     }
     $sp_m = sp_mqtt_zustand();
@@ -298,52 +278,12 @@ if ($sp_aktion === 'diag') {
 
 /* ================= Schaltende Aktionen ================= */
 
-if (sp_dienst_pid() === 0) {
-    http_response_code(503);
-    echo "SET;OK=0;GRUND=DIENST_LAEUFT_NICHT\n";
-    echo "Der Dienst laeuft nicht. Reiter Einstellungen, Knopf 'Dienst starten'.\n";
-    exit;
+/* Seit 0.12.7 (Gruppe 11, Entwurf 3.4) in sp_steuern() (sp_lib.php): laeuft der Dienst?, ruhe mit wert=0|1, ist ein
+ * Text da?, dann die Warteschlange des Dienstes - EINE Logik fuer diesen Endpunkt und die Befehlsbruecke. Ausgabe und
+ * HTTP-Code byte-gleich wie bis 0.12.6 (Pruefstand: je Fall Vorher/Nachher gleich). DER ENDPUNKT SCHREIBT WEITER
+ * NICHTS - auch "ruhe" geht ueber die Warteschlange, der Dienst schreibt ruhe.json. */
+$sp_r = sp_steuern($sp_aktion, $sp_par, 'endpunkt', null, $sp_ein);
+if ($sp_r['http'] !== 200) {
+    http_response_code($sp_r['http']);
 }
-
-if ($sp_aktion === 'ruhe') {
-    $sp_wert = $sp_par('wert');
-    if (!in_array($sp_wert, array('0', '1'), true)) {
-        http_response_code(400);
-        echo "SET;OK=0;GRUND=WERT_UNGUELTIG\n";
-        echo "Erlaubt ist wert=0 oder wert=1.\n";
-        exit;
-    }
-    /* Auch das geht ueber die Warteschlange: der DIENST schreibt, nicht der
-     * unangemeldete Endpunkt. */
-    list($sp_erg, $sp_meldung) = sp_befehl_absetzen(
-        array('aktion' => 'ruhe', 'wert' => (int) $sp_wert), null, 'endpunkt');
-    if ($sp_erg === 0) { http_response_code(500); }
-    printf("SET;OK=%d;AKTION=ruhe;WERT=%d;MELDUNG=%s\n", $sp_erg, (int) $sp_wert,
-        str_replace(array("\r", "\n", ';'), ' ', $sp_meldung));
-    exit;
-}
-
-if ($sp_text === '') {
-    http_response_code(400);
-    echo "SET;OK=0;GRUND=TEXT_FEHLT\n";
-    exit;
-}
-
-$sp_befehl = array('aktion' => $sp_aktion,
-                   ($sp_aktion === 'satz' ? 'satz' : 'text') => $sp_text);
-if ($sp_aktion === 'sprechen') {
-    if ($sp_zone !== '')  { $sp_befehl['zone'] = $sp_zone; }
-    if ($sp_mikro !== '') { $sp_befehl['mikrofon'] = $sp_mikro; }
-    if ($sp_dringend)     { $sp_befehl['dringend'] = 1; }
-}
-/* S9: der Dienst erfaehrt, dass der Befehl von Loxone kommt (quelle=endpunkt) -
- * Rueckfrage und Kontext haengen daran, nicht mehr an der Frage "raum fehlt". */
-list($sp_erg, $sp_meldung) = sp_befehl_absetzen($sp_befehl, null, 'endpunkt');
-if ($sp_erg === 0) {
-    http_response_code(500);
-}
-/* Nr. 40 / Entwurf 3.6: zu einer Ansage nennt die Antwort ihre Laenge (TEXTLAENGE, wie alle
- * Linien), nie den Text. */
-printf("SET;OK=%d;AKTION=%s;%sMELDUNG=%s\n", $sp_erg, $sp_aktion,
-    $sp_aktion === 'sprechen' ? 'TEXTLAENGE=' . ansage_zeichen($sp_text) . ';' : '',
-    str_replace(array("\r", "\n", ';'), ' ', $sp_meldung));
+echo $sp_r['ausgabe'];

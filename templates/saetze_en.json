@@ -97,7 +97,9 @@
       "name": "living room heating",
       "alias": ["heating", "thermostat", "living room heating"],
       "thema": "livingroom/heating",
-      "einheit": "degrees"
+      "einheit": "degrees",
+      "min": 5,
+      "max": 30
     }
   },
 
