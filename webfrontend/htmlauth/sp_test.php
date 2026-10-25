@@ -191,7 +191,8 @@ function sp_pruefungen()
 
     // Zusaetzliche Ansage (Ansage-1): ist das Ziel da? Faellt es aus,
     // bleibt der bisherige Weg - die Zeile sagt es.
-    $sp_al = sp_ansage_lage($cfg);
+    // Gruppe 20 (0.12.8): die Selbstpruefung laeuft nur bei offenem Reiter Test - SonoX darf dann /zones fragen.
+    $sp_al = sp_ansage_lage($cfg, true);
     if ($sp_al !== null) {
         $zeilen[] = sp_pruefzeile($sp_al[0], sp_t('TEST.F_ANSAGE'), $sp_al[1]);
     }
@@ -308,6 +309,48 @@ function sp_test_dienstzeilen(array $cfg, array $abbild)
         } else {
             $zeilen[] = sp_pruefzeile(0, sp_t('UI013.F_MQTT_DAUER'),
                 sp_e(sprintf(sp_t('UI013.A_MQTT_DAUER_NEIN'), is_scalar($grund) && (string) $grund !== '' ? (string) $grund : '-')));
+        }
+    }
+    /* Gruppe 20 (0.12.8, V3): Kalenderfragen aus dem Abbild-Block kalender {lage, datum, zaehler_ts, grund,
+     * heute_frei, morgen_frei, ferien_in, feiertag_in}. Aus ist grau (Regeln/04), nicht rot; kein Knopf - ein
+     * Satz laesst sich mit dem Satzfeld unten durchschicken. Das Alter rechnet diese Seite aus zaehler_ts (N2). */
+    if (empty($cfg['kalender_fragen_ein'])) {
+        $zeilen[] = sp_pruefzeile(-1, sp_t('UI020.F_KALENDER'), sp_e(sp_t('UI020.A_KALENDER_AUS')));
+    } else {
+        $sp_k = isset($abbild['kalender']) && is_array($abbild['kalender']) ? $abbild['kalender'] : array();
+        $sp_kl = isset($sp_k['lage']) && is_string($sp_k['lage']) ? $sp_k['lage'] : '';
+        $sp_kz = isset($sp_k['zaehler_ts']) && is_numeric($sp_k['zaehler_ts']) ? (int) $sp_k['zaehler_ts'] : 0;
+        $sp_ka = $sp_kz > 0 ? max(0, time() - $sp_kz) : -1;
+        $sp_kd = isset($sp_k['datum']) && is_scalar($sp_k['datum']) ? (string) $sp_k['datum'] : '';
+        if (preg_match('/^(\d{4})(\d{2})(\d{2})\z/', $sp_kd, $sp_m)) { $sp_kd = $sp_m[3] . '.' . $sp_m[2] . '.' . $sp_m[1]; }
+        if ($sp_kd === '') { $sp_kd = '-'; }
+        $sp_jn = function ($k) use ($sp_k) {
+            $w = isset($sp_k[$k]) ? $sp_k[$k] : null;
+            return $w === 1 ? sp_t('ALLG.JA') : ($w === 0 ? sp_t('ALLG.NEIN') : '-');
+        };
+        $sp_tg = function ($k) use ($sp_k) {
+            $w = isset($sp_k[$k]) ? $sp_k[$k] : null;
+            return (is_int($w) && $w >= 0) ? (string) $w : '-';
+        };
+        $sp_kh = ' ' . sp_t('UI020.A_KALENDER_HILFE');
+        if ($sp_kl === 'frisch') {
+            $zeilen[] = sp_pruefzeile(1, sp_t('UI020.F_KALENDER'), sp_e(sprintf(sp_t('UI020.A_KALENDER_FRISCH'),
+                $sp_kd, $sp_ka >= 0 ? $sp_ka : 0, $sp_jn('heute_frei'), $sp_jn('morgen_frei'), $sp_tg('ferien_in'),
+                $sp_tg('feiertag_in'))));
+        } elseif ($sp_kl === 'wartet') {
+            $zeilen[] = sp_pruefzeile(-1, sp_t('UI020.F_KALENDER'), sp_e(sp_t('UI020.A_KALENDER_WARTET')));
+        } elseif ($sp_kl === 'schweigt') {
+            $zeilen[] = sp_pruefzeile(0, sp_t('UI020.F_KALENDER'), sp_e(($sp_ka >= 0
+                ? sprintf(sp_t('UI020.A_KALENDER_SCHWEIGT'), $sp_ka) : sp_t('UI020.A_KALENDER_SCHWEIGT_NIE')) . $sp_kh));
+        } elseif ($sp_kl === 'veraltet') {
+            $zeilen[] = sp_pruefzeile(0, sp_t('UI020.F_KALENDER'),
+                sp_e(sprintf(sp_t('UI020.A_KALENDER_VERALTET'), $sp_kd) . $sp_kh));
+        } elseif ($sp_kl === 'getrennt') {
+            $sp_kg = isset($sp_k['grund']) && is_scalar($sp_k['grund']) && (string) $sp_k['grund'] !== '' ? (string) $sp_k['grund'] : '-';
+            $zeilen[] = sp_pruefzeile(0, sp_t('UI020.F_KALENDER'),
+                sp_e(sprintf(sp_t('UI020.A_KALENDER_GETRENNT'), $sp_kg) . $sp_kh));
+        } else {
+            $zeilen[] = sp_pruefzeile(-1, sp_t('UI020.F_KALENDER'), sp_e(sp_t('UI020.A_KALENDER_UNBEKANNT')));
         }
     }
     // Letzte Ansage: Block letzte_ansage {ok, grund, ts} oder ansage_ok/ansage_grund/ansage_ts.

@@ -34,6 +34,9 @@
  *                Schnittstelle wie Alexa-NG, eigenes Sprechtoken
  *   sonos4lox    Plugin Sonos4Lox (seit 1.1.0), GET action=say mit Zone und
  *                Lautstaerke; der Ordner kommt aus der Plugin-Datenbank
+ *   sonox        Plugin SonoX (seit 1.1.4): dessen Dienst node-sonos-http-api auf
+ *                127.0.0.1:<port aus data/plugins/sonox/settings.json>, GET
+ *                /<Raum>/say/<Text>/<Sprache>[/<Lautstaerke>]
  *
  * Dazu: Einstellungen vervollstaendigen und pruefen, das Formular lesen
  * (Nr. 16/19, X-2), den Formularblock zeichnen, die Zeile im Reiter Test,
@@ -67,7 +70,8 @@
  *   - Als gesendet gilt bei Alexa-NG und Chromecast nur HTTP 200 UND eine
  *     Antwortzeile SPRECHEN;OK=1 (danach ; oder Zeilenende); beim Music
  *     Server, bei Vorlagen und bei Sonos4Lox nur HTTP 2xx (Sonos4Lox kennt
- *     kein Erfolgsmerkmal in der Antwort).
+ *     kein Erfolgsmerkmal in der Antwort); bei SonoX nur HTTP 200 UND
+ *     {"status":"success"} (seit 1.1.4).
  *   - Eingaben werden abgewiesen und benannt, nie still zurechtgebogen
  *     (Nr. 16/19); nur Leerraum am Rand faellt still weg.
  *   - Ein Wert aus der Konfiguration wird vor dem Senden erneut geprueft
@@ -163,6 +167,33 @@
  *     "1"); ohne das Feld wie bisher.
  * Ein Prozess, der 1.1.2 zuerst geladen hat (zwei Abschriften), sendet eben
  * keinen Absender und kuerzt wie bisher - es fehlt nur das Neue.
+ *
+ * 1.1.4 (Pflegewelle 22, 25.10.2026; Musterprojekt/sonos_recherche.md), nur
+ * ergaenzend bis auf die entschiedene Berichtigung der Sonos4Lox-Pruefzeile:
+ *   - Ausgabeart 'sonox' (Plugin SonoX, norman-albusberger/sonox mit
+ *     node-sonos-http-api): Schluessel sonox_raum (Sonos-Raumname, Gross/klein
+ *     egal), sonox_laut (-1 = leer, SonoX nimmt dann 40), sonox_sprache (Pflicht,
+ *     ab Werk 'de' - ohne sie spricht die API Englisch). Port NUR aus
+ *     data/plugins/<ordner>/settings.json, Schluessel 'port' (dieselbe Datei traegt
+ *     MQTT-Zugangsdaten, die nie gelesen werden), sonst 5005. Nur GET (ein POST
+ *     haengt dort bis zur Zeitgrenze), jedes Pfadsegment rawurlencode-t. Gesendet
+ *     heisst HTTP 200 und status=success - SonoX antwortet erst nach der Wiedergabe
+ *     (ANSAGE_TMO_SONOX 30 s). Fehlermeldungen von SonoX koennen den Text tragen und
+ *     werden nur eingeordnet, nie abgelegt. Kein Gong, kein 'dringend' (SonoX kennt
+ *     beides nicht). Gleichzeitigkeit: SonoX reiht nicht ein, eine zweite Ansage an
+ *     denselben Raum schneidet die erste ab; Sonos4Lox reiht ein (der zweite Ruf kann
+ *     in SONOS_ZEIT_UNKLAR laufen). Datenschutz: ohne eigenen Anbieter erzeugt SonoX
+ *     die Sprache ueber Google im Internet - der Formularhinweis sagt es.
+ *   - ansage_plugin_da(): steht das Plugin in der Plugin-Datenbank (true/false,
+ *     null = keine Datenbank lesbar). ansage_plugin_ordner() rechnet wie bisher.
+ *   - Berichtigt (Hausherr 25.10.): die Pruefzeile sonos4lox prueft jetzt wirklich
+ *     die Installation (ohne Eintrag ein Kreuz statt eines Hakens) und gleicht die
+ *     Zone gegen die Zonenschluessel der s4lox_config.json ab (nur die Schluessel von
+ *     sonoszonen; die Datei traegt auch Schluessel von Sprachanbietern). Ohne
+ *     Datenbank oder ohne lesbare Datei bleibt es bei der Zeile von 1.1.3. Sprechen
+ *     ueber Sonos4Lox ist unveraendert.
+ *   - Wer 'sonox' anbietet, prueft version_compare(ANSAGE_FASSUNG, '1.1.4', '>=');
+ *     eine zuerst geladene 1.1.3 meldet MODUS_UNBEKANNT.
  */
 
 /* Kein Endpunkt (Regeln/03): die Datei liegt meist im unangemeldeten Baum
@@ -181,7 +212,7 @@ if (PHP_SAPI !== 'cli') {
 
 if (!defined('ANSAGE_FASSUNG')) {
 
-define('ANSAGE_FASSUNG', '1.1.3');
+define('ANSAGE_FASSUNG', '1.1.4');
 
 /** Hoechstlaenge eines Ansagetexts in Zeichen (Schnittstelle Alexa-NG/Chromecast: 1-1000). */
 define('ANSAGE_TEXT_MAX', 1000);
@@ -193,6 +224,9 @@ define('ANSAGE_TMO_PRUEF', 5);
  * Zustand wiederhergestellt ist (play_tts wartet auf GetTransportInfo). Mit
  * ANSAGE_TMO endete fast jede laengere Ansage als SONOS_ZEIT_UNKLAR. */
 define('ANSAGE_TMO_SONOS', 30);
+/* SonoX (node-sonos-http-api) antwortet ebenfalls erst nach der Wiedergabe und dem
+ * Wiederherstellen (single-player-announcement.js: STOPPED oder Dauer + 2 s). */
+define('ANSAGE_TMO_SONOX', 30);
 /** Hoechstens so viele Bytes einer Antwort werden gelesen. */
 define('ANSAGE_RUMPF_MAX', 65536);
 
@@ -203,7 +237,7 @@ define('ANSAGE_RUMPF_MAX', 65536);
 /** Alle Ausgabearten in der Reihenfolge der Auswahlliste. */
 function ansage_modi()
 {
-    return array('aus', 'musicserver', 'ms4h', 'audioserver', 'custom', 'alexang', 'cc4lox', 'sonos4lox');
+    return array('aus', 'musicserver', 'ms4h', 'audioserver', 'custom', 'alexang', 'cc4lox', 'sonos4lox', 'sonox');
 }
 
 /** Ausgabearten, die ueber die Sprechschnittstelle eines anderen Plugins gehen. */
@@ -228,6 +262,7 @@ function ansage_art($modus)
 function ansage_letzte_art($modus)
 {
     if ($modus === 'sonos4lox') { return 'sonos'; }
+    if ($modus === 'sonox') { return 'sonox'; }       // seit 1.1.4
     return ansage_art($modus);
 }
 
@@ -257,6 +292,10 @@ function ansage_vorgaben($ab_werk = 'aus')
         'google_laut' => -1,
         'sonos_zone' => '',
         'sonos_laut' => -1,
+        // seit 1.1.4: SonoX
+        'sonox_raum' => '',
+        'sonox_laut' => -1,
+        'sonox_sprache' => 'de',
     );
 }
 
@@ -591,6 +630,7 @@ function ansage_wert_pruefen($tts, &$grund = '', $modi = null)
             case 'alexa_laut':
             case 'google_laut':
             case 'sonos_laut':
+            case 'sonox_laut':
                 $z = ansage_laut_pruefen($w, $grund);
                 if ($z === null) { $grund = 'UNTER|tts.' . $s . '|' . $grund; return null; }
                 $aus[$s] = $z;
@@ -598,6 +638,16 @@ function ansage_wert_pruefen($tts, &$grund = '', $modi = null)
             case 'sonos_zone':
                 // Leer heisst "nicht eingestellt"; gesprochen wird dann nicht (SONOS_KEINE_ZONE).
                 if (!ansage_geraet_ok($w)) { $grund = 'TTS_SONOS_ZONE'; return null; }
+                $aus[$s] = $w;
+                break;
+            case 'sonox_raum':
+                // seit 1.1.4. Leer heisst "nicht eingestellt" (SONOX_KEIN_RAUM). Nur Punkte waeren ein Pfadschritt.
+                if (!ansage_geraet_ok($w) || preg_match('/^\.+\z/', $w)) { $grund = 'TTS_SONOX_RAUM'; return null; }
+                $aus[$s] = $w;
+                break;
+            case 'sonox_sprache':
+                // seit 1.1.4. Pflicht: ohne Sprache nimmt Google in SonoX Englisch.
+                if (!is_string($w) || !preg_match('/^[a-z]{2}(-[a-z]{2})?\z/', $w)) { $grund = 'TTS_SONOX_SPRACHE'; return null; }
                 $aus[$s] = $w;
                 break;
             case 'alexa_token':
@@ -791,12 +841,7 @@ function ansage_lbhome($home = null)
  */
 function ansage_plugin_ordner($modus, $home = null)
 {
-    $tafel = array(
-        'alexang' => array(array('alexang'), 'alexang'),
-        'cc4lox' => array(array('chromecast-4lox-ng'), 'chromecast-4lox-ng'),
-        // Sonos4Lox heisst in seiner plugin.cfg (7.x) NAME=Sonos, FOLDER=sonos4lox.
-        'sonos4lox' => array(array('sonos', 'sonos4lox'), 'sonos4lox'),
-    );
+    $tafel = ansage_plugin_tafel();
     if (!isset($tafel[$modus])) { return ''; }
     list($namen, $fest) = $tafel[$modus];
     $h = ansage_lbhome($home);
@@ -804,6 +849,205 @@ function ansage_plugin_ordner($modus, $home = null)
     if ($db === '' || !is_file($db)) { return $fest; }
     $roh = @file_get_contents($db);
     return ansage_plugin_ordner_aus($roh === false ? '' : $roh, $namen, $fest);
+}
+
+/**
+ * Die Tafel der Sprechziele: Ausgabeart => array(Plugin-Namen, fester Ordner).
+ * Seit 1.1.4 eine eigene Funktion (ansage_plugin_ordner() und ansage_plugin_da()
+ * lesen dieselbe Tafel); die drei Eintraege bis 1.1.3 sind unveraendert.
+ */
+function ansage_plugin_tafel()
+{
+    return array(
+        'alexang' => array(array('alexang'), 'alexang'),
+        'cc4lox' => array(array('chromecast-4lox-ng'), 'chromecast-4lox-ng'),
+        // Sonos4Lox heisst in seiner plugin.cfg (7.x) NAME=Sonos, FOLDER=sonos4lox.
+        'sonos4lox' => array(array('sonos', 'sonos4lox'), 'sonos4lox'),
+        // SonoX: plugin.cfg PLUGINDB_KEY=sonox, NAME=SonoX, FOLDER=sonox (seit 1.1.4).
+        'sonox' => array(array('sonox'), 'sonox'),
+    );
+}
+
+/**
+ * Steht eines der Plugins $namen im Inhalt der plugindatabase.json? (seit 1.1.4)
+ * Rueckgabe true/false; null, wenn der Inhalt keine Datenbank ist. Gelesen wie
+ * ansage_plugin_ordner_aus() (name, orig_name; Gross/klein egal; gueltiger Ordner).
+ */
+function ansage_plugin_da_aus($json, array $namen)
+{
+    $d = is_string($json) ? json_decode($json, true) : null;
+    if (!is_array($d)) { return null; }
+    return ansage_plugin_ordner_aus($json, $namen, "\0") !== "\0";
+}
+
+/**
+ * Ist das Plugin einer Ausgabeart auf diesem LoxBerry installiert? (seit 1.1.4)
+ * true/false aus data/system/plugindatabase.json; null, wenn es keine Wurzel oder
+ * keine lesbare Datenbank gibt (dann laesst sich nichts sagen) oder die Art kein
+ * anderes Plugin anspricht. $home wie bei ansage_lbhome().
+ */
+function ansage_plugin_da($modus, $home = null)
+{
+    $tafel = ansage_plugin_tafel();
+    if (!isset($tafel[$modus])) { return null; }
+    $h = ansage_lbhome($home);
+    $db = $h !== '' ? $h . '/data/system/plugindatabase.json' : '';
+    if ($db === '' || !is_file($db)) { return null; }
+    $roh = @file_get_contents($db);
+    return ansage_plugin_da_aus($roh === false ? '' : $roh, $tafel[$modus][0]);
+}
+
+/**
+ * Eine kleine JSON-Datei lesen (hoechstens 1 MiB); null, wenn sie fehlt, zu gross,
+ * unlesbar oder kein Feld ist. Nur fuer Dateien anderer Plugins (seit 1.1.4).
+ */
+function ansage_json_datei($f)
+{
+    if (!is_string($f) || $f === '' || !is_file($f)) { return null; }
+    $gr = @filesize($f);
+    if (!is_int($gr) || $gr > 1048576) { return null; }
+    $d = json_decode((string) @file_get_contents($f), true);
+    return is_array($d) ? $d : null;
+}
+
+/**
+ * Die Zonennamen von Sonos4Lox aus dem Inhalt seiner s4lox_config.json: NUR die
+ * Schluessel von sonoszonen (seit 1.1.4). Die Datei traegt auch Schluessel von
+ * Sprachanbietern - nichts davon verlaesst diese Funktion. null: kein sonoszonen.
+ */
+function ansage_sonos_zonen_aus($d)
+{
+    if (!is_array($d) || !isset($d['sonoszonen']) || !is_array($d['sonoszonen'])) { return null; }
+    return array_map('strval', array_keys($d['sonoszonen']));
+}
+
+/** Die Zonennamen von Sonos4Lox auf diesem LoxBerry oder null (seit 1.1.4). */
+function ansage_sonos_zonen($home = null)
+{
+    $h = ansage_lbhome($home);
+    if ($h === '') { return null; }
+    $f = $h . '/config/plugins/' . ansage_plugin_ordner('sonos4lox', $home) . '/s4lox_config.json';
+    return ansage_sonos_zonen_aus(ansage_json_datei($f));
+}
+
+/**
+ * So bildet Sonos4Lox aus einem Sonos-Raumnamen seinen Zonennamen
+ * (src/Core/Discovery/Discovery.php: Ae/ae/Oe/oe/Ue/ue/ss, danach klein). Nur fuer
+ * den Vorschlag in der Pruefzeile (seit 1.1.4).
+ */
+function ansage_sonos_zonenname($s)
+{
+    $s = strtr((string) $s, array("\xC3\x84" => 'Ae', "\xC3\xA4" => 'ae', "\xC3\x96" => 'Oe', "\xC3\xB6" => 'oe',
+                                  "\xC3\x9C" => 'Ue', "\xC3\xBC" => 'ue', "\xC3\x9F" => 'ss'));
+    return strtr($s, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz');   // nur ASCII, ohne Gebietsschema
+}
+
+/** Klein geschrieben, auch die deutschen Umlaute ohne mbstring (seit 1.1.4). */
+function ansage_klein($s)
+{
+    $s = (string) $s;
+    if (function_exists('mb_strtolower')) { return mb_strtolower($s, 'UTF-8'); }
+    // strtolower() haengt unter PHP 7.4 am Gebietsschema und zerlegte UTF-8 (gemessen 7.4.33 Windows) - deshalb strtr.
+    $s = strtr($s, array("\xC3\x84" => "\xC3\xA4", "\xC3\x96" => "\xC3\xB6", "\xC3\x9C" => "\xC3\xBC"));
+    return strtr($s, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz');
+}
+
+/**
+ * Der Port von SonoX aus dem Inhalt seiner settings.json: NUR der Schluessel 'port'
+ * (Zahl oder Ziffernkette 1-65535; das Formular von SonoX speichert eine
+ * Zeichenkette), sonst 5005. Dieselbe Datei traegt MQTT-Benutzer und -Kennwort;
+ * die werden nie gelesen oder weitergegeben (seit 1.1.4).
+ */
+function ansage_sonox_port_aus($d)
+{
+    if (is_string($d)) { $d = json_decode($d, true); }
+    if (is_array($d) && isset($d['port'])) {
+        $p = $d['port'];
+        if (is_int($p) || (is_string($p) && preg_match('/^\d{1,5}\z/', trim($p)))) {
+            $i = (int) trim((string) $p);
+            if ($i >= 1 && $i <= 65535) { return $i; }
+        }
+    }
+    return 5005;
+}
+
+/** Der Port von SonoX auf diesem LoxBerry; ohne Wurzel oder Datei 5005 (seit 1.1.4). */
+function ansage_sonox_port($home = null)
+{
+    $h = ansage_lbhome($home);
+    if ($h === '') { return 5005; }
+    $f = $h . '/data/plugins/' . ansage_plugin_ordner('sonox', $home) . '/settings.json';
+    return ansage_sonox_port_aus(ansage_json_datei($f));
+}
+
+/** Grundadresse des SonoX-Dienstes auf DIESEM LoxBerry, ohne Pfad (seit 1.1.4). */
+function ansage_sonox_adresse($port)
+{
+    $port = (int) $port;
+    if ($port < 1 || $port > 65535) { $port = 5005; }
+    return 'http://127.0.0.1:' . $port;
+}
+
+/**
+ * Ein Pfadsegment fuer SonoX: rawurlencode (auch / ? # und Leerzeichen; die API
+ * teilt den Pfad VOR dem Dekodieren an /, ein + bliebe ein +) (seit 1.1.4).
+ * Ein Segment "." oder ".." loest curl als Pfadschritt auf - auch als %2E%2E
+ * (gemessen 25.10.2026, libcurl in PHP 8.4.27/8.5.12). Deshalb kommt ein solcher
+ * Raum nie durch die Wertpruefung und ein solcher Text nie bis hierher.
+ */
+function ansage_sonox_segment($s)
+{
+    return rawurlencode((string) $s);
+}
+
+/**
+ * Die Raumnamen aus der Antwort von GET /zones (lib/actions/zones.js:
+ * coordinator.roomName und members[].roomName), ohne Doppel; null, wenn die
+ * Antwort keine Zonenliste ist (seit 1.1.4).
+ */
+function ansage_sonox_raeume_aus($json)
+{
+    $d = is_string($json) ? json_decode($json, true) : null;
+    if (!is_array($d)) { return null; }
+    $aus = array();
+    foreach ($d as $zone) {
+        if (!is_array($zone)) { return null; }
+        if (isset($zone['coordinator']['roomName']) && is_string($zone['coordinator']['roomName'])) {
+            $aus[] = $zone['coordinator']['roomName'];
+        }
+        if (isset($zone['members']) && is_array($zone['members'])) {
+            foreach ($zone['members'] as $m) {
+                if (is_array($m) && isset($m['roomName']) && is_string($m['roomName'])) { $aus[] = $m['roomName']; }
+            }
+        }
+    }
+    return array_values(array_unique($aus));
+}
+
+/**
+ * Eine Antwort von SonoX einordnen (seit 1.1.4). '' = gesendet (HTTP 200 und
+ * status=success). Der Text einer Fehlermeldung kann den Ansagetext tragen und
+ * erscheint nie in der Kennung. $tmo > 0: Zeitueberschreitung beim Sprechen
+ * (SONOX_ZEIT_UNKLAR), sonst HTTP_ZEIT.
+ */
+function ansage_sonox_grund(array $a, $basis, $tmo)
+{
+    if ((int) $a['code'] <= 0) {
+        if ((int) $a['errno'] === 7) { return 'SONOX_DIENST_AUS|' . $basis; }
+        if ((int) $a['errno'] === 28 && (int) $tmo > 0) { return 'SONOX_ZEIT_UNKLAR|' . $basis . '|' . (int) $tmo; }
+        return ansage_http_grund_id((int) $a['errno'] === 0 ? -1 : $a['errno'], 0, $a['fehler']);
+    }
+    $j = json_decode((string) $a['rumpf'], true);
+    if ((int) $a['code'] === 200) {
+        return (is_array($j) && isset($j['status']) && $j['status'] === 'success') ? '' : 'SONOX_UNERWARTET|200';
+    }
+    if ((int) $a['code'] === 500) {
+        $f = (is_array($j) && isset($j['error']) && is_string($j['error'])) ? $j['error'] : '';
+        if (preg_match("/^action '.*' not found\\z/s", $f)) { return 'SONOX_RAUM_UNBEKANNT'; }
+        if (strpos($f, 'No system has yet been discovered') !== false) { return 'SONOX_KEINE_ANLAGE'; }
+        return 'SONOX_FEHLER|500';
+    }
+    return ansage_http_grund_id(0, (int) $a['code'], '');
 }
 
 /**
@@ -1450,6 +1694,41 @@ function ansage_sprechen($text, array $tts, array $k = array(), array $opt = arr
         $r['stand'] = $r['kennung'] === '' ? 1 : 0;
         return ansage_letzte_merken($r, $k);
     }
+    if ($modus === 'sonox') {
+        /* seit 1.1.4. GET (ein POST bekommt von der API keine Antwort), Text und Raum
+         * als Pfadsegmente an 127.0.0.1. Gesendet nur mit HTTP 200 UND status=success.
+         * 'dringend' kennt SonoX nicht; es wird nicht gesendet. Die Antwortzeile bleibt
+         * leer: Fehlermeldungen von SonoX koennen den Text tragen. */
+        if ($text === '.' || $text === '..') {
+            // ein Pfadschritt, kein Text (curl loeste ihn auf): nichts zu sagen
+            $r['stand'] = -1;
+            $r['kennung'] = 'TEXT_LEER';
+            return ansage_letzte_merken($r, $k);
+        }
+        $raum = isset($tts['sonox_raum']) ? $tts['sonox_raum'] : '';
+        if ($raum === '') {
+            $r['kennung'] = 'SONOX_KEIN_RAUM';
+            return ansage_letzte_merken($r, $k);
+        }
+        $sprache = isset($tts['sonox_sprache']) ? $tts['sonox_sprache'] : 'de';
+        if (ansage_wert_pruefen(array('sonox_raum' => $raum, 'sonox_sprache' => $sprache), $grund) === null) {
+            $r['kennung'] = 'EINSTELLUNG|' . $grund;
+            return ansage_letzte_merken($r, $k);
+        }
+        $laut = ansage_tts_laut($tts, 'sonox_laut', $grund);
+        if ($laut === null) {
+            $r['kennung'] = 'EINSTELLUNG|' . $grund;
+            return ansage_letzte_merken($r, $k);
+        }
+        $basis = ansage_sonox_adresse(ansage_sonox_port(ansage_k_home($k)));
+        $url = $basis . '/' . ansage_sonox_segment($raum) . '/say/' . ansage_sonox_segment($text) . '/'
+             . ansage_sonox_segment($sprache) . ($laut >= 1 ? '/' . $laut : '');
+        $a = ansage_ausfuehren(ansage_anfrage('GET', $url, null, ANSAGE_TMO_SONOX, $k), $k);
+        $r['http'] = $a['code'];
+        $r['kennung'] = ansage_sonox_grund($a, $basis, ANSAGE_TMO_SONOX);
+        $r['stand'] = $r['kennung'] === '' ? 1 : 0;
+        return ansage_letzte_merken($r, $k);
+    }
     /* musicserver, ms4h, custom: Adresse und Vorlage werden vor dem Senden
      * erneut geprueft - eine von Hand verbogene Konfiguration spricht nicht
      * ins Internet. */
@@ -1508,7 +1787,8 @@ function ansage_kurz(array $r)
 /** Dateiname der letzten Ansage einer Art. */
 function ansage_letzte_datei($art)
 {
-    return ($art === 'alexa' || $art === 'google' || $art === 'sonos') ? $art . '_letzte.json' : 'klassisch_letzte.json';
+    return ($art === 'alexa' || $art === 'google' || $art === 'sonos' || $art === 'sonox')
+        ? $art . '_letzte.json' : 'klassisch_letzte.json';
 }
 
 /**
@@ -1618,8 +1898,62 @@ function ansage_pruefzeile(array $tts, $offen, array $k = array())
             return array(0, $e(ansage_kennung_text('SONOS_KEINE_ZONE', $k)));
         }
         $l = ansage_letzte('sonos', $k);
-        return ansage_mit_letzter(array(1, $e(sprintf(ansage_t('T_SONOS', $k),
-            ansage_adresse($modus, ansage_k_port($k), ansage_k_home($k))))), $l, $k);
+        /* Seit 1.1.4 (berichtigt): Installation aus der Plugin-Datenbank und die Zone gegen die
+         * Zonenschluessel der s4lox_config.json - beides lokal, ohne Sonos4Lox zu fragen. Ohne
+         * lesbare Datenbank oder Datei bleibt es bei der Zeile von 1.1.3. */
+        $da = ansage_plugin_da('sonos4lox', ansage_k_home($k));
+        if ($da === false) {
+            return ansage_mit_letzter(array(0, $e(ansage_kennung_text('SONOS_NICHT_INSTALLIERT', $k))), $l, $k);
+        }
+        $z = array(1, $e(sprintf(ansage_t('T_SONOS', $k), ansage_adresse($modus, ansage_k_port($k), ansage_k_home($k)))));
+        $zonen = ($da === true) ? ansage_sonos_zonen(ansage_k_home($k)) : null;
+        if (is_array($zonen)) {
+            $zone = (string) $tts['sonos_zone'];
+            if (in_array($zone, $zonen, true)) {
+                $z[1] .= ' ' . $e(sprintf(ansage_t('T_SONOS_ZONE_OK', $k), count($zonen)));
+            } else {
+                $satz = ansage_kennung_text('SONOS_ZONE_UNBEKANNT', $k);
+                $v = ansage_sonos_zonenname($zone);
+                if ($v !== $zone && in_array($v, $zonen, true)) { $satz .= ' ' . sprintf(ansage_t('T_SONOS_ZONE_VORSCHLAG', $k), $v); }
+                $namen = array();
+                foreach (array_slice($zonen, 0, 20) as $zn) { $namen[] = ansage_kuerzen($zn, 60); }
+                $satz .= ' ' . sprintf(ansage_t('T_SONOS_ZONEN', $k), $namen ? implode(', ', $namen) : '-');
+                $z = array(0, $e($satz));
+            }
+        }
+        return ansage_mit_letzter($z, $l, $k);
+    }
+    if ($modus === 'sonox') {
+        // seit 1.1.4: fragt nur GET /zones (spricht nie), und nur bei offenem Reiter Test.
+        $raum = (isset($tts['sonox_raum']) && is_string($tts['sonox_raum'])) ? $tts['sonox_raum'] : '';
+        if ($raum === '') {
+            return array(0, $e(ansage_kennung_text('SONOX_KEIN_RAUM', $k)));
+        }
+        $l = ansage_letzte('sonox', $k);
+        if (ansage_plugin_da('sonox', ansage_k_home($k)) === false) {
+            return ansage_mit_letzter(array(0, $e(ansage_kennung_text('SONOX_FEHLT', $k))), $l, $k);
+        }
+        if (!$offen) {
+            return array(-2, $e(ansage_t('T_SONOX_ZU', $k)));
+        }
+        $basis = ansage_sonox_adresse(ansage_sonox_port(ansage_k_home($k)));
+        $a = ansage_ausfuehren(ansage_anfrage('GET', $basis . '/zones', null, ANSAGE_TMO_PRUEF, $k), $k);
+        $raeume = ((int) $a['code'] === 200) ? ansage_sonox_raeume_aus($a['rumpf']) : null;
+        if (is_array($raeume)) {
+            $kl = ansage_klein($raum);
+            foreach ($raeume as $rn) {
+                if (ansage_klein($rn) === $kl) {
+                    return ansage_mit_letzter(array(1, $e(sprintf(ansage_t('T_SONOX_OK', $k), $basis, count($raeume)))), $l, $k);
+                }
+            }
+            $namen = array();
+            foreach (array_slice($raeume, 0, 20) as $rn) { $namen[] = ansage_kuerzen($rn, 60); }
+            return ansage_mit_letzter(array(0, $e(sprintf(ansage_t('T_SONOX_FEHL', $k), ansage_kennung_text('SONOX_RAUM_UNBEKANNT', $k))
+                . ' ' . sprintf(ansage_t('T_SONOX_RAEUME', $k), $namen ? implode(', ', $namen) : '-'))), $l, $k);
+        }
+        $kn = ansage_sonox_grund($a, $basis, 0);
+        if ($kn === '') { $kn = 'SONOX_UNERWARTET|200'; }
+        return ansage_mit_letzter(array(0, $e(sprintf(ansage_t('T_SONOX_FEHL', $k), ansage_kennung_text($kn, $k)))), $l, $k);
     }
     if (!ansage_ist_ng($modus)) {
         $url = ansage_tts_url('-', $tts);
@@ -1717,7 +2051,7 @@ function ansage_feldnamen(array $opt = array())
     foreach (array('mode', 'ip', 'port', 'zones', 'volume', 'lang', 'template',
                    'alexa_geraet', 'alexa_laut', 'alexa_token', 'alexa_token_loeschen',
                    'google_geraet', 'google_laut', 'google_token', 'google_token_loeschen',
-                   'sonos_zone', 'sonos_laut') as $id) {
+                   'sonos_zone', 'sonos_laut', 'sonox_raum', 'sonox_laut', 'sonox_sprache') as $id) {
         $n[$id] = 'tts_' . $id;
     }
     if (isset($opt['namen']) && is_array($opt['namen'])) {
@@ -1840,6 +2174,37 @@ function ansage_formular_lesen(array $post, array $alt, array &$mangel, array &$
     } else {
         $melden('M_SONOS_LAUT', 'sonos_laut');
     }
+    /* SonoX (seit 1.1.4): gelesen wird nur, was das Formular wirklich schickt. Eine Linie, deren
+     * Formular die Felder nicht traegt, behaelt die gespeicherten Werte - ohne Beanstandung. */
+    if (isset($post[$n['sonox_raum']])) {
+        $z = $roh('sonox_raum');
+        if ($z === null || !ansage_geraet_ok($z) || preg_match('/^\.+\z/', $z)) {
+            $melden('M_SONOX_RAUM', 'sonox_raum');
+        } else {
+            $neu['sonox_raum'] = $z;
+        }
+    }
+    if (isset($post[$n['sonox_laut']])) {
+        $l = $roh('sonox_laut');
+        if ($l === '') {
+            $neu['sonox_laut'] = -1;
+        } elseif ($l !== null && preg_match('/^\d{1,3}\z/', $l) === 1 && (int) $l >= 1 && (int) $l <= 100) {
+            $neu['sonox_laut'] = (int) $l;
+        } else {
+            $melden('M_SONOX_LAUT', 'sonox_laut');
+        }
+    }
+    if (isset($post[$n['sonox_sprache']])) {
+        $sp = $roh('sonox_sprache');
+        if ($sp === null || !preg_match('/^[a-z]{2}(-[a-z]{2})?\z/', $sp)) {
+            $melden('M_SONOX_SPRACHE', 'sonox_sprache');
+        } else {
+            $neu['sonox_sprache'] = $sp;
+        }
+    }
+    if ($neu['mode'] === 'sonox' && $neu['sonox_raum'] === '' && !in_array($n['sonox_raum'], $bean, true)) {
+        $melden('M_SONOX_OHNE_RAUM', 'sonox_raum');
+    }
     return $neu;
 }
 
@@ -1881,7 +2246,7 @@ function ansage_formular_html(array $tts, array $h = array(), array $k = array()
     $o[] = '</div>';
     $feld = function ($id, $typ, $label, $zusatz, $hinweis) use ($e, $t, $w, $m, $n, $tts) {
         $wert = $tts[$id];
-        if (($id === 'alexa_laut' || $id === 'google_laut' || $id === 'sonos_laut') && (int) $wert < 0) { $wert = ''; }
+        if (($id === 'alexa_laut' || $id === 'google_laut' || $id === 'sonos_laut' || $id === 'sonox_laut') && (int) $wert < 0) { $wert = ''; }
         $z = array();
         $z[] = '<div class="sm-feld">';
         $z[] = '    <label for="ansage_' . $id . '">' . $e($t($label)) . '</label>';
@@ -1934,6 +2299,17 @@ function ansage_formular_html(array $tts, array $h = array(), array $k = array()
         $feld('sonos_zone', 'text', 'L_SONOS_ZONE', ' maxlength="200"', 'SONOS_ZONE_HINWEIS'),
         $feld('sonos_laut', 'number', 'L_SONOS_LAUT', ' min="1" max="100"', 'SONOS_LAUT_HINWEIS'));
     $o[] = '</div>';
+    // SonoX (seit 1.1.4) nur, wenn die Linie die Art anbietet - sonst bleibt der Block wie in 1.1.3.
+    $mit_sonox = in_array('sonox', $modi, true);
+    if ($mit_sonox) {
+        $o[] = '<div id="ansage_sonox">';
+        $o[] = '<div class="sm-hinweis">' . $e($t('SONOX_HINWEIS')) . '</div>';
+        $o = array_merge($o,
+            $feld('sonox_raum', 'text', 'L_SONOX_RAUM', ' maxlength="200"', 'SONOX_RAUM_HINWEIS'),
+            $feld('sonox_laut', 'number', 'L_SONOX_LAUT', ' min="1" max="100"', 'SONOX_LAUT_HINWEIS'),
+            $feld('sonox_sprache', 'text', 'L_SONOX_SPRACHE', ' maxlength="5"', 'SONOX_SPRACHE_HINWEIS'));
+        $o[] = '</div>';
+    }
     $o[] = '<script>';
     $o[] = 'function ansageUmschalten() {';
     $o[] = '    var m = document.getElementById(\'ansage_mode\').value;';
@@ -1945,6 +2321,7 @@ function ansage_formular_html(array $tts, array $h = array(), array $k = array()
     $o[] = '    zeigen(\'ansage_alexa\', m === \'alexang\');';
     $o[] = '    zeigen(\'ansage_sonos\', m === \'sonos4lox\');';
     $o[] = '    zeigen(\'ansage_google\', m === \'cc4lox\');';
+    if ($mit_sonox) { $o[] = '    zeigen(\'ansage_sonox\', m === \'sonox\');'; }
     $o[] = '}';
     $o[] = 'ansageUmschalten();';
     $o[] = '</script>';
@@ -2098,7 +2475,16 @@ function ansage_sprachschluessel()
                'SONOS_LAUT_HINWEIS', 'M_SONOS_ZONE', 'M_SONOS_LAUT', 'M_SONOS_OHNE_ZONE', 'T_SONOS', 'K_TTS_SONOS_ZONE',
                'K_SONOS_KEINE_ZONE', 'K_SONOS_FEHLT', 'K_SONOS_ZEIT_UNKLAR',
                // seit 1.1.2
-               'K_TTS_EINTRAG', 'K_KEIN_FELD', 'ART_HINWEIS_WERK', 'O_AUS_SCHLICHT', 'O_WERK');
+               'K_TTS_EINTRAG', 'K_KEIN_FELD', 'ART_HINWEIS_WERK', 'O_AUS_SCHLICHT', 'O_WERK',
+               // seit 1.1.4 (O_SONOX kommt ueber die Modusschleife)
+               'K_SONOS_NICHT_INSTALLIERT', 'K_SONOS_ZONE_UNBEKANNT', 'T_SONOS_ZONE_OK', 'T_SONOS_ZONEN',
+               'T_SONOS_ZONE_VORSCHLAG',
+               'SONOX_HINWEIS', 'L_SONOX_RAUM', 'SONOX_RAUM_HINWEIS', 'L_SONOX_LAUT', 'SONOX_LAUT_HINWEIS',
+               'L_SONOX_SPRACHE', 'SONOX_SPRACHE_HINWEIS', 'M_SONOX_RAUM', 'M_SONOX_LAUT', 'M_SONOX_SPRACHE',
+               'M_SONOX_OHNE_RAUM', 'T_SONOX_OK', 'T_SONOX_ZU', 'T_SONOX_FEHL', 'T_SONOX_RAEUME',
+               'K_TTS_SONOX_RAUM', 'K_TTS_SONOX_SPRACHE', 'K_SONOX_KEIN_RAUM', 'K_SONOX_FEHLT', 'K_SONOX_DIENST_AUS',
+               'K_SONOX_RAUM_UNBEKANNT', 'K_SONOX_KEINE_ANLAGE', 'K_SONOX_FEHLER', 'K_SONOX_UNERWARTET',
+               'K_SONOX_ZEIT_UNKLAR');
     foreach (ansage_modi() as $mo) { $s[] = 'O_' . strtoupper($mo); }
     foreach (array('ALEXA', 'GOOGLE') as $a) {
         foreach (array('_HINWEIS', '_GERAET_HINWEIS', '_LAUT_HINWEIS', '_TOKEN_HINWEIS') as $x) { $s[] = $a . $x; }
@@ -2190,7 +2576,7 @@ function ansage_selbsttest()
     $pruef('vorgabe aus', $tts['mode'], 'aus');
     $pruef('vorgabe musicserver', ansage_vorgaben('musicserver')['mode'], 'musicserver');
     $pruef('vorgabe unbekannt', ansage_vorgaben('boese')['mode'], 'aus');
-    $pruef('15 schluessel', count($tts), 15);
+    $pruef('18 schluessel', count($tts), 18);       // 1.1.4: + sonox_raum, sonox_laut, sonox_sprache
     $pruef('token ok', ansage_token_ok($TOK), true);
     $pruef('token kurz', ansage_token_ok('abc1234'), false);
     $pruef('token 8', ansage_token_ok('abcd1234'), true);
@@ -2205,7 +2591,7 @@ function ansage_selbsttest()
     $pruef('geraet 201', ansage_geraet_ok(str_repeat('x', 201)), false);
     $pruef('geraet liste', ansage_geraet_ok(array('x')), false);
     list($v, $f) = ansage_vervollstaendigen(array('mode' => 'ms4h', 'ip' => 'x'));
-    $pruef('vervollst behaelt', array($v['mode'], $v['ip'], count($v), count($f)), array('ms4h', 'x', 15, 13));
+    $pruef('vervollst behaelt', array($v['mode'], $v['ip'], count($v), count($f)), array('ms4h', 'x', 18, 16));
 
     // --- Webport ---
     $pruef('webport Webserver', ansage_webport_aus('{"Webserver":{"Port":"8080"}}'), 8080);
@@ -2505,7 +2891,7 @@ function ansage_selbsttest()
 
     // --- Sicherung ---
     $sb = ansage_sicherung_bereinigen($gx);
-    $pruef('sicherung ohne token', array(isset($sb['google_token']), isset($sb['alexa_token']), count($sb)), array(false, false, 13));
+    $pruef('sicherung ohne token', array(isset($sb['google_token']), isset($sb['alexa_token']), count($sb)), array(false, false, 16));
     $pruef('sicherung mangel token', ansage_sicherung_mangel(array('alexa_token' => $TOK, 'google_token' => '')), array('tts.alexa_token'));
     $pruef('sicherung mangel liste', ansage_sicherung_mangel(array('google_token' => array())), array('tts.google_token'));
     $pruef('sicherung mangel null', ansage_sicherung_mangel(array('google_token' => null)), array('tts.google_token'));
@@ -2737,7 +3123,7 @@ function ansage_selbsttest()
     $pruef('form sonos ohne zone, laut 0', $kn, array('M_SONOS_OHNE_ZONE', 'M_SONOS_LAUT'));
     $html = ansage_formular_html($sx);
     $pruef('html sonos', array(strpos($html, 'id="ansage_sonos"') !== false, strpos($html, 'value="Küche"') !== false,
-                               preg_match_all('/_laut" value="[^"]*" min="1"/', $html)), array(true, true, 3));
+                               preg_match_all('/_laut" value="[^"]*" min="1"/', $html)), array(true, true, 4));   // 1.1.4: + sonox_laut
     $antworten = array(array('code' => 200, 'rumpf' => ''));
     $c = ansage_cli(json_encode(array('text' => $TEXT)), $sx, $k);
     $pruef('cli sonos', $c, array(0, 'ANSAGE;STAND=1;ART=sonos4lox;KENNUNG=-;HTTP=200;ZEICHEN=39'));
@@ -2962,6 +3348,243 @@ function ansage_selbsttest()
         parse_str((string) $log[0]['koerper'], $kf);
         $pruef('113 cli nicht dringend ' . $dn, array($c[0], isset($kf['dringend'])), array(0, false));
     }
+
+    // ================= seit 1.1.4 =================
+
+    // --- Modus, Vorgaben, Wertpruefung SonoX ---
+    $mm = ansage_modi();
+    $pruef('114 modi', array(end($mm), count($mm)), array('sonox', 9));
+    $vg = ansage_vorgaben();
+    $pruef('114 vorgaben', array($vg['sonox_raum'], $vg['sonox_laut'], $vg['sonox_sprache']), array('', -1, 'de'));
+    $pruef('114 vorgabe sonox', ansage_vorgaben('sonox')['mode'], 'sonox');
+    $pruef('114 wp sonox ok', ansage_wert_pruefen(array('mode' => 'sonox', 'sonox_raum' => 'Küche', 'sonox_laut' => '30', 'sonox_sprache' => 'de-de'), $g),
+           array('mode' => 'sonox', 'sonox_raum' => 'Küche', 'sonox_laut' => 30, 'sonox_sprache' => 'de-de'));
+    foreach (array('..' => 'TTS_SONOX_RAUM', "a\x07" => 'TTS_SONOX_RAUM', ' Bad' => 'TTS_SONOX_RAUM') as $w => $soll) {
+        $pruef('114 wp raum ' . json_encode($w), array(ansage_wert_pruefen(array('sonox_raum' => $w), $g), $g), array(null, $soll));
+    }
+    $pruef('114 wp raum liste', array(ansage_wert_pruefen(array('sonox_raum' => array('x')), $g), $g), array(null, 'TTS_SONOX_RAUM'));
+    foreach (array('DE', 'deu', 'de_DE', '', 'de-', 'de-deu') as $w) {
+        $pruef('114 wp sprache ' . json_encode($w), array(ansage_wert_pruefen(array('sonox_sprache' => $w), $g), $g), array(null, 'TTS_SONOX_SPRACHE'));
+    }
+    $pruef('114 wp sprache liste', array(ansage_wert_pruefen(array('sonox_sprache' => array('de')), $g), $g), array(null, 'TTS_SONOX_SPRACHE'));
+    $pruef('114 wp laut 0', array(ansage_wert_pruefen(array('sonox_laut' => 0), $g), $g), array(null, 'UNTER|tts.sonox_laut|AUSSERHALB|1|100'));
+    $pruef('114 wp laut -1', ansage_wert_pruefen(array('sonox_laut' => -1), $g), array('sonox_laut' => -1));
+
+    // --- Port nur aus settings.json, nur 'port' ---
+    $pruef('114 port text', ansage_sonox_port_aus('{"port":"5006","mqtt":{"user":"u","pass":"GEHEIM"}}'), 5006);
+    $pruef('114 port zahl', ansage_sonox_port_aus('{"port":5007}'), 5007);
+    $pruef('114 port rand', ansage_sonox_port_aus('{"port":" 5008 "}'), 5008);
+    foreach (array('{"port":"0"}', '{"port":"70000"}', '{"port":"x"}', '{"port":[1]}', '{"port":5005.5}', '{', '[]', '{"Port":"5009"}') as $j) {
+        $pruef('114 port vorgabe ' . $j, ansage_sonox_port_aus($j), 5005);
+    }
+    $pruef('114 port ohne wurzel', ansage_sonox_port(''), 5005);
+    $pruef('114 adresse', array(ansage_sonox_adresse(5006), ansage_sonox_adresse(0)), array('http://127.0.0.1:5006', 'http://127.0.0.1:5005'));
+    $pruef('114 segment', array(ansage_sonox_segment('a b/c?d#e+f'), ansage_sonox_segment('Küche'), ansage_sonox_segment('a.b')),
+           array('a%20b%2Fc%3Fd%23e%2Bf', 'K%C3%BCche', 'a.b'));
+
+    // --- Sprechen ueber SonoX ---
+    $SX_TEXT = 'Müll raus / Tür zu? #1 & 50% fertig';
+    $ox = array('mode' => 'sonox', 'sonox_raum' => 'Küche/Bad?', 'sonox_laut' => 30, 'sonox_sprache' => 'de') + $tts;
+    $ox_basis = 'http://127.0.0.1:5005';
+    $antworten = array(array('code' => 200, 'rumpf' => '{"status":"success"}'));
+    $log = array();
+    $r = ansage_sprechen($SX_TEXT, $ox, $k, array('dringend' => true));
+    $pruef('114 sonox ok', array($r['stand'], $r['kennung'], $r['http'], $r['zeile'], count($log)), array(1, '', 200, '', 1));
+    $pruef('114 sonox anfrage', array($log[0]['methode'], $log[0]['koerper'], $log[0]['tmo'], $log[0]['umleitung'], $log[0]['proxy']),
+           array('GET', null, ANSAGE_TMO_SONOX, false, false));
+    $pruef('114 sonox adresse', $log[0]['url'], $ox_basis . '/K%C3%BCche%2FBad%3F/say/' . rawurlencode($SX_TEXT) . '/de/30');
+    $pruef('114 sonox adresse kodiert', array(strpos($log[0]['url'], ' '), strpos($log[0]['url'], '+'), substr_count($log[0]['url'], '/')),
+           array(false, false, 7));
+    $pruef('114 sonox ohne dringend', strpos($log[0]['url'], 'urgent') === false && strpos($log[0]['url'], 'dringend') === false, true);
+    $pruef('114 sonox ergebnis ohne text', strpos(json_encode($r), 'Tür') === false && strpos(json_encode($r), 'raus') === false, true);
+    $antworten = array(array('code' => 200, 'rumpf' => '{"status":"success"}'));
+    $log = array();
+    ansage_sprechen('x', array('sonox_laut' => -1, 'sonox_sprache' => 'en-gb') + $ox, $k);
+    $pruef('114 sonox ohne laut', $log[0]['url'], $ox_basis . '/K%C3%BCche%2FBad%3F/say/x/en-gb');
+    $log = array();
+    $r1 = ansage_sprechen('..', $ox, $k);
+    $r2 = ansage_sprechen('.', $ox, $k);
+    $pruef('114 sonox text nur punkte', array($r1['stand'], $r1['kennung'], $r2['stand'], count($log)), array(-1, 'TEXT_LEER', -1, 0));
+    $antworten = array(array('code' => 200, 'rumpf' => '{"status":"success"}'));
+    $log = array();
+    ansage_sprechen('...', array('sonox_laut' => -1) + $ox, $k);
+    $pruef('114 sonox drei punkte gehen', $log[0]['url'], $ox_basis . '/K%C3%BCche%2FBad%3F/say/.../de');
+    $antworten = array(array('code' => 200, 'rumpf' => '{"status":"success"}'));
+    $log = array();
+    $ox2 = $ox;
+    unset($ox2['sonox_sprache']);
+    ansage_sprechen('x', $ox2, $k);
+    $pruef('114 sonox sprache fehlt = de', $log[0]['url'], $ox_basis . '/K%C3%BCche%2FBad%3F/say/x/de/30');
+    foreach (array(
+        array('200 ohne success', array('code' => 200, 'rumpf' => '{"status":"error"}'), 'SONOX_UNERWARTET|200'),
+        array('200 kaputt', array('code' => 200, 'rumpf' => 'OK'), 'SONOX_UNERWARTET|200'),
+        array('200 leer', array('code' => 200, 'rumpf' => ''), 'SONOX_UNERWARTET|200'),
+        array('500 raum', array('code' => 500, 'rumpf' => '{"status":"error","error":"action \'kueche\' not found","stack":"x"}'), 'SONOX_RAUM_UNBEKANNT'),
+        array('500 anlage', array('code' => 500, 'rumpf' => '{"status":"error","error":"No system has yet been discovered. Please see the issue list if it doesn\'t resolve itself in a few seconds."}'), 'SONOX_KEINE_ANLAGE'),
+        array('500 text', array('code' => 500, 'rumpf' => '{"status":"error","error":"URI malformed: M%C3%BCll raus","stack":"Error: M%C3%BCll raus"}'), 'SONOX_FEHLER|500'),
+        array('500 kaputt', array('code' => 500, 'rumpf' => 'Internal'), 'SONOX_FEHLER|500'),
+        array('401', array('code' => 401, 'rumpf' => ''), 'HTTP_ZUGANG|401'),
+        array('404', array('code' => 404, 'rumpf' => ''), 'HTTP_404'),
+        array('502', array('code' => 502, 'rumpf' => ''), 'HTTP_GEGENSEITE|502'),
+        array('abgewiesen', array('code' => 0, 'rumpf' => '', 'errno' => 7), 'SONOX_DIENST_AUS|' . $ox_basis),
+        array('zeit', array('code' => 0, 'rumpf' => '', 'errno' => 28), 'SONOX_ZEIT_UNKLAR|' . $ox_basis . '|30'),
+        array('netz', array('code' => 0, 'rumpf' => '', 'errno' => 56, 'fehler' => 'Recv failure'), 'HTTP_NETZ|56|Recv failure'),
+        array('ohne antwort', array('code' => 0, 'rumpf' => '', 'errno' => 0), 'HTTP_OHNE_ANTWORT')) as $fall) {
+        $antworten = array($fall[1]);
+        $r = ansage_sprechen($SX_TEXT, $ox, $k);
+        $pruef('114 sonox ' . $fall[0], array($r['stand'], $r['kennung'], $r['zeile']), array(0, $fall[2], ''));
+        $pruef('114 sonox ' . $fall[0] . ' ohne text', strpos(json_encode($r), 'raus') === false && strpos($r['kennung'], 'M%C3') === false, true);
+    }
+    $log = array();
+    $r = ansage_sprechen($TEXT, array('sonox_raum' => '') + $ox, $k);
+    $pruef('114 sonox ohne raum', array($r['stand'], $r['kennung'], count($log)), array(0, 'SONOX_KEIN_RAUM', 0));
+    $r = ansage_sprechen($TEXT, array('sonox_raum' => "a\nb") + $ox, $k);
+    $pruef('114 sonox raum kaputt', array($r['kennung'], count($log)), array('EINSTELLUNG|TTS_SONOX_RAUM', 0));
+    $r = ansage_sprechen($TEXT, array('sonox_sprache' => 'Deutsch') + $ox, $k);
+    $pruef('114 sonox sprache kaputt', array($r['kennung'], count($log)), array('EINSTELLUNG|TTS_SONOX_SPRACHE', 0));
+    $r = ansage_sprechen($TEXT, array('sonox_laut' => 0) + $ox, $k);
+    $pruef('114 sonox laut 0', array($r['kennung'], count($log)), array('EINSTELLUNG|UNTER|tts.sonox_laut|AUSSERHALB|1|100', 0));
+    $r = ansage_sprechen(str_repeat('x', 1001), $ox, $k);
+    $pruef('114 sonox zu lang', array($r['kennung'], count($log)), array('TEXT_ZU_LANG|1000', 0));
+    $pruef('114 letzte sonox', ansage_letzte_datei(ansage_letzte_art('sonox')), 'sonox_letzte.json');
+    $pruef('114 letzte alt', array(ansage_letzte_datei(ansage_letzte_art('sonos4lox')), ansage_letzte_datei(ansage_letzte_art('musicserver')),
+                                   ansage_letzte_datei(ansage_letzte_art('alexang'))), array('sonos_letzte.json', 'klassisch_letzte.json', 'alexa_letzte.json'));
+    $antworten = array(array('code' => 200, 'rumpf' => '{"status":"success"}'));
+    $c = ansage_cli(json_encode(array('text' => $TEXT, 'dringend' => true)), $ox, $k);
+    $pruef('114 cli sonox', $c, array(0, 'ANSAGE;STAND=1;ART=sonox;KENNUNG=-;HTTP=200;ZEICHEN=39'));
+    $pruef('114 x3 sonox', ansage_sicherung_x3(array('sonox_laut' => 0, 'sonox_raum' => ' x', 'sonox_sprache' => 'DE') + $ox),
+           array('tts.sonox_laut', 'tts.sonox_raum', 'tts.sonox_sprache'));
+    $pruef('114 x3 sonox sauber', ansage_sicherung_x3($ox), array());
+    $pruef('114 sicherung sonox bleibt', ansage_sicherung_bereinigen($ox)['sonox_raum'], 'Küche/Bad?');
+    $pruef('114 klein', array(ansage_klein('KÜCHE Öl Übung'), ansage_klein('bad')), array('küche öl übung', 'bad'));
+    $pruef('114 zonenname', array(ansage_sonos_zonenname('Küche Süd'), ansage_sonos_zonenname('Straße'), ansage_sonos_zonenname('ÄÖÜ')),
+           array('kueche sued', 'strasse', 'aeoeue'));
+
+    // --- Plugin-Datenbank, Zonenschluessel, Port: im Wegwerfbaum ---
+    $pdb_alle = '{"plugins":{"a":{"name":"Sonos","folder":"sonos4lox"},"b":{"name":"SonoX","folder":"sonox"}}}';
+    $pruef('114 da aus', array(ansage_plugin_da_aus($pdb_alle, array('sonos', 'sonos4lox')), ansage_plugin_da_aus($pdb_alle, array('sonox')),
+                               ansage_plugin_da_aus('{"plugins":{}}', array('sonox')), ansage_plugin_da_aus('{', array('sonox')),
+                               ansage_plugin_da_aus('{"plugins":{"x":{"name":"sonox","folder":"../x"}}}', array('sonox'))),
+           array(true, true, false, null, false));
+    $pruef('114 da ohne wurzel', array(ansage_plugin_da('sonox', ''), ansage_plugin_da('musicserver', '')), array(null, null));
+    $pruef('114 tafel alt gleich', array(ansage_plugin_ordner('alexang', ''), ansage_plugin_ordner('cc4lox', ''), ansage_plugin_ordner('sonos4lox', ''),
+                                         ansage_plugin_ordner('sonox', ''), ansage_plugin_ordner('musicserver', '')),
+           array('alexang', 'chromecast-4lox-ng', 'sonos4lox', 'sonox', ''));
+    $wb = @tempnam(sys_get_temp_dir(), 'ansage114');
+    if (is_string($wb) && @unlink($wb) && @mkdir($wb . '/data/system', 0700, true) && @mkdir($wb . '/config/system', 0700, true)
+        && @mkdir($wb . '/config/plugins/sonos4lox', 0700, true) && @mkdir($wb . '/data/plugins/sonox', 0700, true)) {
+        $kw = array('home' => $wb) + $k;
+        $db = $wb . '/data/system/plugindatabase.json';
+        $cf = $wb . '/config/plugins/sonos4lox/s4lox_config.json';
+        // ohne Sonos4Lox in der Datenbank: Kreuz statt Haken (berichtigt), gefragt wird nicht
+        file_put_contents($db, '{"plugins":{"b":{"name":"SonoX","folder":"sonox"}}}');
+        $sk = array('mode' => 'sonos4lox', 'sonos_zone' => 'kueche', 'sonos_laut' => -1) + $tts;
+        $log = array();
+        $z = ansage_pruefzeile($sk, true, $kw);
+        $pruef('114 pruefzeile sonos fehlt', array($z[0], $z[1], count($log)), array(0, 'SONOS_NICHT_INSTALLIERT', 0));
+        $pruef('114 da sonos fehlt', ansage_plugin_da('sonos4lox', $wb), false);
+        // mit Sonos4Lox, ohne s4lox_config.json: wie 1.1.3
+        file_put_contents($db, $pdb_alle);
+        $z = ansage_pruefzeile($sk, true, $kw);
+        $pruef('114 pruefzeile sonos ohne datei', array($z[0], $z[1]), array(1, 'ANSAGE.T_SONOS'));
+        // Zonenschluessel: nur die Schluessel von sonoszonen
+        file_put_contents($cf, '{"TTS":{"apikey":"GEHEIM123"},"sonoszonen":{"kueche":["RINCON_1","x"],"wohnzimmer":["RINCON_2"],"<b>":[]}}');
+        $pruef('114 zonen nur schluessel', ansage_sonos_zonen($wb), array('kueche', 'wohnzimmer', '<b>'));
+        $kt2 = array('t' => function ($s) {
+            $d = array('ANSAGE.T_SONOS' => 'an %s', 'ANSAGE.T_SONOS_ZONE_OK' => 'bekannt (%s)', 'ANSAGE.T_SONOS_ZONEN' => 'Zonen: %s',
+                       'ANSAGE.T_SONOS_ZONE_VORSCHLAG' => 'heisst %s', 'ANSAGE.K_SONOS_ZONE_UNBEKANNT' => 'unbekannt');
+            return isset($d[$s]) ? $d[$s] : $s;
+        }) + $kw;
+        $z = ansage_pruefzeile($sk, true, $kt2);
+        $pruef('114 pruefzeile sonos zone ok', array($z[0], strpos($z[1], 'bekannt (3)') !== false, strpos($z[1], 'GEHEIM') === false), array(1, true, true));
+        $z = ansage_pruefzeile(array('sonos_zone' => 'Küche') + $sk, false, $kt2);
+        $pruef('114 pruefzeile sonos zone vorschlag', array($z[0], strpos($z[1], 'unbekannt heisst kueche Zonen: kueche, wohnzimmer, &lt;b&gt;') !== false,
+                                                           strpos($z[1], 'GEHEIM') === false, strpos($z[1], '<b>') === false), array(0, true, true, true));
+        $z = ansage_pruefzeile(array('sonos_zone' => 'bad') + $sk, true, $kt2);
+        $pruef('114 pruefzeile sonos zone fehlt', array($z[0], strpos($z[1], 'heisst') === false), array(0, true));
+        file_put_contents($cf, '{"sonoszonen":"kaputt"}');
+        $pruef('114 pruefzeile sonos datei kaputt', ansage_pruefzeile($sk, true, $kt2)[0], 1);
+        // SonoX: Port aus settings.json (Zeichenkette), MQTT-Kennwort nie im Ergebnis
+        file_put_contents($wb . '/data/plugins/sonox/settings.json', '{"port":"5006","mqtt":{"user":"lb","password":"GEHEIM456"}}');
+        $antworten = array(array('code' => 200, 'rumpf' => '{"status":"success"}'));
+        $log = array();
+        $r = ansage_sprechen('x', $ox, $kw);
+        $pruef('114 sonox port aus datei', array($r['stand'], strpos($log[0]['url'], 'http://127.0.0.1:5006/') === 0,
+                                                strpos(json_encode($r) . json_encode($log), 'GEHEIM') === false), array(1, true, true));
+        // Pruefzeile SonoX
+        $kx = array('t' => function ($s) {
+            $d = array('ANSAGE.T_SONOX_OK' => 'ok %s (%s)', 'ANSAGE.T_SONOX_FEHL' => 'fehl: %s', 'ANSAGE.T_SONOX_RAEUME' => 'Raeume: %s',
+                       'ANSAGE.K_SONOX_RAUM_UNBEKANNT' => 'raum?', 'ANSAGE.K_SONOX_DIENST_AUS' => 'aus %s', 'ANSAGE.K_SONOX_KEINE_ANLAGE' => 'keine anlage',
+                       'ANSAGE.K_SONOX_UNERWARTET' => 'unerwartet %s', 'ANSAGE.T_SONOX_ZU' => 'zu');
+            return isset($d[$s]) ? $d[$s] : $s;
+        }) + $kw;
+        $zjs = '[{"uuid":"R1","coordinator":{"roomName":"Küche","state":{}},"members":[{"roomName":"Küche"},{"roomName":"Bad <oben>"}]},'
+             . '{"uuid":"R2","coordinator":{"roomName":"Wohnzimmer"},"members":[{"roomName":"Wohnzimmer"}]}]';
+        $antworten = array(array('code' => 200, 'rumpf' => $zjs));
+        $log = array();
+        $z = ansage_pruefzeile(array('sonox_raum' => 'KÜCHE') + $ox, true, $kx);
+        $pruef('114 pruefzeile sonox ok', array($z[0], $z[1], count($log), $log[0]['url'], $log[0]['methode'], $log[0]['tmo']),
+               array(1, 'ok http://127.0.0.1:5006 (3)', 1, 'http://127.0.0.1:5006/zones', 'GET', ANSAGE_TMO_PRUEF));
+        $antworten = array(array('code' => 200, 'rumpf' => $zjs));
+        $z = ansage_pruefzeile(array('sonox_raum' => 'Keller') + $ox, true, $kx);
+        $pruef('114 pruefzeile sonox raum fehlt', array($z[0], $z[1]), array(0, 'fehl: raum? Raeume: Küche, Bad &lt;oben&gt;, Wohnzimmer'));
+        $antworten = array(array('code' => 0, 'rumpf' => '', 'errno' => 7));
+        $pruef('114 pruefzeile sonox dienst aus', ansage_pruefzeile($ox, true, $kx), array(0, 'fehl: aus http://127.0.0.1:5006'));
+        $antworten = array(array('code' => 500, 'rumpf' => '{"status":"error","error":"No system has yet been discovered."}'));
+        $pruef('114 pruefzeile sonox keine anlage', ansage_pruefzeile($ox, true, $kx), array(0, 'fehl: keine anlage'));
+        $antworten = array(array('code' => 200, 'rumpf' => '{"status":"success"}'));
+        $pruef('114 pruefzeile sonox keine liste', ansage_pruefzeile($ox, true, $kx), array(0, 'fehl: unerwartet 200'));
+        $log = array();
+        $pruef('114 pruefzeile sonox zu', array(ansage_pruefzeile($ox, false, $kx), count($log)), array(array(-2, 'zu'), 0));
+        file_put_contents($db, '{"plugins":{"a":{"name":"Sonos","folder":"sonos4lox"}}}');
+        $z = ansage_pruefzeile($ox, true, $kw);
+        $pruef('114 pruefzeile sonox fehlt', array($z[0], $z[1], count($log)), array(0, 'SONOX_FEHLT', 0));
+        foreach (array($db, $cf, $wb . '/data/plugins/sonox/settings.json') as $wf) { @unlink($wf); }
+        foreach (array('/data/plugins/sonox', '/data/plugins', '/config/plugins/sonos4lox', '/config/plugins', '/data/system', '/config/system',
+                       '/data', '/config', '') as $wd) { @rmdir($wb . $wd); }
+    } else {
+        $pruef('114 wegwerfbaum (nicht messbar)', true, false);
+    }
+    $z = ansage_pruefzeile(array('sonox_raum' => '') + $ox, true, $k);
+    $pruef('114 pruefzeile sonox ohne raum', $z, array(0, 'SONOX_KEIN_RAUM'));
+    $log = array();
+    $pruef('114 pruefzeile sonos ohne db wie 1.1.3', array(ansage_pruefzeile($sx, true, $k)[0], count($log)), array(1, 0));
+
+    // --- Formular SonoX ---
+    $mg = array(); $bn = array();
+    $neu = ansage_formular_lesen(array('tts_mode' => 'sonox', 'tts_sonox_raum' => ' Küche ', 'tts_sonox_laut' => '25', 'tts_sonox_sprache' => 'de-at') + $post,
+                                 $alt, $mg, $bn);
+    $pruef('114 form sonox', array(count($mg), $neu['mode'], $neu['sonox_raum'], $neu['sonox_laut'], $neu['sonox_sprache']), array(0, 'sonox', 'Küche', 25, 'de-at'));
+    $mg = array(); $bn = array();
+    ansage_formular_lesen(array('tts_mode' => 'sonox', 'tts_sonox_raum' => '', 'tts_sonox_laut' => '0', 'tts_sonox_sprache' => 'DE') + $post, $alt, $mg, $bn);
+    $kn = array_map(function ($x) { return $x['kennung']; }, $mg);
+    $pruef('114 form sonox maengel', array($kn, $bn), array(array('M_SONOX_LAUT', 'M_SONOX_SPRACHE', 'M_SONOX_OHNE_RAUM'),
+                                                         array('tts_sonox_laut', 'tts_sonox_sprache', 'tts_sonox_raum')));
+    $mg = array(); $bn = array();
+    ansage_formular_lesen(array('tts_mode' => 'sonox', 'tts_sonox_raum' => '..') + $post, $alt, $mg, $bn);
+    $kn = array_map(function ($x) { return $x['kennung']; }, $mg);
+    $pruef('114 form sonox raum punkte', $kn, array('M_SONOX_RAUM'));
+    $mg = array(); $bn = array();
+    $alt_ox = array('sonox_raum' => 'Bad', 'sonox_laut' => 12, 'sonox_sprache' => 'en') + $alt;
+    $neu = ansage_formular_lesen($post, $alt_ox, $mg, $bn);
+    $pruef('114 form ohne sonox-felder behaelt', array(count($mg), $neu['sonox_raum'], $neu['sonox_laut'], $neu['sonox_sprache']), array(0, 'Bad', 12, 'en'));
+    $mg = array(); $bn = array();
+    ansage_formular_lesen(array('tts_mode' => 'sonox') + $post, $alt, $mg, $bn, array('modi' => array('aus', 'musicserver')));
+    $kn = array_map(function ($x) { return $x['kennung']; }, $mg);
+    $pruef('114 form sonox nicht angeboten', $kn, array('M_MODUS'));
+    $pruef('114 x2 sonox', array(in_array('tts_sonox_raum', ansage_x2_felder(), true), in_array('tts_sonox_sprache', ansage_x2_felder(), true)), array(true, true));
+    $html = ansage_formular_html(array('sonox_laut' => -1) + $ox);
+    $pruef('114 html sonox', array(strpos($html, 'id="ansage_sonox"') !== false, strpos($html, 'value="Küche/Bad?"') !== false,
+                                   strpos($html, "zeigen('ansage_sonox', m === 'sonox');") !== false, strpos($html, 'name="tts_sonox_sprache" value="de"') !== false,
+                                   strpos($html, 'id="ansage_sonox_laut" name="tts_sonox_laut" value=""') !== false,
+                                   strpos($html, 'ANSAGE.SONOX_HINWEIS') !== false), array(true, true, true, true, true, true));
+    $html = ansage_formular_html($ox, array('modi' => array('aus', 'musicserver', 'sonos4lox')));
+    $pruef('114 html ohne sonox wie 1.1.3', array(strpos($html, 'sonox'), strpos($html, 'ansage_sonos"') !== false), array(false, true));
+
+    // --- Sprachschluessel 1.1.4 ---
+    $sl = ansage_sprachschluessel();
+    $pruef('114 schluessel', array(in_array('O_SONOX', $sl, true), in_array('K_SONOX_ZEIT_UNKLAR', $sl, true), in_array('K_SONOS_NICHT_INSTALLIERT', $sl, true),
+                                   in_array('T_SONOX_RAEUME', $sl, true)), array(true, true, true, true));
 
     // --- Sprachschluessel: eindeutig ---
     $sl = ansage_sprachschluessel();

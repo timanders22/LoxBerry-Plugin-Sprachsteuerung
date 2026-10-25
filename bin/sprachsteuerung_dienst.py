@@ -336,8 +336,10 @@ TTS_VORLAGE_MS4H = "http://{ip}:{port}/tts?text={text}&zone={zones}&vol={vol}"
 #   docker_neustart  haengenden eigenen Container neu starten
 # Gruppe 11 (0.12.7): dazu die vier Haken der Umstellung - befehle_mqtt_ein/_steuern liest die Befehlsbruecke
 # (PHP), befehle_cmd_ein der Dienst (alter Weg <praefix>/cmd/...), endpunkt_ein der HTTP-Endpunkt.
+# Gruppe 20 (0.12.8): kalender_fragen_ein - Kalenderfragen aus haus/kalender/* (Leseverbindung zum Broker).
 SCHALTER_0_1 = ("mqtt_dauer_ein", "musik_ducken", "musik_steuern", "docker_neustart",
-                "befehle_mqtt_ein", "befehle_mqtt_steuern", "befehle_cmd_ein", "endpunkt_ein")
+                "befehle_mqtt_ein", "befehle_mqtt_steuern", "befehle_cmd_ein", "endpunkt_ein",
+                "kalender_fragen_ein")
 
 _LAUF = True
 _LOG = logging.getLogger("sprachsteuerung")
@@ -802,6 +804,17 @@ def config() -> dict:
         t["sonos_zone"] = ""
     laut = _skalar(t.get("sonos_laut")).strip()
     t["sonos_laut"] = int(laut) if re.fullmatch(r"[0-9]{1,3}", laut) and 1 <= int(laut) <= 100 else -1
+    # Gruppe 20 (0.12.8): SonoX - Raum wie ein Geraetename, aber nicht nur Punkte (ein Pfadschritt), Lautstaerke
+    # 1-100 oder -1 (leer: SonoX nimmt 40), Sprache Pflicht ^[a-z]{2}(-[a-z]{2})?$ (sonst de) - wie sp_config()
+    # in sp_lib.php und ansage_wert_pruefen() der Sprachausgabe 1.1.4. Rand wie PHP trim().
+    t["sonox_raum"] = _skalar(t.get("sonox_raum")).strip(" \t\n\r\x00\x0b")
+    if (len(t["sonox_raum"]) > 200 or re.search(r"[\x00-\x1f\x7f]", t["sonox_raum"])
+            or re.fullmatch(r"\.+", t["sonox_raum"])):
+        t["sonox_raum"] = ""
+    laut = _skalar(t.get("sonox_laut")).strip()
+    t["sonox_laut"] = int(laut) if re.fullmatch(r"[0-9]{1,3}", laut) and 1 <= int(laut) <= 100 else -1
+    sprache = _skalar(t.get("sonox_sprache"))
+    t["sonox_sprache"] = sprache if re.fullmatch(r"[a-z]{2}(-[a-z]{2})?", sprache) else "de"
     vol_klein, vol_gross = (GRENZEN.get("tts_volume") or [1, 100])[:2]
     for feld, klein, gross in (("port", 1, 65535), ("volume", int(vol_klein), int(vol_gross))):
         # Leer ist "nicht angegeben", nicht 0 - siehe _zahl_in_grenzen().
@@ -2709,7 +2722,7 @@ def mqtt_istwert(thema: str) -> dict:
         return {"ok": 0, "grund": "mqtt_thema",
                 "fehler": "url_lesen mqtt: nennt kein brauchbares Thema (ohne + und #)."}
     d = _DAUER
-    if d is None:
+    if d is None or not d.voll:
         return {"ok": 0, "grund": "mqtt_aus",
                 "fehler": "url_lesen mqtt:%s braucht die dauerhafte Broker-Verbindung "
                           "(mqtt_dauer_ein=1)." % thema}
@@ -2879,12 +2892,12 @@ def ansage_vermerken(jetzt=None) -> None:
 # Hand hier, wie schon mqtt_behalten_liste(). Das Kennwort des Brokers steht
 # nur im CONNECT-Paket.
 # ---------------------------------------------------------------------------
-ANSAGE_NEUE_MODI = ("chromecast", "alexang", "cc4lox", "sonos4lox")
+ANSAGE_NEUE_MODI = ("chromecast", "alexang", "cc4lox", "sonos4lox", "sonox")
 ANSAGE_NAMEN = {"musicserver": "Loxone Music Server", "ms4h": "MusicServer4Home",
                 "custom": "eigene Vorlage", "audioserver": "Loxone Audioserver (Text)",
                 "chromecast": "Chromecast4lox", "alexang": "Alexa-NG",
                 "cc4lox": "Google-Lautsprecher (Chromecast 4 Lox NG)",
-                "sonos4lox": "Sonos4Lox"}
+                "sonos4lox": "Sonos4Lox", "sonox": "SonoX"}
 CC_SAMMELZIEL = ("alle", "all", "*")
 CC_WARTEN_S = 10.0
 # Nr. 36 b, Stufe 1: Alexa-NG auf dem Webport des LoxBerry wie Chromecast 4 Lox NG
@@ -3373,8 +3386,13 @@ class MqttDauer:
     darf jeder Faden (eine Sperre um den Socket); gelesen wird nur hier.
     """
 
-    def __init__(self, praefix: str) -> None:
+    def __init__(self, praefix: str, voll: bool = True) -> None:
         self.praefix = praefix
+        # Gruppe 20 (0.12.8, E-E3 B): voll = mqtt_dauer_ein. Ohne voll ist es eine reine Leseverbindung fuer die
+        # Kalenderfragen - ohne Letzten Willen, ohne online, ohne Mikrofonzustaende und ansage_ok.
+        self.voll = bool(voll)
+        # monotone Zeit des letzten Verbindens - fuer die Lage "wartet" der Kalenderfragen
+        self.verbunden_mono = time.monotonic()
         self.befehle: "queue.Queue" = queue.Queue(maxsize=50)
         self.verbunden = False
         self.fehler = ""
@@ -3407,7 +3425,8 @@ class MqttDauer:
         DISCONNECT loest den Letzten Willen NICHT aus - deshalb die 0 hier."""
         self._halt.set()
         if self.verbunden:
-            self._veroeffentlichen(self.praefix + "/online", "0", True)
+            if self.voll:
+                self._veroeffentlichen(self.praefix + "/online", "0", True)
             self._roh_senden(b"\xe0\x00")
         self._schliessen()
         if self._faden is not None:
@@ -3423,7 +3442,9 @@ class MqttDauer:
         return self._veroeffentlichen(thema, str(nutzlast), retain)
 
     def wert(self, thema: str) -> dict:
-        """{'ok':1,'nutzlast','alter_s','zurueckbehalten'} oder {'ok':0,'grund'}."""
+        """{'ok':1,'nutzlast','alter_s','zurueckbehalten','geaendert_s','geaendert_ts'} oder {'ok':0,'grund'}.
+        Gruppe 20 (0.12.8): geaendert_s/_ts = seit wann die Nutzlast so ist (erster Empfang nach dem Verbinden
+        zaehlt als Aenderung) - die Frist der Kalenderfragen haengt an der letzten AENDERUNG des Zaehlers."""
         with self._werte_sperre:
             e = self._werte.get(thema)
             abonniert = thema in self._abonniert
@@ -3434,7 +3455,7 @@ class MqttDauer:
         if not self.verbunden and jetzt - self.getrennt_seit > DAUER_WERT_NACH_TRENNUNG_S:
             return {"ok": 0, "grund": "mqtt_alt", "alter_s": int(jetzt - e[1])}
         return {"ok": 1, "nutzlast": e[0], "alter_s": int(jetzt - e[1]),
-                "zurueckbehalten": e[2]}
+                "zurueckbehalten": e[2], "geaendert_s": int(jetzt - e[3]), "geaendert_ts": int(e[4])}
 
     # ---- Faden ----
     def _lauf(self) -> None:
@@ -3492,10 +3513,12 @@ class MqttDauer:
             self.fehler = "keine Verbindung zum Broker %s:%d (%s)" % (z["host"], z["port"],
                                                                        fehlertext(err))
             return "fehler"
-        # saubere Sitzung, Letzter Wille <praefix>/online = 0, QoS 0, retain
-        flags = 0x02 | 0x04 | 0x20
+        # saubere Sitzung, Letzter Wille <praefix>/online = 0, QoS 0, retain - der Letzte Wille nur bei der vollen
+        # Verbindung (Gruppe 20, E-E3 B: die Leseverbindung der Kalenderfragen setzt nichts am Broker).
+        flags = 0x02 | ((0x04 | 0x20) if self.voll else 0)
         nutz = _mqtt_zk(mqtt_kennung("spdauer"))
-        nutz += _mqtt_zk(self.praefix + "/online") + _mqtt_zk("0")
+        if self.voll:
+            nutz += _mqtt_zk(self.praefix + "/online") + _mqtt_zk("0")
         if z["user"]:
             flags |= 0x80
             nutz += _mqtt_zk(z["user"])
@@ -3535,12 +3558,14 @@ class MqttDauer:
             self._abonniert = set()
         self.verbunden = True
         self.verbunden_seit = int(time.time())
+        self.verbunden_mono = time.monotonic()
         self.fehler = ""
         _LOG.info("MQTT: dauerhafte Verbindung zum Broker %s:%d steht.", z["host"], z["port"])
         # Erst abonnieren, dann online=1: wer auf online=1 hin einen Befehl
         # schickt, soll ihn nicht vor dem Abonnement verlieren.
         self._abos_abgleichen()
-        self._veroeffentlichen(self.praefix + "/online", "1", True)
+        if self.voll:
+            self._veroeffentlichen(self.praefix + "/online", "1", True)
         zuletzt_gelesen = time.monotonic()
         ping_offen = False
         lief = "lief"
@@ -3639,8 +3664,16 @@ class MqttDauer:
             return
         with self._werte_sperre:
             if thema in self._abonniert:
-                self._werte[thema] = (nutzlast[:DAUER_NUTZLAST_MAX].decode("utf-8", "replace"),
-                                      time.monotonic(), zurueck)
+                text = nutzlast[:DAUER_NUTZLAST_MAX].decode("utf-8", "replace")
+                jetzt = time.monotonic()
+                alt = self._werte.get(thema)
+                # Gruppe 20 (0.12.8): Zeitpunkt der letzten AENDERUNG (monoton und Wanduhr) - gleiche Nutzlast
+                # behaelt ihn; _werte wird beim Verbinden geleert, der erste Empfang zaehlt als Aenderung.
+                if alt is not None and alt[0] == text:
+                    seit, seit_wand = alt[3], alt[4]
+                else:
+                    seit, seit_wand = jetzt, time.time()
+                self._werte[thema] = (text, jetzt, zurueck, seit, seit_wand)
 
 
 def _mqtt_pakete(puffer: bytes) -> tuple:
@@ -3685,9 +3718,10 @@ def dauer_themen(v) -> list:
 
 def dauer_senden(paare: dict, cfg: dict | None = None) -> None:
     """Fluechtig ueber die dauerhafte Verbindung - nur, wenn sie steht.
-    Ohne mqtt_dauer_ein gibt es sie nicht, und es geschieht nichts."""
+    Ohne mqtt_dauer_ein gibt es sie nicht (oder nur als Leseverbindung der Kalenderfragen), und es geschieht
+    nichts."""
     d = _DAUER
-    if d is None or not d.verbunden:
+    if d is None or not d.verbunden or not d.voll:
         return
     for k, w in paare.items():
         thema = "%s/%s" % (d.praefix, k)
@@ -3716,9 +3750,10 @@ def mikro_zustand_mqtt(m) -> str:
 
 def mikro_zustaende_senden() -> int:
     """Geaenderte Mikrofonzustaende veroeffentlichen. Aus der Ereignisschleife
-    (dort aendern sich SATELLITEN und ESPHOME). Rueckgabe: wie viele."""
+    (dort aendern sich SATELLITEN und ESPHOME). Rueckgabe: wie viele. Nur ueber die volle Verbindung
+    (Gruppe 20, E-E3 B)."""
     d = _DAUER
-    if d is None or not d.verbunden:
+    if d is None or not d.verbunden or not d.voll:
         return 0
     n = 0
     jetzt = {}
@@ -3738,17 +3773,24 @@ def dauer_abgleichen(cfg: dict, v) -> None:
     """Die dauerhafte Verbindung nach der Einstellung starten, anhalten oder
     (anderes Praefix) neu aufbauen und die Wertthemen nachfuehren."""
     global _DAUER
-    soll = bool(cfg.get("mqtt_dauer_ein"))
+    # Gruppe 20 (0.12.8): auch kalender_fragen_ein schaltet die Verbindung ein (Entscheidung 1) - ohne
+    # mqtt_dauer_ein aber nur als Leseverbindung (voll=False, E-E3 B). Wechselt voll, wird neu aufgebaut wie bei
+    # anderem Praefix.
+    voll = bool(cfg.get("mqtt_dauer_ein"))
+    kalender = bool(cfg.get("kalender_fragen_ein"))
+    soll = voll or kalender
     praefix = praefix_von(cfg)
-    if _DAUER is not None and (not soll or _DAUER.praefix != praefix):
+    if _DAUER is not None and (not soll or _DAUER.praefix != praefix or _DAUER.voll != voll):
         _DAUER.anhalten()
         _DAUER = None
     if soll and _DAUER is None:
-        _DAUER = MqttDauer(praefix)
+        _DAUER = MqttDauer(praefix, voll)
         _DAUER.starten()
     if _DAUER is not None:
-        _DAUER.themen_setzen(dauer_themen(v))
-        cmd = bool(cfg.get("befehle_cmd_ein"))
+        _DAUER.themen_setzen((dauer_themen(v) if voll else []) + (list(KALENDER_THEMEN) if kalender else []))
+        # N1 (Gruppe 20): der alte Befehlsweg nur mit befehle_cmd_ein UND mqtt_dauer_ein - sonst ginge er mit dem
+        # Kalender-Haken ohne Quittung auf.
+        cmd = bool(cfg.get("befehle_cmd_ein")) and voll
         if cmd != _DAUER.cmd_ein:
             _DAUER.cmd_ein = cmd
             _LOG.info("Alter Befehlsweg %s/cmd/... %s (befehle_cmd_ein).", _DAUER.praefix,
@@ -3764,6 +3806,218 @@ def sonos_lage(tts: dict) -> tuple:
     laut = tts.get("sonos_laut")
     return True, ("Sonos4Lox, Zone %r, Lautstaerke %s (ohne Ansage nicht weiter pruefbar)."
                   % (zone, laut if isinstance(laut, int) and laut > 0 else "unveraendert"))
+
+
+def sonox_lage(tts: dict) -> tuple:
+    """Gruppe 20 (0.12.8): wie sonos_lage() - geprueft wird nur die Einstellung; die Raumliste (/zones) fragt der
+    Reiter Test bei offenem Reiter, gesprochen wird dabei nie."""
+    raum = str(tts.get("sonox_raum") or "")
+    if not raum:
+        return False, "SonoX: " + kennung_text("SONOX_KEIN_RAUM")
+    laut = tts.get("sonox_laut")
+    return True, ("SonoX, Raum %r, Sprache %s, Lautstaerke %s (ohne Ansage nicht weiter pruefbar; die Raumliste "
+                  "prueft der Reiter Test)." % (raum, tts.get("sonox_sprache") or "de",
+                                                laut if isinstance(laut, int) and laut > 0 else "40 (Vorgabe von SonoX)"))
+
+
+# ---------------------------------------------------------------------------
+# Gruppe 20 (0.12.8, V3): Kalenderfragen - Abnehmer von haus/kalender/* (Regeln/07 Nr. 15; Anbieter Ferien und
+# Feiertage ab 1.2.28). Ab Werk aus (kalender_fragen_ein). Gelesen werden NUR neun Themen - nie ruhetag, nie urlaub,
+# nie Namen. Die Werte gelten nur, solange sich haus/kalender/zaehler binnen KALENDER_FRIST_S aendert (das
+# Lebenszeichen des Anbieters, fluechtig) und haus/kalender/datum heute ist (JJJJMMTT, Ortszeit des Dienstes).
+# Lagen: getrennt (keine Verbindung) | wartet (Zaehler seit dem Verbinden noch nicht gesehen, Verbindung juenger als
+# die Frist - er kommt erst mit dem naechsten Minutenlauf, E-E6) | schweigt (Zaehler fehlt laenger, kam
+# zurueckbehalten oder aendert sich nicht mehr) | veraltet (datum fehlt oder ist nicht heute) | frisch.
+# Gelesen wird ueber die Leseverbindung (MqttDauer mit voll=False, E-E3 B): ohne Letzten Willen, ohne online, ohne
+# Mikrofonzustaende und ansage_ok; mit mqtt_dauer_ein ist es die volle Dauerverbindung plus diese Themen.
+# ---------------------------------------------------------------------------
+KALENDER_FRIST_S = 120
+KALENDER_THEMEN = ("haus/kalender/datum", "haus/kalender/heute/frei", "haus/kalender/heute/feiertag",
+                   "haus/kalender/morgen/frei", "haus/kalender/morgen/feiertag", "haus/kalender/ferien_in",
+                   "haus/kalender/ferien_rest", "haus/kalender/feiertag_in", "haus/kalender/zaehler")
+# Welche Werte eine Frage braucht (sparsam: nie ruhetag, nie urlaub).
+KALENDER_BRAUCHT = {
+    "heute_frei": ("heute/frei", "heute/feiertag"), "morgen_frei": ("morgen/frei", "morgen/feiertag"),
+    "heute_feiertag": ("heute/feiertag",), "morgen_feiertag": ("morgen/feiertag",),
+    "naechste_ferien": ("ferien_in", "ferien_rest"), "ferien_rest": ("ferien_in", "ferien_rest"),
+    "naechster_feiertag": ("feiertag_in", "heute/feiertag"),
+}
+# "Ohne Aussage" (Anbieter ohne Daten: ALLE Quellwerte -1) - ferien_in = -1 und feiertag_in = -1 heissen aber auch
+# "keine bekannt". Deshalb zeigt ein Kennwert die Lage an: ferien_rest (0 = keine laufen, -1 = ohne Aussage) bzw.
+# heute/feiertag; frei/feiertag zeigen sich selbst an.
+KALENDER_MARKER = {"heute_frei": "heute/frei", "morgen_frei": "morgen/frei", "heute_feiertag": "heute/feiertag",
+                   "morgen_feiertag": "morgen/feiertag", "naechste_ferien": "ferien_rest",
+                   "ferien_rest": "ferien_rest", "naechster_feiertag": "heute/feiertag"}
+
+
+def _kalender_ganz(roh, unten: int, oben: int):
+    """Eine ganze Zahl im Bereich oder None (dann zaehlt der Wert wie fehlend - nie geraten)."""
+    t = str(roh if roh is not None else "").strip()
+    if not re.fullmatch(r"-?[0-9]{1,4}", t):
+        return None
+    z = int(t)
+    return z if unten <= z <= oben else None
+
+
+def kalender_lage(d=None, heute: str | None = None) -> dict:
+    """Die Lage der Kalenderdaten: {'lage', 'werte', 'datum', 'zaehler_ts', 'grund'}. werte nur bei 'frisch'
+    (ganze Zahlen oder None je Thema, Schluessel ohne haus/kalender/). zaehler_ts = Wanduhr der letzten Aenderung
+    des Zaehlers (0 = seit dem Verbinden keine) - fuer die Anzeige; die Frist rechnet monoton."""
+    d = _DAUER if d is None else d
+    aus = {"lage": "getrennt", "werte": {}, "datum": "", "zaehler_ts": 0, "grund": ""}
+    if d is None or not d.verbunden:
+        aus["grund"] = "" if d is None else str(d.fehler or "")[:200]
+        return aus
+    z = d.wert("haus/kalender/zaehler")
+    dw = d.wert("haus/kalender/datum")
+    if dw.get("ok"):
+        aus["datum"] = str(dw.get("nutzlast") or "").strip()[:16]
+    if z.get("ok") and not z.get("zurueckbehalten"):
+        aus["zaehler_ts"] = int(z.get("geaendert_ts") or 0)
+    if not z.get("ok") or z.get("zurueckbehalten"):
+        # Nach dem (Neu)Verbinden kommt der Zaehler erst mit dem naechsten Minutenlauf; ein zurueckbehaltener
+        # (falsch gesetzter Altwert) zaehlt nie.
+        aus["lage"] = "wartet" if (time.monotonic() - d.verbunden_mono) < KALENDER_FRIST_S else "schweigt"
+        return aus
+    if int(z.get("geaendert_s", 10 ** 6)) > KALENDER_FRIST_S:
+        aus["lage"] = "schweigt"
+        return aus
+    heute = heute or time.strftime("%Y%m%d")
+    if not dw.get("ok") or aus["datum"] != heute:
+        aus["lage"] = "veraltet"
+        return aus
+    werte = {}
+    for t in KALENDER_THEMEN[1:-1]:
+        w = d.wert(t)
+        kurz = t[len("haus/kalender/"):]
+        grenze = (-1, 1) if "/" in kurz else (-1, 999)
+        werte[kurz] = _kalender_ganz(w.get("nutzlast"), *grenze) if w.get("ok") else None
+    aus["lage"] = "frisch"
+    aus["werte"] = werte
+    return aus
+
+
+def kalender_antwort(aktion: str, frage_schule, lage: str, werte: dict, cfg: dict) -> tuple:
+    """(grund, antwort) - nur aus Zahlen, nie Namen. grund beginnt IMMER mit 'kalender' (Musterprojekt
+    Befehle #14: V3 := kalender). 1 Tag heisst "morgen", 0 "heute"; Zahlen ueber zahlwort()."""
+    if lage == "wartet":
+        return "kalender_wartet", sagen(cfg, "kal_wartet")
+    if lage == "getrennt":
+        return "kalender_getrennt", sagen(cfg, "kal_getrennt")
+    if lage in ("schweigt", "veraltet"):
+        return "kalender_" + lage, sagen(cfg, "kal_schweigt")
+    braucht = KALENDER_BRAUCHT.get(aktion)
+    if braucht is None:
+        return "kalender_unbekannt", sagen(cfg, "nicht_verstanden")
+    if any(werte.get(b) is None for b in braucht) or werte.get(KALENDER_MARKER[aktion]) == -1:
+        return "kalender_ohne_aussage", sagen(cfg, "kal_ohne_aussage")
+    if aktion in ("heute_frei", "morgen_frei"):
+        tag = sagen(cfg, "kal_" + aktion.split("_")[0])
+        frei, feiertag = werte[braucht[0]], werte[braucht[1]]
+        if frage_schule:
+            if frei == 1:
+                return "kalender", sagen(cfg, "kal_schule_nein_feiertag" if feiertag == 1 else "kal_schule_nein",
+                                         tag=tag)
+            return "kalender", sagen(cfg, "kal_schule_ja", tag=tag)
+        if frei == 1:
+            return "kalender", sagen(cfg, "kal_frei_feiertag" if feiertag == 1 else "kal_frei_ja", tag=tag)
+        return "kalender", sagen(cfg, "kal_frei_nein", tag=tag)
+    if aktion in ("heute_feiertag", "morgen_feiertag"):
+        tag = sagen(cfg, "kal_" + aktion.split("_")[0])
+        return "kalender", sagen(cfg, "kal_feiertag_ja" if werte[braucht[0]] == 1 else "kal_feiertag_nein", tag=tag)
+    if aktion in ("naechste_ferien", "ferien_rest"):
+        fin, rest = werte["ferien_in"], werte["ferien_rest"]
+        if fin == 0:
+            if rest >= 3:
+                return "kalender", sagen(cfg, "kal_ferien_laufen", n=zahlwort(rest, cfg))
+            if rest == 2:
+                return "kalender", sagen(cfg, "kal_ferien_vorletzter")
+            if rest == 1:
+                return "kalender", sagen(cfg, "kal_ferien_letzter")
+            return "kalender", sagen(cfg, "kal_ferien_gerade")
+        if aktion == "naechste_ferien":
+            if fin == -1:
+                return "kalender", sagen(cfg, "kal_ferien_keine")
+            return "kalender", (sagen(cfg, "kal_ferien_morgen") if fin == 1
+                                else sagen(cfg, "kal_ferien_in", n=zahlwort(fin, cfg)))
+        if fin == -1:
+            return "kalender", sagen(cfg, "kal_rest_keine_unbekannt")
+        return "kalender", (sagen(cfg, "kal_rest_keine_morgen") if fin == 1
+                            else sagen(cfg, "kal_rest_keine", n=zahlwort(fin, cfg)))
+    f = werte["feiertag_in"]
+    if f == -1:
+        return "kalender", sagen(cfg, "kal_feiertag_keiner")
+    if f == 0:
+        return "kalender", sagen(cfg, "kal_feiertag_heute")
+    return "kalender", (sagen(cfg, "kal_feiertag_morgen") if f == 1
+                        else sagen(cfg, "kal_feiertag_in", n=zahlwort(f, cfg)))
+
+
+def kalender_beantworten(erkannt: dict, cfg: dict, trocken: bool, beginn: float) -> dict:
+    """Absicht 'kalender': eine Frage, kein Befehl - nichts geht als Befehl an Loxone, nichts unter haus/, kein
+    Kontext, keine Rueckfrage. ok=1 nur bei einer Antwort aus frischen Werten. Das Protokoll nennt Lage und Grund
+    (gedrosselt je Lage), nie Werte."""
+    aktion = str(erkannt.get("aktion") or "")
+    if not cfg.get("kalender_fragen_ein"):
+        lage = {"lage": "aus", "werte": {}}
+        grund, antwort = "kalender_aus", sagen(cfg, "nicht_verstanden")
+    else:
+        lage = kalender_lage()
+        grund, antwort = kalender_antwort(aktion, erkannt.get("frage_schule"), lage["lage"], lage["werte"], cfg)
+    if grund != "kalender":
+        melde_gebremst("kalender_lage_" + str(lage["lage"]), "Kalenderfrage (%s) ohne Antwort aus frischen Daten: "
+                       "Lage %s, Grund %s." % (aktion, lage["lage"], grund), 900)
+    return _abschluss(_ergebnis(erkannt, cfg, beginn, trocken, ok=1 if grund == "kalender" else 0, grund=grund,
+                                kalender_lage=str(lage["lage"]), antwort=antwort), cfg, trocken)
+
+
+def kalender_abbild(cfg: dict):
+    """Block 'kalender' fuer das Abbild (Reiter Test) - nur mit dem Haken. KEIN Alter in Sekunden (N2): es stuende
+    im Fingerabdruck und erzwaenge einen Schreibvorgang je Sekunde; das Alter rechnet die Oberflaeche aus
+    zaehler_ts."""
+    if not cfg.get("kalender_fragen_ein"):
+        return None
+    k = kalender_lage()
+    w = k["werte"]
+    return {"lage": k["lage"], "datum": k["datum"], "zaehler_ts": k["zaehler_ts"],
+            "grund": k["grund"] if k["lage"] == "getrennt" else "",
+            "heute_frei": w.get("heute/frei"), "morgen_frei": w.get("morgen/frei"),
+            "ferien_in": w.get("ferien_in"), "feiertag_in": w.get("feiertag_in")}
+
+
+# Feste Faelle fuer den Selbsttest (Entwurf 2.3, probe_kalender A1-A22 sinngemaess): (aktion, frage_schule, werte,
+# erwarteter Grund, erwarteter Schluessel der Antwort).
+_KAL_W = {"heute/frei": 0, "heute/feiertag": 0, "morgen/frei": 0, "morgen/feiertag": 0,
+          "ferien_in": 5, "ferien_rest": 0, "feiertag_in": 8}
+KALENDER_SELBSTFAELLE = (
+    ("morgen_frei", 0, {}, "kalender", "kal_frei_nein"),
+    ("morgen_frei", 0, {"morgen/frei": 1, "morgen/feiertag": 1}, "kalender", "kal_frei_feiertag"),
+    ("heute_frei", 0, {"heute/frei": 1}, "kalender", "kal_frei_ja"),
+    ("morgen_frei", 1, {}, "kalender", "kal_schule_ja"),
+    ("morgen_frei", 1, {"morgen/frei": 1}, "kalender", "kal_schule_nein"),
+    ("morgen_frei", 1, {"morgen/frei": 1, "morgen/feiertag": 1}, "kalender", "kal_schule_nein_feiertag"),
+    ("heute_feiertag", 0, {"heute/feiertag": 1}, "kalender", "kal_feiertag_ja"),
+    ("morgen_feiertag", 0, {}, "kalender", "kal_feiertag_nein"),
+    ("naechste_ferien", 0, {}, "kalender", "kal_ferien_in"),
+    ("naechste_ferien", 0, {"ferien_in": 1}, "kalender", "kal_ferien_morgen"),
+    ("naechste_ferien", 0, {"ferien_in": 0, "ferien_rest": 16}, "kalender", "kal_ferien_laufen"),
+    ("ferien_rest", 0, {"ferien_in": 0, "ferien_rest": 2}, "kalender", "kal_ferien_vorletzter"),
+    ("ferien_rest", 0, {"ferien_in": 0, "ferien_rest": 1}, "kalender", "kal_ferien_letzter"),
+    ("naechste_ferien", 0, {"ferien_in": -1}, "kalender", "kal_ferien_keine"),
+    ("ferien_rest", 0, {}, "kalender", "kal_rest_keine"),
+    ("ferien_rest", 0, {"ferien_in": 1}, "kalender", "kal_rest_keine_morgen"),
+    ("ferien_rest", 0, {"ferien_in": -1}, "kalender", "kal_rest_keine_unbekannt"),
+    ("naechster_feiertag", 0, {}, "kalender", "kal_feiertag_in"),
+    ("naechster_feiertag", 0, {"feiertag_in": 1}, "kalender", "kal_feiertag_morgen"),
+    ("naechster_feiertag", 0, {"feiertag_in": 0, "heute/feiertag": 1}, "kalender", "kal_feiertag_heute"),
+    ("naechster_feiertag", 0, {"feiertag_in": -1}, "kalender", "kal_feiertag_keiner"),
+    ("naechste_ferien", 0, {"ferien_in": -1, "ferien_rest": -1}, "kalender_ohne_aussage", "kal_ohne_aussage"),
+    ("naechster_feiertag", 0, {"feiertag_in": -1, "heute/feiertag": -1}, "kalender_ohne_aussage", "kal_ohne_aussage"),
+    ("morgen_frei", 0, {"morgen/frei": -1}, "kalender_ohne_aussage", "kal_ohne_aussage"),
+    ("morgen_frei", 0, {"morgen/frei": None}, "kalender_ohne_aussage", "kal_ohne_aussage"),
+)
+KALENDER_MUSTERFRAGEN = ("ist morgen schulfrei", "ist heute ein feiertag", "wann sind die naechsten ferien",
+                         "wie lange dauern die ferien noch", "wann ist der naechste feiertag", "is there school tomorrow")
 
 
 def alexa_token_ok(token) -> bool:
@@ -3845,6 +4099,19 @@ KENNUNG_SAETZE = {
     "SONOS_FEHLT": "Sonos4Lox fehlt oder ist zu alt (%s antwortet mit HTTP %s).",
     "SONOS_ZEIT_UNKLAR": "Sonos4Lox (%s) hat binnen %s s nicht geantwortet. Es antwortet erst "
                          "nach dem Ende der Wiedergabe - ob gesprochen wurde, ist unklar.",
+    # Gruppe 20 (0.12.8): SonoX (Sprachausgabe 1.1.4; Wortlaut nach sprachausgabe_texte.json, ohne Ansagetext)
+    "TTS_SONOX_RAUM": "Der Sonos-Raum fuer SonoX ist unbrauchbar (Steuerzeichen, zu lang oder nur Punkte).",
+    "TTS_SONOX_SPRACHE": "Die Sprache fuer SonoX ist unbrauchbar (zwei kleine Buchstaben, wahlweise mit Land).",
+    "SONOX_KEIN_RAUM": "Fuer SonoX ist kein Raum eingestellt; es wurde nichts gesendet.",
+    "SONOX_FEHLT": "SonoX ist auf diesem LoxBerry nicht installiert (kein Eintrag in der Plugin-Datenbank).",
+    "SONOX_DIENST_AUS": "Der Dienst von SonoX (%s) nimmt keine Verbindung an - laeuft sonos-http-api?",
+    "SONOX_RAUM_UNBEKANNT": "SonoX kennt den eingestellten Raum nicht.",
+    "SONOX_KEINE_ANLAGE": "SonoX hat noch keine Sonos-Anlage gefunden.",
+    "SONOX_FEHLER": "SonoX hat die Ansage abgelehnt (HTTP %s), z. B. weil die Sprache nicht erzeugt "
+                    "werden konnte.",
+    "SONOX_UNERWARTET": "SonoX antwortete mit HTTP %s, aber ohne Erfolgsmeldung.",
+    "SONOX_ZEIT_UNKLAR": "SonoX (%s) hat binnen %s s nicht geantwortet. Es antwortet erst nach dem Ende der "
+                         "Wiedergabe - ob gesprochen wurde, ist unklar.",
     "HTTP_OHNE_ANTWORT": "Keine Antwort (Verbindung ohne Antwort beendet).",
     "HTTP_NETZ": "Netzfehler (curl %s).",
     "HTTP_ZUGANG": "Zugang abgewiesen (HTTP %s).",
@@ -4105,9 +4372,9 @@ def google_ansagen(cfg: dict, tts: dict, text: str, dringend: bool = False) -> d
 # ZEITGRENZE: Sonos4Lox antwortet erst, wenn die Ansage zu Ende GESPIELT ist
 # (say wartet die Wiedergabe ab). Ein Zeitablauf heisst dort nicht "nicht
 # gesprochen", sondern "Ausgang unklar" (SONOS_ZEIT_UNKLAR). Die Bruecke
-# begrenzt den Abruf heute selbst auf ANSAGE_TMO (10 s, sp_ansage.php und
-# sprachausgabe.php - nicht Teil dieses Dienstes); laengere Ansagen enden dort
-# also als SONOS_ZEIT_UNKLAR. Der Dienst wartet grosszuegiger (SONOS_ZEIT_S
+# begrenzt den Abruf selbst auf ANSAGE_TMO_SONOS (30 s, sprachausgabe.php -
+# berichtigt in 0.12.8, N8: bis 0.12.7 stand hier ANSAGE_TMO 10 s); laengere
+# Ansagen enden dort also als SONOS_ZEIT_UNKLAR. Der Dienst wartet grosszuegiger (SONOS_ZEIT_S
 # plus 10 s fuer den PHP-Start), damit er die Bruecke NIE vor ihrem eigenen
 # Urteil abschiesst und eine spaeter laengere Grenze der Bruecke ohne
 # Aenderung hier traegt. 30 s decken auch eine lange Ansage mit Gong ab.
@@ -4173,6 +4440,68 @@ def sonos_ansagen(cfg: dict, tts: dict, text: str, dringend: bool = False) -> di
             "meldung": "Sonos4Lox: HTTP %d - %s" % (code, satz)}
 
 
+# ---------------------------------------------------------------------------
+# Gruppe 20 (0.12.8, Pflegewelle 22): SonoX (Plugin norman-albusberger/sonox, node-sonos-http-api auf diesem
+# LoxBerry) ueber die Bruecke, Auftrag {"art": "sonox", "raum", "laut", "sprache", "text"}; die Bruecke ruft
+# ansage_sprechen() der gemeinsamen Sprachausgabe 1.1.4 (Zeitgrenze ANSAGE_TMO_SONOX 30 s dort) und antwortet mit
+# {"code", "grund_id", "stand"}. Wie Sonos4Lox antwortet SonoX erst nach der Wiedergabe: ein Zeitablauf heisst
+# "Ausgang unklar" (SONOX_ZEIT_UNKLAR) - kein Rueckfall, damit die Ansage nicht doppelt kommt. Kein Gong,
+# "dringend" wird nicht gesendet; eine zweite Ansage an denselben Raum schneidet die erste ab. Datenschutz: SonoX
+# erzeugt die Sprache ab Werk ueber Google (translate.google.com) - der Hinweis steht im Formular.
+# ---------------------------------------------------------------------------
+SONOX_ZEIT_S = 30.0
+
+
+def sonox_ansagen(cfg: dict, tts: dict, text: str) -> dict:
+    """Die Ansage an SonoX geben. ok=1 bei stand 1 und bei unklarem Ausgang (dann zusaetzlich unklar=1)."""
+    raum = str(tts.get("sonox_raum") or "")
+    if not raum:
+        return {"ok": 0, "grund": "sonox_einstellung",
+                "meldung": "SonoX: " + kennung_text("SONOX_KEIN_RAUM")}
+    text = str(text or "").strip()
+    if text == "":
+        return {"ok": 0, "grund": "leer", "meldung": "Ansage ohne Text."}
+    try:
+        laut = int(tts.get("sonox_laut"))
+    except (TypeError, ValueError):
+        laut = -1
+    if not 1 <= laut <= 100:
+        laut = -1
+    sprache = str(tts.get("sonox_sprache") or "de")
+    auftrag = {"art": "sonox", "raum": raum, "laut": laut, "sprache": sprache, "text": text,
+               "tmo": SONOX_ZEIT_S}
+    # Der Mitschnitt nennt Raum, Lautstaerke, Sprache und Laenge - nie den Text.
+    mitschnitt(cfg, "SONOX>", "raum=%s laut=%s sprache=%s text=%d Zeichen"
+               % (raum, laut if laut > 0 else "-", sprache, len(text)))
+    erg, fehler = _bruecke(auftrag, SONOX_ZEIT_S)
+    if erg is None:
+        mitschnitt(cfg, "SONOX<", fehler)
+        if fehler == BRUECKE_ZEITTEXT:
+            return {"ok": 1, "grund": "sonox_unklar", "unklar": 1,
+                    "meldung": "SonoX: binnen %d s keine Antwort der Bruecke - ob gesprochen wurde, ist "
+                               "unklar. Kein Rueckfall, damit die Ansage nicht doppelt kommt." % int(SONOX_ZEIT_S + 10)}
+        return {"ok": 0, "grund": "sonox_fehlt", "meldung": "SonoX: " + fehler}
+    try:
+        stand = int(erg.get("stand") or 0)
+        code = int(erg.get("code") or 0)
+    except (TypeError, ValueError):
+        stand, code = 0, 0
+    gid = str(erg.get("grund_id") or "")
+    mitschnitt(cfg, "SONOX<", "HTTP %d stand=%d %s" % (code, stand, gid))
+    if stand == 1:
+        return {"ok": 1, "grund": "sonox", "meldung": "SonoX: gesendet - HTTP %d." % code}
+    if stand == -1 or gid.startswith("SONOX_ZEIT_UNKLAR"):
+        return {"ok": 1, "grund": "sonox_unklar", "unklar": 1,
+                "meldung": "SonoX: " + (kennung_text(gid) or "Ausgang unklar.")
+                           + " Kein Rueckfall, damit die Ansage nicht doppelt kommt."}
+    satz = kennung_text(gid) or _grund_text(gid)
+    if gid.startswith("SONOX_FEHLT") or code == 404:
+        return {"ok": 0, "grund": "sonox_fehlt", "meldung": "SonoX: " + satz}
+    if gid.startswith("EINSTELLUNG") or gid.startswith("SONOX_KEIN_RAUM") or gid.startswith("TTS_SONOX"):
+        return {"ok": 0, "grund": "sonox_einstellung", "meldung": "SonoX: " + satz}
+    return {"ok": 0, "grund": "sonox_fehler", "meldung": "SonoX: HTTP %d - %s" % (code, satz)}
+
+
 def google_lage(tts: dict) -> tuple:
     """Fuer Selbsttest und Reiter Test: selftest=1 prueft nur das Token, loest
     nichts aus. SPRECHEN=0/DIENST=0 machen die Zeile rot - mit ihnen kaeme
@@ -4200,7 +4529,7 @@ def ansage_unklar(erg) -> bool:
     """Gesendet, aber ohne Beleg, dass gesprochen wurde (Sonos4Lox nach einem
     Zeitablauf, Chromecast4lox bei schon sprechendem Lautsprecher)."""
     return isinstance(erg, dict) and bool(erg.get("unklar")
-                                          or erg.get("grund") in ("cc_unklar", "sonos_unklar"))
+                                          or erg.get("grund") in ("cc_unklar", "sonos_unklar", "sonox_unklar"))
 
 
 def ausgabe_vermerken(modus: str, erg: dict) -> None:
@@ -4368,6 +4697,9 @@ def _loxone_ansagen_kern(cfg: dict, text: str, zonen: str = "", art: str = "ansa
             erg = google_ansagen(cfg, tts, text, dringend)
         elif modus == "sonos4lox":
             erg = sonos_ansagen(cfg, tts, text, dringend)
+        elif modus == "sonox":
+            # SonoX kennt keine Dringlichkeit und keinen Gong (Gruppe 20).
+            erg = sonox_ansagen(cfg, tts, text)
         else:
             erg = alexa_ansagen(cfg, tts, text, dringend)
         ausgabe_vermerken(modus, erg)
@@ -4587,6 +4919,35 @@ SPRECHTEXTE = {
         "prozent": "Prozent",
         "zahlwoerter": ("kein", "ein", "zwei", "drei", "vier", "fünf", "sechs", "sieben",
                         "acht", "neun", "zehn", "elf", "zwölf"),
+        # Gruppe 20 (0.12.8): Kalenderfragen - nur aus Zahlen, nie Namen; "frei" heisst immer schulfrei.
+        "kal_frei_feiertag": "Ja, {tag} ist ein Feiertag, also schulfrei.",
+        "kal_frei_ja": "Ja, {tag} ist schulfrei.",
+        "kal_frei_nein": "Nein, {tag} ist Schule.",
+        "kal_schule_ja": "Ja, {tag} ist Schule.",
+        "kal_schule_nein": "Nein, {tag} ist schulfrei.",
+        "kal_schule_nein_feiertag": "Nein, {tag} ist ein Feiertag, also schulfrei.",
+        "kal_feiertag_ja": "Ja, {tag} ist ein Feiertag.",
+        "kal_feiertag_nein": "Nein, {tag} ist kein Feiertag.",
+        "kal_ferien_in": "Die nächsten Ferien beginnen in {n} Tagen.",
+        "kal_ferien_morgen": "Die Ferien beginnen morgen.",
+        "kal_ferien_laufen": "Es sind gerade Ferien, noch {n} Tage, heute mitgezählt.",
+        "kal_ferien_vorletzter": "Es sind gerade Ferien, morgen ist der letzte Ferientag.",
+        "kal_ferien_letzter": "Heute ist der letzte Ferientag.",
+        "kal_ferien_gerade": "Es sind gerade Ferien.",
+        "kal_ferien_keine": "Mir sind keine weiteren Ferien bekannt.",
+        "kal_rest_keine": "Gerade sind keine Ferien. Die nächsten beginnen in {n} Tagen.",
+        "kal_rest_keine_morgen": "Gerade sind keine Ferien. Sie beginnen morgen.",
+        "kal_rest_keine_unbekannt": "Gerade sind keine Ferien, und mir sind keine weiteren bekannt.",
+        "kal_feiertag_in": "Der nächste Feiertag ist in {n} Tagen.",
+        "kal_feiertag_morgen": "Morgen ist ein Feiertag.",
+        "kal_feiertag_heute": "Heute ist ein Feiertag.",
+        "kal_feiertag_keiner": "Mir ist kein weiterer Feiertag bekannt.",
+        "kal_ohne_aussage": "Dazu habe ich gerade keine gültigen Kalenderdaten.",
+        "kal_schweigt": "Dazu habe ich gerade keine Kalenderdaten, das Ferien-Plugin meldet sich nicht.",
+        "kal_wartet": "Die Kalenderdaten kommen gleich. Frag bitte in einer Minute noch einmal.",
+        "kal_getrennt": "Dazu habe ich gerade keine Kalenderdaten, die Verbindung zum MQTT-Broker steht nicht.",
+        "kal_heute": "heute",
+        "kal_morgen": "morgen",
     },
     "en": {
         "nicht_verstanden": "Sorry, I didn't understand that.",
@@ -4649,6 +5010,35 @@ SPRECHTEXTE = {
         "prozent": "percent",
         "zahlwoerter": ("no", "one", "two", "three", "four", "five", "six", "seven",
                         "eight", "nine", "ten", "eleven", "twelve"),
+        # Gruppe 20 (0.12.8): calendar questions - numbers only, never names.
+        "kal_frei_feiertag": "Yes, {tag} is a public holiday, so there is no school.",
+        "kal_frei_ja": "Yes, there is no school {tag}.",
+        "kal_frei_nein": "No, there is school {tag}.",
+        "kal_schule_ja": "Yes, there is school {tag}.",
+        "kal_schule_nein": "No, there is no school {tag}.",
+        "kal_schule_nein_feiertag": "No, {tag} is a public holiday, so there is no school.",
+        "kal_feiertag_ja": "Yes, {tag} is a public holiday.",
+        "kal_feiertag_nein": "No, {tag} is not a public holiday.",
+        "kal_ferien_in": "The next school holidays start in {n} days.",
+        "kal_ferien_morgen": "The school holidays start tomorrow.",
+        "kal_ferien_laufen": "It is the school holidays, {n} more days including today.",
+        "kal_ferien_vorletzter": "It is the school holidays, tomorrow is the last day.",
+        "kal_ferien_letzter": "Today is the last day of the school holidays.",
+        "kal_ferien_gerade": "It is the school holidays.",
+        "kal_ferien_keine": "I don't know of any further school holidays.",
+        "kal_rest_keine": "It is not the school holidays. The next ones start in {n} days.",
+        "kal_rest_keine_morgen": "It is not the school holidays. They start tomorrow.",
+        "kal_rest_keine_unbekannt": "It is not the school holidays, and I don't know of any further ones.",
+        "kal_feiertag_in": "The next public holiday is in {n} days.",
+        "kal_feiertag_morgen": "Tomorrow is a public holiday.",
+        "kal_feiertag_heute": "Today is a public holiday.",
+        "kal_feiertag_keiner": "I don't know of any further public holiday.",
+        "kal_ohne_aussage": "I don't have valid calendar data for that right now.",
+        "kal_schweigt": "I don't have calendar data right now, the holidays plugin is not responding.",
+        "kal_wartet": "The calendar data is on its way. Please ask again in a minute.",
+        "kal_getrennt": "I don't have calendar data right now, the connection to the MQTT broker is down.",
+        "kal_heute": "today",
+        "kal_morgen": "tomorrow",
     },
 }
 
@@ -5136,7 +5526,9 @@ def satz_kern(satz: str, cfg: dict, v, mikrofon: str = "", raum: str = "",
     # Eingebaute Regeln (verstehen.EINGEBAUTE_REGELN): Timer, Erinnerungen und
     # relative Befehle immer, die Musik nur mit musik_steuern=1 - ohne den
     # Schalter bleibt "mach lauter" so unverstanden wie bisher.
-    eingebaut = tuple(EINGEBAUT_VORGABE) + (("musik",) if cfg.get("musik_steuern") else ())
+    # Gruppe 20 (0.12.8): die Kalenderfragen nur mit kalender_fragen_ein (wie die Musik mit musik_steuern).
+    eingebaut = (tuple(EINGEBAUT_VORGABE) + (("musik",) if cfg.get("musik_steuern") else ())
+                 + (("kalender",) if cfg.get("kalender_fragen_ein") else ()))
     erkannt = (_erkennen(v, satz, vorgabe, eingebaut) if v is not None
                else {"ok": 0, "grund": "keine_regeln"})
     quelle = "muster"
@@ -5222,6 +5614,8 @@ def _ausfuehren_mit(erkannt: dict, cfg: dict, beginn: float, trocken: bool, v) -
         return timer_verwalten(erkannt, cfg, trocken, beginn)
     if absicht == "musik":
         return musik_ausfuehren(erkannt, cfg, trocken, beginn)
+    if absicht == "kalender":
+        return kalender_beantworten(erkannt, cfg, trocken, beginn)
     if absicht == "relativ":
         aufgeloest = relativ_aufloesen(erkannt, cfg, v, beginn, trocken)
         if aufgeloest.get("_fertig"):
@@ -5277,7 +5671,8 @@ def _mehrteilig(satz, cfg, v, vorgabe, eingebaut, grunddaten, mikrofon, zone, sc
     erkannte = []
     for teil in teile:
         e = _erkennen(v, teil, vorgabe, eingebaut)
-        if not e.get("ok") or e.get("bestaetigen") or str(e.get("absicht") or "") == "timer" \
+        # Gruppe 20 (0.12.8, E-E12): eine Kalenderfrage ist kein Befehl - wie die Timer-Verwaltung nicht zerlegen.
+        if not e.get("ok") or e.get("bestaetigen") or str(e.get("absicht") or "") in ("timer", "kalender") \
                 or _dauer_fehler(e, cfg) is not None:
             return None
         erkannte.append(dict(e, quelle="muster", mikrofon=mikrofon, zone=zone,
@@ -8139,14 +8534,19 @@ def abbild_schreiben(cfg: dict, sats: dict | None = None) -> dict:
     # Fuer den Reiter Test: Zustand der Dauerverbindung und das Ergebnis der
     # letzten zusaetzlichen Ansage (ok -1 = gesendet, Ausgang unklar). Die
     # Feldnamen liest webfrontend/htmlauth/sp_test.php.
-    if cfg.get("mqtt_dauer_ein"):
+    # Gruppe 20 (0.12.8, N2): der Block auch mit den Kalenderfragen (Leseverbindung); dazu der Block kalender.
+    if cfg.get("mqtt_dauer_ein") or cfg.get("kalender_fragen_ein"):
         d = _DAUER
         daten["mqtt_dauer"] = {
             "verbunden": 1 if (d is not None and d.verbunden) else 0,
             "seit": int(d.verbunden_seit) if (d is not None and d.verbunden) else 0,
             "grund": "" if d is None else str(d.fehler or "")[:200],
             # Gruppe 11 (0.12.7): wann zuletzt etwas auf dem alten Weg <praefix>/cmd/... kam (0 = nie).
-            "cmd_zuletzt": int(getattr(d, "cmd_zuletzt", 0) or 0) if d is not None else 0}
+            "cmd_zuletzt": int(getattr(d, "cmd_zuletzt", 0) or 0) if d is not None else 0,
+            "voll": 1 if (d is not None and d.voll) else 0}
+    kal = kalender_abbild(cfg)
+    if kal is not None:
+        daten["kalender"] = kal
     letzte = json_lesen(DATEI_AUSGABE)
     if letzte.get("ts"):
         daten["letzte_ansage"] = {
@@ -8212,7 +8612,7 @@ def herzschlag(cfg: dict, abbild: dict) -> None:
         "ruhe": abbild["ruhe"],
         "letzter_satz_alter": abbild["letzter_satz_alter"],
     }
-    if _DAUER is not None and _DAUER.verbunden:
+    if _DAUER is not None and _DAUER.verbunden and _DAUER.voll:
         # 'online' steht dann zurueckbehalten ueber die dauerhafte Verbindung
         # (mit Letztem Willen) - ein fluechtiges online=1 daneben waere ein
         # zweiter Sender fuer denselben Wert (siehe MqttDauer).
@@ -8711,6 +9111,59 @@ def selbsttest() -> int:
                              praefix_von(cfg), "an" if cfg.get("befehle_cmd_ein") else "aus"))
             if not ok:
                 fehler += 1
+    elif cfg.get("befehle_cmd_ein"):
+        # N1 (Gruppe 20): ohne Dauerverbindung bleibt der alte Weg zu, auch mit den Kalenderfragen.
+        zeilen.append("[INFO] Alter Befehlsweg %s/cmd/... ist angehakt, wirkt aber nur mit der dauerhaften "
+                      "Broker-Verbindung (mqtt_dauer_ein), die aus ist." % praefix_von(cfg))
+    # ---- Gruppe 20 (0.12.8): Kalenderfragen ----
+    kal_f = 0
+    for aktion, schule, abw, soll_grund, soll_schl in KALENDER_SELBSTFAELLE:
+        w = dict(_KAL_W, **abw)
+        g, a = kalender_antwort(aktion, schule, "frisch", w, cfg)
+        n = (zahlwort(w["ferien_rest"], cfg) if soll_schl == "kal_ferien_laufen"
+             else zahlwort(w["ferien_in"], cfg) if soll_schl in ("kal_ferien_in", "kal_rest_keine")
+             else zahlwort(w["feiertag_in"], cfg))
+        tag = sagen(cfg, "kal_" + aktion.split("_")[0]) if aktion.split("_")[0] in ("heute", "morgen") else ""
+        if g != soll_grund or a != sagen(cfg, soll_schl, tag=tag, n=n):
+            kal_f += 1
+            zeilen.append("[FEHL] Kalenderfragen: Antwortfall %s %s ergibt %s statt %s." % (aktion, abw, g, soll_grund))
+    for lage, soll_grund in (("wartet", "kalender_wartet"), ("getrennt", "kalender_getrennt"),
+                             ("schweigt", "kalender_schweigt"), ("veraltet", "kalender_veraltet")):
+        if kalender_antwort("morgen_frei", 0, lage, {}, cfg)[0] != soll_grund:
+            kal_f += 1
+            zeilen.append("[FEHL] Kalenderfragen: Lage %s ergibt nicht %s." % (lage, soll_grund))
+    fehler += kal_f
+    if not cfg.get("kalender_fragen_ein"):
+        zeilen.append("[INFO] Kalenderfragen: aus (Reiter MQTT, 'Kalenderfragen beantworten'); %d Antwortfaelle "
+                      "offline %s." % (len(KALENDER_SELBSTFAELLE), "ohne Befund" if not kal_f else "mit Befund"))
+    else:
+        kab = json_lesen(DATEI_LOXONE).get("kalender")
+        lage = str(kab.get("lage") or "") if isinstance(kab, dict) else ""
+        if lage == "frisch":
+            zeilen.append("[OK]   Kalenderfragen: Daten von heute, das Ferien-Plugin meldet sich (haus/kalender).")
+        elif lage == "wartet":
+            zeilen.append("[INFO] Kalenderfragen: warte auf das erste Lebenszeichen des Ferien-Plugins "
+                          "(hoechstens 2 Minuten nach dem Start).")
+        elif lage in ("schweigt", "veraltet", "getrennt"):
+            fehler += 1
+            zeilen.append("[FEHL] Kalenderfragen: %s - Fragen werden mit 'keine Kalenderdaten' beantwortet. Im "
+                          "Plugin 'Ferien und Feiertage' Reiter MQTT 'Kalendertage an andere Plugins geben' "
+                          "pruefen." % {"schweigt": "das Ferien-Plugin meldet sich nicht (haus/kalender/zaehler)",
+                                       "veraltet": "die Daten sind nicht von heute (haus/kalender/datum)",
+                                       "getrennt": "keine Verbindung zum Broker"}[lage])
+        else:
+            zeilen.append("[INFO] Kalenderfragen: der laufende Dienst meldet noch keinen Kalenderstand "
+                          "(laeuft er, und ist der Haken gespeichert?).")
+        zeilen.append("[INFO] Kalenderfragen: %d Antwortfaelle offline %s." % (
+            len(KALENDER_SELBSTFAELLE), "ohne Befund" if not kal_f else "mit Befund"))
+        if v is not None:
+            for frage in KALENDER_MUSTERFRAGEN:
+                e = _erkennen(v, frage, "", tuple(EINGEBAUT_VORGABE) + ("kalender",))
+                if e.get("ok") and e.get("absicht") == "kalender":
+                    continue
+                zeilen.append("[INFO] Kalenderfragen: '%s' wird nicht als Kalenderfrage erkannt%s." % (
+                    frage, (" - die Regel '%s' der Satzdatei greift vorher" % e.get("muster"))
+                    if e.get("muster") else ""))
     if cfg.get("musik_ducken") or cfg.get("musik_steuern"):
         mz = [str(e.get("name") or e.get("host")) for e in (cfg.get("satelliten") or [])
               if isinstance(e, dict) and musik_zone(cfg, e.get("zone"))[0]]
@@ -8754,6 +9207,8 @@ def selbsttest() -> int:
             ok, satz = google_lage(tts)
         elif modus == "sonos4lox":
             ok, satz = sonos_lage(tts)
+        elif modus == "sonox":
+            ok, satz = sonox_lage(tts)
         else:
             ok, satz = cc_lage(tts) if modus == "chromecast" else alexa_lage(tts)
         if ok:

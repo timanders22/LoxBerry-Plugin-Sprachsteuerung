@@ -19,10 +19,12 @@
  *    "dringend": 0|1}
  *   {"art": "get", "url": "<Adresse des Music Servers oder der Vorlage>", "tmo": <s>}
  *   {"art": "sonos4lox", "zone": "<Zone>", "laut": -1|1-100, "text": "...", "dringend": 0|1}
+ *   {"art": "sonox", "raum": "<Sonos-Raum>", "laut": -1|1-100, "sprache": "de", "text": "..."}   (seit 0.12.8)
  * Antwort: EINE Zeile JSON auf der Standardausgabe, ohne Text und ohne Token:
  *   ng:        {"code": <HTTP oder 0>, "zeile": "<Antwortzeile>", "grund_id": "", "adresse": "..."}
  *   get:       {"code": <HTTP oder 0>, "grund_id": "<Kennung oder leer>"}
  *   sonos4lox: {"code": <HTTP oder 0>, "grund_id": "<Kennung oder leer>", "stand": 1|0|-1}
+ *   sonox:     wie sonos4lox (Zeitgrenze ANSAGE_TMO_SONOX 30 s in der Sprachausgabe 1.1.4)
  * Rueckgabewert 0 = Auftrag ausgefuehrt (das Ergebnis steht in der Zeile),
  * 2 = Aufruf falsch, 1 = die gemeinsame Sprachausgabe fehlt.
  *
@@ -174,6 +176,29 @@ if ($auftrag['art'] === 'sonos4lox') {
                  'sonos_zone' => isset($auftrag['zone']) ? $auftrag['zone'] : '',
                  'sonos_laut' => isset($auftrag['laut']) ? $auftrag['laut'] : -1);
     $r = ansage_sprechen($auftrag['text'], $tts, $k, array('dringend' => $dringend));
+    echo json_encode(array('code' => (int) $r['http'], 'grund_id' => (string) $r['kennung'], 'stand' => (int) $r['stand']),
+                     JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE), "\n";
+    exit(0);
+}
+
+if ($auftrag['art'] === 'sonox') {
+    /* Gruppe 20 (0.12.8, Pflegewelle 22): SonoX ueber die Sprachausgabe 1.1.4 (ansage_sprechen()); Raum, Sprache,
+     * Lautstaerke und Text prueft sie, die Zeitgrenze ist ANSAGE_TMO_SONOX (30 s, SonoX antwortet erst nach der
+     * Wiedergabe - SONOX_ZEIT_UNKLAR). Kein Gong, "dringend" wird nicht gesendet. Eigener Zweig, nicht "ng":
+     * SonoX ist kein Plugin mit Antwortzeile SPRECHEN;. Text und Raum bleiben auf der Standardeingabe. */
+    if (!isset($auftrag['text']) || !is_string($auftrag['text'])) {
+        fwrite(STDERR, "Auftrag sonox: text fehlt.\n");
+        exit(2);
+    }
+    if (!in_array('sonox', ansage_modi(), true)) {
+        fwrite(STDERR, "Auftrag sonox: die Sprachausgabe kennt sonox nicht (ab 1.1.4).\n");
+        exit(1);
+    }
+    $tts = array('mode' => 'sonox',
+                 'sonox_raum' => isset($auftrag['raum']) ? $auftrag['raum'] : '',
+                 'sonox_laut' => isset($auftrag['laut']) ? $auftrag['laut'] : -1,
+                 'sonox_sprache' => isset($auftrag['sprache']) ? $auftrag['sprache'] : 'de');
+    $r = ansage_sprechen($auftrag['text'], $tts, $k, array());
     echo json_encode(array('code' => (int) $r['http'], 'grund_id' => (string) $r['kennung'], 'stand' => (int) $r['stand']),
                      JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE), "\n";
     exit(0);

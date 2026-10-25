@@ -45,7 +45,8 @@
              "cc_praefix": "chromecast4lox", "cc_ziel": "alle",
              "alexa_geraet": "", "alexa_token": "", "alexa_laut": -1,
              "google_geraet": "", "google_token": "", "google_laut": -1,
-             "sonos_zone": "", "sonos_laut": -1 },
+             "sonos_zone": "", "sonos_laut": -1,
+             "sonox_raum": "", "sonox_laut": -1, "sonox_sprache": "de" },
 
     "mqtt_ein": 1,
     "mqtt_topic": "sprachsteuerung",
@@ -54,6 +55,7 @@
     "befehle_mqtt_steuern": 0,
     "befehle_cmd_ein": 0,
     "endpunkt_ein": 0,
+    "kalender_fragen_ein": 0,
 
     "miniserver_url": "",
     "aktionstoken": "",
@@ -98,7 +100,7 @@
   "auswahl": {
     "antwortweg": ["satellit", "loxone", "beide"],
     "tts_mode":   ["aus", "musicserver", "ms4h", "audioserver",
-                   "chromecast", "alexang", "cc4lox", "sonos4lox", "custom"]
+                   "chromecast", "alexang", "cc4lox", "sonos4lox", "sonox", "custom"]
   },
 
   "_hinweis_retain": [
@@ -170,6 +172,18 @@
     "                        wenn ein Aktionstoken gesetzt ist (postinstall.sh)",
     "status/zaehler ist das Lebenszeichen des Herzschlags (0-999, laeuft um) - nie",
     "zurueckbehalten."
+  ],
+
+  "_hinweis_gruppe20": [
+    "Seit 0.12.8 (Gruppe 20), ab Werk aus (0):",
+    "  kalender_fragen_ein   Kalenderfragen (Ist morgen schulfrei?) aus den Zahlen,",
+    "                        die Ferien und Feiertage unter haus/kalender/* sendet;",
+    "                        oeffnet eine Leseverbindung zum Broker (ohne Letzten",
+    "                        Willen, ohne online); fehlt der Schluessel: 0",
+    "  tts.sonox_raum/_laut/_sprache  Ausgabeart sonox (Plugin SonoX, Sprachausgabe",
+    "                        1.1.4): Raum, Lautstaerke (-1 = 40 von SonoX), Sprache",
+    "Der alte Befehlsweg <praefix>/cmd/... gilt nur mit befehle_cmd_ein UND",
+    "mqtt_dauer_ein (N1)."
   ],
 
   "retain": {

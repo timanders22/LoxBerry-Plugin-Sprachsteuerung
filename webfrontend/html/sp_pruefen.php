@@ -202,6 +202,7 @@ function sp_wert_pruefen($pfad, $wert)
         case 'befehle_mqtt_steuern':
         case 'befehle_cmd_ein':
         case 'endpunkt_ein':
+        case 'kalender_fragen_ein':     // Gruppe 20 (0.12.8, N4)
         case 'musik_ducken':
         case 'musik_steuern':
         case 'docker_neustart':
@@ -236,6 +237,18 @@ function sp_wert_pruefen($pfad, $wert)
 
         case 'tts.sonos_laut':
             return sp_pruef_laut($wert) ? '' : $kt(sp_t('UI013.M_SONOS_LAUT'));
+
+        /* Gruppe 20 (0.12.8, N4): SonoX - die Regeln der Sprachausgabe 1.1.4 (ansage_wert_pruefen()), eine Quelle.
+         * Bis 0.12.7 nahm eine Sicherung tts.sonox_raum ".." oder sonox_sprache "D E" ungeprueft an. */
+        case 'tts.sonox_raum':
+        case 'tts.sonox_laut':
+        case 'tts.sonox_sprache':
+            $sp_g = '';
+            $sp_f = substr($pfad, 4);
+            if (function_exists('ansage_wert_pruefen') && ansage_wert_pruefen(array($sp_f => $wert), $sp_g) !== null) {
+                return '';
+            }
+            return $kt(sp_t('SONOX.M_' . strtoupper($sp_f)));
 
         case 'tts.ip':
             if (!is_string($wert) || ($wert !== '' && !sp_pruef_host($wert))) { return $kt(sp_t('EINST.FEHLER_TTS_IP')); }
@@ -440,7 +453,9 @@ function sp_cfg_pruefen(array $cfg)
                      // Runde 2 (S3, S5-S7): fehlen sie (aeltere Sicherung), ist das kein Fehler.
                      'mqtt_dauer_ein', 'musik_ducken', 'musik_ducken_laut', 'musik_steuern', 'docker_neustart',
                      // Gruppe 11 (0.12.7): fehlen sie (Sicherung bis 0.12.6), ist das kein Fehler.
-                     'befehle_mqtt_ein', 'befehle_mqtt_steuern', 'befehle_cmd_ein', 'endpunkt_ein');
+                     'befehle_mqtt_ein', 'befehle_mqtt_steuern', 'befehle_cmd_ein', 'endpunkt_ein',
+                     // Gruppe 20 (0.12.8, N4): fehlt er (Sicherung bis 0.12.7), ist das kein Fehler.
+                     'kalender_fragen_ein');
     foreach ($einfach as $k) {
         if (!array_key_exists($k, $cfg)) { continue; }
         $t = sp_wert_pruefen($k, $cfg[$k]);
@@ -448,7 +463,8 @@ function sp_cfg_pruefen(array $cfg)
     }
     foreach (array('tts' => array('mode', 'ip', 'port', 'volume', 'zones', 'lang', 'stimme', 'template',
                                   'cc_praefix', 'cc_ziel', 'alexa_geraet', 'alexa_laut', 'alexa_token',
-                                  'google_geraet', 'google_laut', 'google_token', 'sonos_zone', 'sonos_laut'),
+                                  'google_geraet', 'google_laut', 'google_token', 'sonos_zone', 'sonos_laut',
+                                  'sonox_raum', 'sonox_laut', 'sonox_sprache'),
                    'ruhe' => array('ein', 'von', 'bis')) as $block => $felder) {
         if (!array_key_exists($block, $cfg)) { continue; }
         if (!is_array($cfg[$block])) {

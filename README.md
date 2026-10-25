@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.12.7
+Version 0.12.8
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,23 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.12.8
+
+* **Kalenderfragen** („Ist morgen schulfrei?“, „Ist heute ein Feiertag?“, „Wann sind die nächsten Ferien?“,
+  „Wie lange dauern die Ferien noch?“, „Wann ist der nächste Feiertag?“ – auch englisch). Haken „Kalenderfragen
+  beantworten“ im Reiter MQTT, ab Werk aus. Die Zahlen kommen vom Plugin „Ferien und Feiertage“ (ab 1.2.28) unter
+  `haus/kalender/…` (dort „Kalendertage an andere Plugins geben“ anhaken); gelesen werden nur neun Themen, nie Namen,
+  nie Urlaub. Die Werte gelten nur, solange sich `haus/kalender/zaehler` binnen 120 s ändert und `datum` heute ist –
+  sonst „keine Kalenderdaten“. Der Dienst liest über eine eigene Leseverbindung (ohne Letzten Willen, ohne `online`).
+  Neue Prüfzeile im Reiter Test, Fälle im Selbsttest.
+* **SonoX** als neue Ausgabeart (Sprachausgabe 1.1.4): Sonos-Raum, Lautstärke, Sprache. Hinweis: SonoX erzeugt die
+  Sprache ab Werk über Google – jeder Ansagetext geht ins Internet. Die Prüfzeile für Sonos4Lox und SonoX kommt jetzt
+  aus der gemeinsamen Sprachausgabe (Installation, Zonen- bzw. Raumabgleich, SonoX nur bei offenem Reiter Test).
+* **Gemeinsame Module:** Sprachausgabe 1.1.4, Befehlsbrücke 1.0.1 (Ordner `befehle/` 0700, Wurzelprüfung).
+* **Sicherung:** prüft `kalender_fragen_ein` und `tts.sonox_*`; eine Sicherung bis 0.12.7 behält einen eingestellten
+  SonoX-Raum.
+* **Alter Befehlsweg** `<präfix>/cmd/…` gilt nur mit „befehle_cmd_ein“ UND der dauerhaften Verbindung.
 
 ## Neu in 0.12.7
 

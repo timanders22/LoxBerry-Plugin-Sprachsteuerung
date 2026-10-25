@@ -947,12 +947,70 @@ EINGEBAUTE_REGELN = (
 # englischen Satzdateien ausdruecklich kein Aus-Wort (saetze_en.json), und
 # "turn the kitchen down" soll weiter gar nichts tun, statt zu raten, ob
 # gedimmt, leiser oder kuehler gemeint ist.
-# Ohne Angabe des Dienstes: alle Gruppen ausser der Musik (die braucht einen
-# Schalter und eine Zone, siehe EINGEBAUTE_REGELN oben).
+# ---------------------------------------------------------------------------
+# Gruppe 20 (0.12.8, V3): Kalenderfragen - Abnehmer von haus/kalender/* (Regeln/07 Nr. 15, Anbieter Ferien und
+# Feiertage ab 1.2.28). Nur auf Anfrage des Dienstes (Haken kalender_fragen_ein, ab Werk aus). Feste Muster ohne
+# {ziel}: die Wachen (Verneinung, Zeitspur - "morgen" -, mehrteilig) greifen nur am Ziel-Fang und stoeren hier nicht.
+# aktion heute_frei | morgen_frei | heute_feiertag | morgen_feiertag | naechste_ferien | ferien_rest |
+# naechster_feiertag; frage_schule=1 fuer "Ist morgen Schule?" (die Antwort dreht dann ja/nein). "frei" heisst
+# immer "schulfrei" (Nr. 15: frei = schulfrei der ersten Region); Urlaub wird nicht gefragt.
+# ---------------------------------------------------------------------------
+def _kalender_regeln():
+    regeln = []
+    for tag in ("heute", "morgen"):
+        regeln += [
+            _r("kalender", "ist [es|] " + tag + " [schulfrei|frei|ein freier tag|ein schulfreier tag]",
+               "kalender", tag + "_frei"),
+            _r("kalender", "[haben wir|habe ich|hab ich|hat man|haben die kinder] " + tag + " [frei|schulfrei]",
+               "kalender", tag + "_frei"),
+            _r("kalender", "[ist|haben wir|habe ich|hab ich|haben die kinder|hat man] " + tag + " schule",
+               "kalender", tag + "_frei", frage_schule=1),
+            _r("kalender", "[ist|haben wir] " + tag + " [ein|einen|] feiertag", "kalender", tag + "_feiertag"),
+        ]
+    regeln += [
+        _r("kalender", "wann [sind|beginnen|kommen|starten] [die|] [naechsten|] ferien", "kalender",
+           "naechste_ferien"),
+        _r("kalender", "wann fangen die [naechsten|] ferien an", "kalender", "naechste_ferien"),
+        _r("kalender", "wie lange [ist es|dauert es|] noch bis zu den [naechsten|] ferien", "kalender",
+           "naechste_ferien"),
+        _r("kalender", "wie lange [dauern|gehen|sind] die ferien noch", "kalender", "ferien_rest"),
+        _r("kalender", "wann [enden|sind] die ferien [zu ende|vorbei|]", "kalender", "ferien_rest"),
+        _r("kalender", "wie viele ferientage [sind es|haben wir|bleiben|] noch", "kalender", "ferien_rest"),
+        _r("kalender", "wann [ist|kommt] der naechste feiertag", "kalender", "naechster_feiertag"),
+        _r("kalender", "wie lange [ist es|dauert es|] noch bis zum naechsten feiertag", "kalender",
+           "naechster_feiertag"),
+    ]
+    for tag_en, tag in (("today", "heute"), ("tomorrow", "morgen")):
+        regeln += [
+            _r("kalender", "is " + tag_en + " a [school holiday|day off|free day]", "kalender", tag + "_frei"),
+            _r("kalender", "[do we have|is there|do the kids have] school " + tag_en, "kalender", tag + "_frei",
+               frage_schule=1),
+            _r("kalender", "is [there|] school " + tag_en, "kalender", tag + "_frei", frage_schule=1),
+            _r("kalender", "is " + tag_en + " a [public holiday|bank holiday|holiday]", "kalender",
+               tag + "_feiertag"),
+        ]
+    regeln += [
+        _r("kalender", "when [are|do|does] the next [school holidays|holidays|vacation] [start|begin|]",
+           "kalender", "naechste_ferien"),
+        _r("kalender", "how long [is it|] until the [next|] [school holidays|holidays|vacation]", "kalender",
+           "naechste_ferien"),
+        _r("kalender", "how [many days of|much] [school holidays|holidays|vacation] [are left|is left]",
+           "kalender", "ferien_rest"),
+        _r("kalender", "when [do|does] the [school holidays|holidays|vacation] end", "kalender", "ferien_rest"),
+        _r("kalender", "when is the next [public holiday|bank holiday|holiday]", "kalender", "naechster_feiertag"),
+    ]
+    return tuple(regeln)
+
+
+EINGEBAUTE_REGELN = EINGEBAUTE_REGELN + _kalender_regeln()
+
+
+# Ohne Angabe des Dienstes: alle Gruppen ausser Musik und Kalender - beide brauchen einen
+# Schalter (die Musik dazu eine Zone, der Kalender den Anbieter haus/kalender/*; siehe oben).
 EINGEBAUT_VORGABE = ("timer", "erinnerung", "relativ")
 # Die Reihenfolge der Gruppen: Musik vor den relativen Befehlen - "mach
-# lauter" ohne Ziel gehoert der Musik.
-_GRUPPEN_FOLGE = ("timer", "erinnerung", "musik", "relativ")
+# lauter" ohne Ziel gehoert der Musik. Gruppe 20 (0.12.8): der Kalender davor (feste Muster ohne Ziel).
+_GRUPPEN_FOLGE = ("timer", "erinnerung", "musik", "kalender", "relativ")
 
 
 class Verstehen:

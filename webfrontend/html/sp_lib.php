@@ -368,6 +368,12 @@ function sp_tts_modi()
         && !in_array('sonos4lox', $m, true)) {
         $m[] = 'sonos4lox';
     }
+    /* Gruppe 20 (0.12.8): 'sonox' nur, wenn die mitgelieferte Sprachausgabe es kann (ab 1.1.4) - gegen ein zu
+     * altes Modul in einem Archiv oder Pruefstand (Stammbericht Pflegewelle 22, Abschnitt 4 Nr. 6). */
+    if (!function_exists('ansage_modi') || !in_array('sonox', ansage_modi(), true)
+        || !defined('ANSAGE_FASSUNG') || version_compare(ANSAGE_FASSUNG, '1.1.4', '<')) {
+        $m = array_values(array_diff($m, array('sonox')));
+    }
     return $m;
 }
 
@@ -382,7 +388,9 @@ function sp_vorgaben_r2()
     return array(
         array('mqtt_dauer_ein' => 0, 'musik_ducken' => 0, 'musik_ducken_laut' => 15,
               'musik_steuern' => 0, 'docker_neustart' => 0,
-              'tts' => array('sonos_zone' => '', 'sonos_laut' => -1)),
+              'tts' => array('sonos_zone' => '', 'sonos_laut' => -1,
+                             // Gruppe 20 (0.12.8): SonoX
+                             'sonox_raum' => '', 'sonox_laut' => -1, 'sonox_sprache' => 'de')),
         array('musik_ducken_laut' => array(0, 100), 'tts_volume' => array(1, 100)),
     );
 }
@@ -587,6 +595,16 @@ function sp_config($erzeugen = true)
     $sp_laut = $sp_skalar('sonos_laut');
     $tts['sonos_laut'] = preg_match('/^[0-9]{1,3}$/', $sp_laut) && (int) $sp_laut >= 1 && (int) $sp_laut <= 100
                        ? (int) $sp_laut : -1;
+    /* Gruppe 20 (0.12.8): SonoX - Raum wie ein Geraetename, aber nicht nur Punkte (ein Pfadschritt), Lautstaerke
+     * 1-100 oder -1 (leer: SonoX nimmt 40), Sprache Pflicht (sonst de). Dieselben Regeln wie ansage_wert_pruefen()
+     * der Sprachausgabe 1.1.4 und config() im Dienst; beide Seiten muessen gleich rechnen. */
+    $tts['sonox_raum'] = trim($sp_skalar('sonox_raum'));
+    if (!sp_alexa_geraet_ok($tts['sonox_raum']) || preg_match('/^\.+\z/', $tts['sonox_raum'])) { $tts['sonox_raum'] = ''; }
+    $sp_laut = $sp_skalar('sonox_laut');
+    $tts['sonox_laut'] = preg_match('/^[0-9]{1,3}$/', trim($sp_laut)) && (int) $sp_laut >= 1 && (int) $sp_laut <= 100
+                       ? (int) $sp_laut : -1;
+    $sp_spr = $sp_skalar('sonox_sprache');
+    $tts['sonox_sprache'] = preg_match('/^[a-z]{2}(-[a-z]{2})?\z/', $sp_spr) ? $sp_spr : 'de';
     $cfg['tts'] = $tts;
 
     $ruhe = is_array(isset($cfg['ruhe']) ? $cfg['ruhe'] : null)
@@ -618,7 +636,9 @@ function sp_config($erzeugen = true)
 
     /* Gruppe 11 (0.12.7): die vier Haken der Umstellung nur als 0 oder 1 - wie SCHALTER_0_1 im Dienst. Ein Text wie
      * "nein" oder eine Liste ist AUS, nicht "irgendwie wahr". */
-    foreach (array('befehle_mqtt_ein', 'befehle_mqtt_steuern', 'befehle_cmd_ein', 'endpunkt_ein') as $sp_h) {
+    // Gruppe 20 (0.12.8): dazu kalender_fragen_ein (Kalenderfragen, ab Werk aus).
+    foreach (array('befehle_mqtt_ein', 'befehle_mqtt_steuern', 'befehle_cmd_ein', 'endpunkt_ein',
+                   'kalender_fragen_ein') as $sp_h) {
         $sp_w = isset($cfg[$sp_h]) ? $cfg[$sp_h] : 0;
         $cfg[$sp_h] = ($sp_w === 1 || $sp_w === true || $sp_w === '1') ? 1 : 0;
     }
@@ -2969,6 +2989,16 @@ function sp_sicherung_lesen($roh, $nur_pruefen = false)
         $neu['tts'] = $alt['tts'];
     }
     $neu['tts'] = ansage_sicherung_tokens_behalten($neu['tts'], $alt['tts']);
+    /* N3 (Gruppe 20, 0.12.8): array_merge ersetzt den tts-Block der Sicherung als GANZES. Eine Sicherung bis
+     * 0.12.7 kennt sonox_* nicht - ohne diese Zeilen setzte sie einen eingestellten SonoX-Raum still auf die
+     * Vorgabe zurueck. Ein fehlender Schluessel behaelt den geltenden Wert (nur bei einem tts-Block). */
+    if (isset($d['config']['tts']) && is_array($d['config']['tts'])) {
+        foreach (array('sonox_raum', 'sonox_laut', 'sonox_sprache') as $sp_f) {
+            if (!array_key_exists($sp_f, $d['config']['tts']) && isset($alt['tts'][$sp_f])) {
+                $neu['tts'][$sp_f] = $alt['tts'][$sp_f];
+            }
+        }
+    }
     /* Die Schluessel der ESPHome-Mikrofone stehen nicht in der Sicherung.
      * Bis 0.11.15 kamen sie nach der LISTENPOSITION zurueck: eine Sicherung
      * mit anderer Reihenfolge (ein Mikrofon dazwischen, eines entfernt) gab
@@ -3465,8 +3495,9 @@ function sp_alexa_rufen(array $felder, $sekunden = 5, $adresse = '', $streng = f
 /**
  * Die Zeile "Zusaetzliche Ansage" im Reiter Test: array(Stand, Antwort) oder
  * null (die vier Loxone-Wege prueft der Selbsttest des Dienstes).
+ * Gruppe 20 (0.12.8): $offen = der Reiter Test ist serverseitig offen - nur dann fragt die Zeile SonoX (/zones).
  */
-function sp_ansage_lage($cfg = null)
+function sp_ansage_lage($cfg = null, $offen = false)
 {
     if ($cfg === null) { $cfg = sp_config(); }
     $tts = $cfg['tts'];
@@ -3475,29 +3506,24 @@ function sp_ansage_lage($cfg = null)
     if ($modus === 'aus') {
         return array(-1, sp_t('TEST.A_ANSAGE_AUS'));
     }
-    if (!in_array($modus, array('chromecast', 'alexang', 'cc4lox', 'sonos4lox'), true)) {
+    if (!in_array($modus, array('chromecast', 'alexang', 'cc4lox', 'sonos4lox', 'sonox'), true)) {
         return null;
     }
     if ($weg === 'satellit') {
         return array(-1, sp_t('TEST.A_ANSAGE_SATELLIT'));
     }
     $rueck = ' ' . sp_t('TEST.A_RUECKFALL');
-    if ($modus === 'sonos4lox') {
-        /* S1 (Runde 2): Sonos4Lox wird nie gefragt - es hat keinen Selbsttest,
-         * und eine Probe spraeche (wie ansage_pruefzeile() in sprachausgabe.php).
-         * Geprueft wird die Zone und ob das Plugin installiert ist. */
-        $zone = isset($tts['sonos_zone']) && is_string($tts['sonos_zone']) ? $tts['sonos_zone'] : '';
-        if ($zone === '') {
-            return array(0, sp_e(sp_pruef_klartext(sp_t('UI013.M_SONOS_OHNE_ZONE'))) . $rueck);
+    if ($modus === 'sonos4lox' || $modus === 'sonox') {
+        /* Gruppe 20 (0.12.8, E-E7): Sonos4Lox und SonoX ueber ansage_pruefzeile() der Sprachausgabe 1.1.4 - eine
+         * Quelle statt einer eigenen, schwaecheren Zeile (N5): Installation aus der Plugin-Datenbank, die
+         * Sonos4Lox-Zone gegen die Zonenschluessel der s4lox_config.json (nur Schluessel), der SonoX-Raum gegen
+         * GET /zones nur bei offenem Reiter Test (5 s). Gesprochen wird nie; Sonos4Lox wird nie gefragt. Texte im
+         * Abschnitt [SONOX]. Ohne LoxBerry-Wurzel (Archiv) keine Datenbank - dann die Zeile von 1.1.3. */
+        list($stand, $text) = ansage_pruefzeile($tts, (bool) $offen,
+            array('t' => 'sp_t', 'abschnitt' => 'SONOX', 'home' => (string) sp_paths()['home'], 'port' => sp_webport()));
+        if ($stand !== 1) {
+            return array($stand === -2 ? -1 : $stand, $text . ($stand === 0 ? $rueck : ''));
         }
-        $info = sp_plugin_info('sonos4lox');
-        if ($info === null && sp_paths()['home'] !== '') {
-            return array(0, sp_e(sprintf(sp_t('UI012.PLUGIN_FEHLT'), 'Sonos4Lox')) . $rueck);
-        }
-        $ordner = $info !== null ? $info['ordner'] : 'sonos4lox';
-        $stand = 1;
-        $text = sp_e(sprintf(sp_t('UI013.T_SONOS'), $zone,
-                             'http://127.0.0.1:' . sp_webport() . '/plugins/' . $ordner . '/index.php'));
     } elseif ($modus === 'chromecast') {
         $p = (string) $tts['cc_praefix'];
         $ziel = (string) $tts['cc_ziel'];

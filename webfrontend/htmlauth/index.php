@@ -293,11 +293,13 @@ function sp_eingabe_felder($formular)
                            'google_token_loeschen', 'probe_text',
                            // Runde 2: Sonos4Lox (S1), Musik leiser/steuern (S5, S6)
                            'tts_sonos_zone', 'tts_sonos_laut', 'musik_ducken', 'musik_ducken_laut',
-                           'musik_steuern'),
+                           'musik_steuern',
+                           // Gruppe 20 (0.12.8): SonoX
+                           'tts_sonox_raum', 'tts_sonox_laut', 'tts_sonox_sprache'),
         'ansagen' => array('tts_template', 'ruhe_ein', 'ruhe_von', 'ruhe_bis', 'ansage_abstand_s',
                            'ansage_je_tag', 'miniserver_url_loeschen', 'wakeword', 'wakeword_frei',
                            'sprache', 'wartezeit', 'verlauf_zeilen'),
-        'mqtt'    => array('mqtt_ein', 'mqtt_topic', 'herzschlag_s', 'mqtt_dauer_ein'),
+        'mqtt'    => array('mqtt_ein', 'mqtt_topic', 'herzschlag_s', 'mqtt_dauer_ein', 'kalender_fragen_ein'),
         'modelle' => array('whisper_modell', 'whisper_modell_frei', 'piper_stimme', 'piper_stimme_frei',
                            'llm_modell', 'llm_modell_frei'),
         'mikros'  => array('m_name', 'm_art', 'm_host', 'm_port', 'm_raum', 'm_zone', 'm_alt',
@@ -692,6 +694,8 @@ if ($sp_post && isset($_POST['mqtt_save'])) {
     $sp_cfg['befehle_mqtt_ein'] = isset($_POST['befehle_mqtt_ein']) ? 1 : 0;
     $sp_cfg['befehle_mqtt_steuern'] = isset($_POST['befehle_mqtt_steuern']) ? 1 : 0;
     $sp_cfg['befehle_cmd_ein'] = isset($_POST['befehle_cmd_ein']) ? 1 : 0;
+    // Gruppe 20 (0.12.8, V3/E-E4): Kalenderfragen aus haus/kalender/* (Leseverbindung des Dienstes).
+    $sp_cfg['kalender_fragen_ein'] = isset($_POST['kalender_fragen_ein']) ? 1 : 0;
     if (!$sp_fehler && $sp_cfg['befehle_mqtt_ein'] === 1 && !sp_bb_praefix_ok($sp_cfg['mqtt_topic'])) {
         $sp_fehler[] = sp_e(sprintf(sp_t('BEFEHL.M_PRAEFIX'), (string) $sp_cfg['mqtt_topic']));
         sp_bean('mqtt_topic');
@@ -895,6 +899,44 @@ if ($sp_post && isset($_POST['speichern']) && !isset($_POST['probe_stimme'])) {
         } else {
             $sp_fehler[] = sp_e(sp_pruef_klartext(sp_t('UI013.M_SONOS_LAUT')));
             sp_bean('tts_sonos_laut');
+        }
+    }
+    /* ---- Gruppe 20 (0.12.8, Pflegewelle 22): SonoX ----
+     * Dieselben Regeln und Feldnamen wie ansage_formular_lesen() der Sprachausgabe 1.1.4 (tts_sonox_raum,
+     * tts_sonox_laut, tts_sonox_sprache): Raum wie ein Geraetename, nicht nur Punkte (leer = nicht eingestellt);
+     * Lautstaerke leer = 40 von SonoX, sonst 1 bis 100; Sprache Pflicht. Ohne Raum bei gewaehlter Ausgabeart
+     * eine Beanstandung (M_SONOX_OHNE_RAUM). */
+    $sp_w = $sp_roh('tts_sonox_raum');
+    if ($sp_w !== null) {
+        $sp_g = '';
+        if ($sp_w === false || ansage_wert_pruefen(array('sonox_raum' => $sp_w), $sp_g) === null) {
+            $sp_fehler[] = sp_e(sp_pruef_klartext(sp_t('SONOX.M_SONOX_RAUM')));
+            sp_bean('tts_sonox_raum');
+        } elseif ($sp_w === '' && $sp_sauber('tts_mode') === 'sonox') {
+            $sp_fehler[] = sp_e(sp_pruef_klartext(sp_t('SONOX.M_SONOX_OHNE_RAUM')));
+            sp_bean('tts_sonox_raum');
+        } else {
+            $sp_tts['sonox_raum'] = $sp_w;
+        }
+    }
+    $sp_w = $sp_roh('tts_sonox_laut');
+    if ($sp_w === '') {
+        $sp_tts['sonox_laut'] = -1;
+    } elseif ($sp_w !== null) {
+        if ($sp_w !== false && preg_match('/^[0-9]{1,3}\z/', $sp_w) && (int) $sp_w >= 1 && (int) $sp_w <= 100) {
+            $sp_tts['sonox_laut'] = (int) $sp_w;
+        } else {
+            $sp_fehler[] = sp_e(sp_pruef_klartext(sp_t('SONOX.M_SONOX_LAUT')));
+            sp_bean('tts_sonox_laut');
+        }
+    }
+    $sp_w = $sp_roh('tts_sonox_sprache');
+    if ($sp_w !== null) {
+        if ($sp_w !== false && preg_match('/^[a-z]{2}(-[a-z]{2})?\z/', $sp_w)) {
+            $sp_tts['sonox_sprache'] = $sp_w;
+        } else {
+            $sp_fehler[] = sp_e(sp_pruef_klartext(sp_t('SONOX.M_SONOX_SPRACHE')));
+            sp_bean('tts_sonox_sprache');
         }
     }
     /* ---- S5/S6 (Runde 2): Musik leiser und Musik steuern ----
@@ -2029,7 +2071,7 @@ $sp_mm = function ($feld, $min, $max) {
 <?php /* sp_tts_modi(): die Liste aus vorgaben.json, notfalls um Sonos4Lox
    ergaenzt (Runde 2). Fuer sonos4lox steht die Beschriftung in [UI013]. */
 foreach (sp_tts_modi() as $sp_m) { ?>
-    <option value="<?= sp_e($sp_m) ?>"<?= sp_x2_wert('tts_mode', $sp_cfg['tts']['mode']) === $sp_m ? ' selected' : '' ?>><?= sp_e($sp_m === 'sonos4lox' ? sp_t('UI013.TTS_SONOS4LOX') : sp_t('EINST.TTS_' . strtoupper($sp_m))) ?></option>
+    <option value="<?= sp_e($sp_m) ?>"<?= sp_x2_wert('tts_mode', $sp_cfg['tts']['mode']) === $sp_m ? ' selected' : '' ?>><?= sp_e($sp_m === 'sonos4lox' ? sp_t('UI013.TTS_SONOS4LOX') : ($sp_m === 'sonox' ? sp_t('SONOX.O_SONOX') : sp_t('EINST.TTS_' . strtoupper($sp_m)))) ?></option>
 <?php } ?>
   </select>
   <div class="sm-hilfe"><?= sp_t('EINST.H_TTS_MODE') ?></div>
@@ -2041,7 +2083,7 @@ foreach (sp_tts_modi() as $sp_m) { ?>
 if (function_exists('sp_plugin_info')) { ?>
   <ul class="sm-hilfe">
 <?php foreach (array('alexang' => array('Alexa-NG', ''), 'chromecast-4lox-ng' => array('Chromecast 4 Lox NG', '1.3.15'),
-                     'sonos4lox' => array('Sonos4Lox', '')) as $sp_pn => $sp_pi) {
+                     'sonos4lox' => array('Sonos4Lox', ''), 'sonox' => array('SonoX', '')) as $sp_pn => $sp_pi) {
     $sp_inf = sp_plugin_info($sp_pn);
     if (!is_array($sp_inf)) { ?>
     <li><?= sp_e(sprintf(sp_t('UI012.PLUGIN_FEHLT'), $sp_pi[0])) ?></li>
@@ -2166,6 +2208,30 @@ $sp_sl = isset($sp_cfg['tts']['sonos_laut']) ? (int) $sp_cfg['tts']['sonos_laut'
   <input data-role="none" type="number" id="tts_sonos_laut" name="tts_sonos_laut" value="<?= sp_e(sp_x2_wert('tts_sonos_laut', $sp_sl >= 1 ? $sp_sl : '')) ?>" min="1" max="100"<?= sp_x2_mark('tts_sonos_laut') ?>>
   <div class="sm-hilfe"><?= sp_e(sp_t('UI013.H_SONOS_LAUT')) ?></div>
 </div>
+<?php /* Gruppe 20 (0.12.8, Pflegewelle 22): SonoX - Feldnamen wie ansage_feldnamen() der Sprachausgabe 1.1.4;
+   der Hinweis sagt deutlich, dass SonoX die Ansagetexte ab Werk an Google schickt (Hausherr: Hinweis, kein Haken). */
+$sp_xr = isset($sp_cfg['tts']['sonox_raum']) && is_string($sp_cfg['tts']['sonox_raum']) ? $sp_cfg['tts']['sonox_raum'] : '';
+$sp_xl = isset($sp_cfg['tts']['sonox_laut']) ? (int) $sp_cfg['tts']['sonox_laut'] : -1;
+$sp_xs = isset($sp_cfg['tts']['sonox_sprache']) && is_string($sp_cfg['tts']['sonox_sprache']) ? $sp_cfg['tts']['sonox_sprache'] : 'de';
+if (in_array('sonox', sp_tts_modi(), true)) { ?>
+<h3><?= sp_e(sp_t('SONOX.O_SONOX')) ?></h3>
+<div class="sm-hilfe"><?= sp_e(sp_t('SONOX.SONOX_HINWEIS')) ?></div>
+<div class="sm-feld">
+  <label for="tts_sonox_raum"><?= sp_e(sp_t('SONOX.L_SONOX_RAUM')) ?></label>
+  <input data-role="none" type="text" id="tts_sonox_raum" name="tts_sonox_raum" maxlength="200" value="<?= sp_e(sp_x2_wert('tts_sonox_raum', $sp_xr)) ?>"<?= sp_x2_mark('tts_sonox_raum') ?>>
+  <div class="sm-hilfe"><?= sp_e(sp_t('SONOX.SONOX_RAUM_HINWEIS')) ?></div>
+</div>
+<div class="sm-feld">
+  <label for="tts_sonox_laut"><?= sp_e(sp_t('SONOX.L_SONOX_LAUT')) ?></label>
+  <input data-role="none" type="number" id="tts_sonox_laut" name="tts_sonox_laut" value="<?= sp_e(sp_x2_wert('tts_sonox_laut', $sp_xl >= 1 ? $sp_xl : '')) ?>" min="1" max="100"<?= sp_x2_mark('tts_sonox_laut') ?>>
+  <div class="sm-hilfe"><?= sp_e(sp_t('SONOX.SONOX_LAUT_HINWEIS')) ?></div>
+</div>
+<div class="sm-feld">
+  <label for="tts_sonox_sprache"><?= sp_e(sp_t('SONOX.L_SONOX_SPRACHE')) ?></label>
+  <input data-role="none" type="text" id="tts_sonox_sprache" name="tts_sonox_sprache" maxlength="5" value="<?= sp_e(sp_x2_wert('tts_sonox_sprache', $sp_xs)) ?>"<?= sp_x2_mark('tts_sonox_sprache') ?>>
+  <div class="sm-hilfe"><?= sp_e(sp_t('SONOX.SONOX_SPRACHE_HINWEIS')) ?></div>
+</div>
+<?php } ?>
 <?php /* S5/S6 (Runde 2): Musik leiser waehrend einer Ansage und Musik per
    Sprache steuern - beides ueber den Music Server bzw. MusicServer4Home. */ ?>
 <h3><?= sp_e(sp_t('UI013.H_MUSIK')) ?></h3>
@@ -2447,6 +2513,21 @@ foreach ($sp_themen as $sp_th => $sp_sch) {
   </label>
   <div class="sm-hilfe"><?= sp_e(sprintf(sp_t('BEFEHL.H_CMD_EIN'), $sp_praefix)) ?>
   <?= sp_e($sp_cmd_zl > 0 ? sprintf(sp_t('LOX.CMD_ZULETZT'), date('d.m.Y H:i', $sp_cmd_zl)) : sp_t('LOX.CMD_NIE')) ?></div>
+</div>
+<?php /* Gruppe 20 (0.12.8, V3, E-E3 B/E-E4): Kalenderfragen - ab Werk aus, gespeichert mit dem vorhandenen
+   Knopf (mqtt_save). Liest nur neun Themen von haus/kalender/ ueber eine eigene Leseverbindung. */ ?>
+<div class="sm-feld">
+  <label style="display:inline-flex;align-items:center;gap:8px;">
+    <input data-role="none" type="checkbox" name="kalender_fragen_ein" value="1" <?= sp_x2_haken('kalender_fragen_ein', (int) $sp_cfg['kalender_fragen_ein'] === 1) ? 'checked' : '' ?><?= sp_x2_mark('kalender_fragen_ein') ?>>
+    <?= sp_e(sp_t('UI020.L_KALENDER')) ?>
+  </label>
+  <div class="sm-hilfe"><?= sp_e(sp_t('UI020.H_KALENDER')) ?></div>
+  <div class="sm-roll">
+  <table class="sm-tbl">
+  <tr><th><?= sp_e(sp_t('MQTT.T_THEMA')) ?></th><th><?= sp_e(sp_t('UI013.T_RICHTUNG')) ?></th><th><?= sp_e(sp_t('MQTT.T_BEDEUTUNG')) ?></th></tr>
+  <tr><td><span class="sm-mono">haus/kalender/…</span> <?= sp_e(sp_t('UI020.T_KALENDER_THEMEN')) ?></td><td><?= sp_e(sp_t('UI013.R_EIN')) ?></td><td><?= sp_e(sp_t('UI020.B_KALENDER')) ?></td></tr>
+  </table>
+  </div>
 </div>
 <div class="sm-feld">
   <label for="mqtt_topic"><?= sp_e(sp_t('EINST.L_MQTT_TOPIC')) ?></label>
