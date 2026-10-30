@@ -51,9 +51,13 @@
  * - Ordner befehle/ 0700 statt 0750 (am Geraet 0750 gemessen, BLE 1.3.28 / WiFi 3.2.15).
  * - Markenpruefung mit leerer oder ungueltiger Uhr: Marke gilt (geschlossen ausfallen, B3).
  *   Eine Marke aus der Zukunft gilt weiter nicht (Hausregel Regeln/06).
+ *
+ * 1.0.2 (Gruppe 36, Fensterbilanz 0.12.20, 28.10.2026), nur Zeilenenden, Tabellenfassung bleibt 1:
+ * - bb_vorlage() verbindet mit CRLF wie die _Test.xml-Ausfuhren der Loxone Config (Regeln/07);
+ *   Inhalt sonst byte-gleich. Selbsttest: Schlussprobe auf CRLF, Zahl der Faelle unveraendert.
  */
 
-define('BB_FASSUNG', '1.0.1');
+define('BB_FASSUNG', '1.0.2');
 define('BB_ZUORDNUNG_FASSUNG', 1);
 define('BB_SPERRE_VORGABE', 60);
 define('BB_SPERRE_MAX', 3600);
@@ -1296,7 +1300,7 @@ function bb_vorlage(array $liste, $host, $port)
         $z[] = bb_vorlage_befehl($b['titel'], $kom, $b['loxone']['ein'], $b['loxone']['aus'], $b['loxone']['analog']);
     }
     $z[] = '</VirtualOut>';
-    return implode("\n", $z) . "\n";
+    return implode("\r\n", $z) . "\r\n";
 }
 
 function bb_vorlage_befehl($titel, $kom, $ein, $aus, $analog)
@@ -1685,7 +1689,7 @@ function bb_selbsttest()
         $xml = @simplexml_load_string($v);
         $wohl = $xml !== false && count($xml->VirtualOutCmd) === 7;
     } else {
-        $wohl = substr_count($v, '<VirtualOutCmd ') === 7 && substr($v, -14) === "</VirtualOut>\n"
+        $wohl = substr_count($v, '<VirtualOutCmd ') === 7 && substr($v, -15) === "</VirtualOut>\r\n"
             && !preg_match('/="[^"]*(<|&(?!lt;|gt;|amp;|quot;|#039;|apos;))/', $v);
     }
     $pruef($wohl, 'Vorlage wohlgeformt, 7 Befehle');
