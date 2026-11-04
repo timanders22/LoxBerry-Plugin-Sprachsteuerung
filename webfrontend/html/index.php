@@ -61,7 +61,9 @@ $sp_cfg = sp_config(false);
  * Aktion (Entwurf 3.6, E4). Es wird nichts angelegt (sp_config(false)). Text in ASCII wie die uebrigen Antworten. */
 if ((int) $sp_cfg['endpunkt_ein'] !== 1) {
     http_response_code(403);
-    if (isset($_GET['selftest'])) {
+    /* 0.12.10 (Nachzug 01.11.2026, wie Renault NG 2.1.23): !empty statt isset - bis 0.12.9 galt auch ?selftest=0 und ?selftest= als Selbsttest,
+     * und eine Adresse mit diesem Anhang tat nie etwas anderes. */
+    if (!empty($_GET['selftest'])) {
         echo "SELFTEST;OK=0;ERR=ENDPUNKT_AUS\n";
         exit;
     }
@@ -110,7 +112,7 @@ if (isset($_SERVER['HTTP_X_TOKEN']) && is_string($_SERVER['HTTP_X_TOKEN']) && $_
 } else {
     $sp_ist = $sp_par('token');
 }
-$sp_selftest = isset($_GET['selftest']) && $sp_par('selftest') !== '0';
+$sp_selftest = !empty($_GET['selftest']);
 
 /* Der Selbsttest steht unmittelbar hinter der Tokenpruefung und VOR jeder
  * Wirkung. Hausregel: ein Token muss sich pruefen lassen, ohne dass etwas

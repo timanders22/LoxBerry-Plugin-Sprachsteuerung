@@ -3803,6 +3803,40 @@ function sp_docker_ruf(array $args, $sekunden)
 }
 
 /**
+ * Auf ein Kind warten, ohne dass proc_close() haengen kann; Rueckgabe sein Rueckgabewert, 124 nach Ablauf der Frist.
+ * Hoechstens $warten Sekunden ungestoert, dann SIGTERM, hoechstens $frist Sekunden, dann SIGKILL, erst dann proc_close(). Bis 0.12.9 stand hier proc_close()
+ * ohne Frist: am Geraet hing mosquitto_sub am 01.11.2026 nach SIGTERM 5 Stunden fest, und der Aufrufer stand mit. proc_get_status() liefert den Rueckgabewert
+ * nur beim ersten Aufruf nach dem Ende, proc_close() danach -1 (PHP unter 8.3), darum kommt er von hier und nicht von proc_close().
+ */
+function sp_proc_abwarten($pr, $warten, $frist = 2.0)
+{
+    $stufe = 0;
+    $bis = microtime(true) + max(0.0, (float) $warten);
+    $schlaf = 2000;
+    while (true) {
+        $s = @proc_get_status($pr);
+        if (!is_array($s) || empty($s['running'])) {
+            $rc = is_array($s) && isset($s['exitcode']) ? (int) $s['exitcode'] : -1;
+            if (is_array($s) && !empty($s['signaled'])) { $rc = 128 + (int) $s['termsig']; }
+            @proc_close($pr);
+            return $stufe > 0 ? 124 : $rc;
+        }
+        if (microtime(true) >= $bis) {
+            if ($stufe === 1) {
+                @proc_terminate($pr, 9);
+                @proc_close($pr);
+                return 124;
+            }
+            @proc_terminate($pr, 15);
+            $stufe = 1;
+            $bis = microtime(true) + (float) $frist;
+        }
+        usleep($schlaf);
+        $schlaf = min(50000, $schlaf * 2);
+    }
+}
+
+/**
  * Ein Programm argumentweise ausfuehren (proc_open mit einer Liste, keine
  * Schale), begrenzt durch "timeout -k 5 <sekunden>". Rueckgabe array(rc,
  * stdout, stderr) wie sp_docker_ruf(); 127 heisst: nicht zu starten.
@@ -3839,8 +3873,9 @@ function sp_prozess_ruf(array $cmd, $sekunden, $vordergrund = false)
     $aus = array(1 => '', 2 => '');
     $offen = array(1 => $pipes[1], 2 => $pipes[2]);
     $runden = 0;
-    // Rundenobergrenze und Puffergrenze (Regeln/03, fgets auf einer Pipe).
-    while ($offen && $runden < 100000) {
+    // Rundenobergrenze und Puffergrenze (Regeln/03, fgets auf einer Pipe). Die Uhr erst nach 0.12.9: haelt ein Enkel das Rohr offen, liefen sonst bis zu 100000 Runden je 1 s.
+    $ende = time() + (int) $sekunden + 15;
+    while ($offen && $runden < 100000 && time() < $ende) {
         $runden++;
         $lesen = array_values($offen);
         $w = null;
@@ -3862,7 +3897,7 @@ function sp_prozess_ruf(array $cmd, $sekunden, $vordergrund = false)
     foreach ($offen as $h) {
         fclose($h);
     }
-    $rc = proc_close($proc);
+    $rc = sp_proc_abwarten($proc, max(0, $ende - time()));
     return array((int) $rc, $aus[1], $aus[2]);
 }
 

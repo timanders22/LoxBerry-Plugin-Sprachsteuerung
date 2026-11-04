@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.12.9
+Version 0.12.10
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,11 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.12.10
+
+* **Dieses Plugin sagt weiter wie bisher an:** Es nimmt die Regeln und die neuen Ziele Dashboard-Tafel und Apple HomePod nicht. Nur die gemeinsame Sprachausgabe ist neu.
+* **Gemeinsame Sprachausgabe 1.4.0.** Einstellungen und ein gespeichertes Aus bleiben, wie sie sind; am Gerät ist nichts einzurichten.
 
 ## Neu in 0.12.9
 
