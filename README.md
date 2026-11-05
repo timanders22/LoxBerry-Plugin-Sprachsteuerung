@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.12.11
+Version 0.12.12
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,11 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.12.12
+
+- **Update:** Scheitert die Sicherung oder die Marke, bricht das Update ab und die bisherige Fassung bleibt.
+- **Ehrliche Ansage:** Geht ein Befehl auf keinem Weg hinaus (kein MQTT-Port, keine Adresse, Miniserver nicht erreichbar), sagt die Sprachsteuerung das jetzt, statt den Erfolg anzusagen.
 
 ## Neu in 0.12.11
 

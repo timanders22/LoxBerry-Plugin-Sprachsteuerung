@@ -1255,11 +1255,12 @@ def _altlast_letzte_werte() -> dict:
 MQTT_NUR_LAENGE = ("antwort", "ansage")
 
 
-def mqtt_senden(paare: dict, praefix: str, cfg: dict | None = None) -> None:
+def mqtt_senden(paare: dict, praefix: str, cfg: dict | None = None) -> bool:
+    """0.12.12 (SS-1): True heisst abgesetzt (der UDP-Weg belegt keine Ankunft), False sicher gescheitert."""
     z = mqtt_zustand()
     if not z["udpport"]:
         melde_gebremst("mqtt_kein_port", "MQTT: kein UDP-Eingangsport in der general.json.")
-        return
+        return False
     if not z["autostart"]:
         melde_gebremst("mqtt_aus", "MQTT: das Gateway ist nicht auf Autostart gestellt "
                                    "(System, MQTT Gateway). Es wird gesendet, aber "
@@ -1268,7 +1269,7 @@ def mqtt_senden(paare: dict, praefix: str, cfg: dict | None = None) -> None:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     except OSError as err:
         melde_gebremst("mqtt_socket", f"MQTT: Socket nicht moeglich ({err}).")
-        return
+        return False
     # Frueher zurueckbehaltene Werte: was der Broker noch haelt (oder, wenn
     # er nicht zu fragen ist, alles), wird unmittelbar vor seinem Wert
     # geloescht - siehe altlast_lage().
@@ -1353,8 +1354,10 @@ def mqtt_senden(paare: dict, praefix: str, cfg: dict | None = None) -> None:
         altlast_vermerken(lage, geraeumt)
     except OSError as err:
         melde_gebremst("mqtt_senden", f"MQTT: Senden fehlgeschlagen ({err}).")
+        return False
     finally:
         s.close()
+    return True
 
 
 def praefix_von(cfg: dict) -> str:
@@ -4861,6 +4864,7 @@ def ausgabe_fuer_mikrofon(cfg: dict, mikrofon: str = "", raum: str = "") -> dict
 SPRECHTEXTE = {
     "de": {
         "nicht_verstanden": "Das habe ich nicht verstanden.",
+        "nicht_gesendet": "Der Befehl ist nicht hinausgegangen, geschaltet wurde nichts.",
         "abgebrochen": "Gut, ich lasse es.",
         "ziel_unbekannt": "Ich kenne kein Gerät mit der Bezeichnung {gesucht}.",
         "vorgabeziel_unbekannt": "Für dieses Mikrofon ist der Raum {gesucht} eingetragen, "
@@ -4951,6 +4955,7 @@ SPRECHTEXTE = {
     },
     "en": {
         "nicht_verstanden": "Sorry, I didn't understand that.",
+        "nicht_gesendet": "The command did not go out; nothing was switched.",
         "abgebrochen": "All right, I'll leave it.",
         "ziel_unbekannt": "I don't know a device called {gesucht}.",
         "vorgabeziel_unbekannt": "This microphone is assigned to the room {gesucht}, "
@@ -5272,16 +5277,19 @@ _AKTION_STAND: dict = {}
 _AKTION_SPERRE = threading.Lock()
 
 
-def ziel_aktion_senden(paare: dict, praefix: str, cfg: dict) -> list:
+def ziel_aktion_senden(paare: dict, praefix: str, cfg: dict, abgesetzt: list | None = None) -> list:
     """paare senden und je Zielthema <thema>/aktion die Ruecksetzung planen.
-    Rueckgabe: die gestarteten Zeitgeber (fuer den Selbsttest)."""
+    Rueckgabe: die gestarteten Zeitgeber (fuer den Selbsttest). 0.12.12 (SS-1): 'abgesetzt' bekommt das Ergebnis
+    des Sendens."""
     themen = [k for k in paare if k.endswith("/aktion")]
     staende = {}
     with _AKTION_SPERRE:
         for k in themen:
             _AKTION_STAND[k] = _AKTION_STAND.get(k, 0) + 1
             staende[k] = _AKTION_STAND[k]
-        mqtt_senden(paare, praefix, cfg)
+        ok_gesendet = mqtt_senden(paare, praefix, cfg)
+    if abgesetzt is not None:
+        abgesetzt.append(ok_gesendet)
     zeitgeber = []
     for k in themen:
         t = threading.Timer(AKTION_RUECKSETZEN_S, _aktion_zuruecksetzen,
@@ -5856,6 +5864,7 @@ def _ausfuehren(erkannt: dict, cfg: dict, beginn: float, trocken: bool) -> dict:
         return _abschluss(erg, cfg, trocken)
 
     paare = {}
+    mqtt_abgesetzt: list = []   # 0.12.12 (SS-1)
     if cfg.get("mqtt_ein"):
         praefix = praefix_von(cfg)
         paare = {
@@ -5880,7 +5889,7 @@ def _ausfuehren(erkannt: dict, cfg: dict, beginn: float, trocken: bool) -> dict:
                 paare[thema + "/wert"] = erkannt["wert"]
         if not trocken:
             # Seit 0.12.5 geht <thema>/aktion 2 s spaeter auf "-" (E5).
-            ziel_aktion_senden(paare, praefix, cfg)
+            ziel_aktion_senden(paare, praefix, cfg, mqtt_abgesetzt)
 
     ruf = {"ok": -1}
     if not trocken and not frage:
@@ -5892,6 +5901,20 @@ def _ausfuehren(erkannt: dict, cfg: dict, beginn: float, trocken: bool) -> dict:
             _LOG.warning("Miniserver-Aufruf fehlgeschlagen: %s", ruf.get("fehler"))
             melden(3, "Der unmittelbare Miniserver-Aufruf schlaegt fehl: %s"
                       % ruf.get("fehler"), "miniserver")
+
+    # 0.12.12 (SS-1): kein Weg hat den Befehl abgesetzt - dann keine Erfolgsansage. Bis 0.12.11 hiess es "Das Licht ist
+    # aus", auch ohne UDP-Port, ohne MQTT und ohne Adresse oder bei unerreichbarem Miniserver. War MQTT abgesetzt, bleibt
+    # es beim Erfolg: ein gescheiterter Zusatzaufruf widerlegt ihn nicht, er steht im Meldebereich.
+    if not trocken and not frage and not any(mqtt_abgesetzt) and ruf.get("ok") != 1:
+        _LOG.warning("Satz %r: kein Weg hat den Befehl abgesetzt", satz)
+        erg = {"ok": 0, "quelle": quelle, "satz": satz, "mikrofon": mikrofon,
+               "zone": erkannt.get("zone", ""), "grund": "nicht_gesendet",
+               "ziel": erkannt.get("ziel"), "zielname": erkannt.get("zielname", ""),
+               "absicht": erkannt.get("absicht", ""), "aktion": erkannt.get("aktion", ""),
+               "antwort": sagen(cfg, "nicht_gesendet"), "miniserver": ruf,
+               "fehler": ruf.get("fehler", ""), "themen": sorted(paare.keys()),
+               "trocken": 0, "sekunden": round(time.monotonic() - beginn, 2)}
+        return _abschluss(erg, cfg, trocken)
 
     # ---- Ist-Wert lesen, wenn der Antworttext ihn braucht ----
     istwert = ""

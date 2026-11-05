@@ -639,7 +639,7 @@ SP_PIP_AKTUELL=""
 sp_pip_aktualisieren() {
     [ -n "$SP_PIP_AKTUELL" ] && return 0
     SP_PIP_AKTUELL=ja
-    "$VENV/bin/python3" -m pip install --upgrade pip >/dev/null 2>&1 || \
+    timeout 900 "$VENV/bin/python3" -m pip install --disable-pip-version-check --upgrade pip >/dev/null 2>&1 || \
         echo "<INFO> pip liess sich nicht aktualisieren - weiter mit der vorhandenen Fassung."
 }
 
@@ -662,7 +662,7 @@ else
     fi
     sp_pip_aktualisieren
     echo "<INFO> Installiere die Pakete aus bin/requirements.txt (benoetigt eine Internetverbindung) ..."
-    if PIPAUSGABE=$("$VENV/bin/python3" -m pip install --no-cache-dir -r "$REQ" 2>&1); then
+    if PIPAUSGABE=$(timeout 3600 "$VENV/bin/python3" -m pip install --disable-pip-version-check --no-cache-dir -r "$REQ" 2>&1); then
         printf '%s\n' "$SOLL" > "$STEMPEL" 2>/dev/null
     elif [ -n "$WY_DA" ] && "$VENV/bin/python3" -c 'import wyoming' >/dev/null 2>&1; then
         echo "<WARNING> Die Pakete aus bin/requirements.txt liessen sich nicht installieren - die bisherige virtuelle Umgebung bleibt in Gebrauch:"
@@ -708,7 +708,7 @@ else
     else
         sp_pip_aktualisieren
         echo "<INFO> Installiere aioesphomeapi (nur fuer ESPHome-Mikrofone) ..."
-        if PIPFEHLER=$("$VENV/bin/python3" -m pip install --no-cache-dir -r "$REQ_ESP" 2>&1); then
+        if PIPFEHLER=$(timeout 2400 "$VENV/bin/python3" -m pip install --disable-pip-version-check --no-cache-dir -r "$REQ_ESP" 2>&1); then
             printf '%s\n' "$SOLL_ESP" > "$STEMPEL_ESP" 2>/dev/null
         elif [ -n "$AIO_DA" ]; then
             echo "<INFO> aioesphomeapi liess sich nicht angleichen - die bisherige Fassung bleibt:"

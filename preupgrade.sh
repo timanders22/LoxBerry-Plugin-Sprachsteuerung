@@ -16,12 +16,12 @@ BASE="${ARGV5:-$LBHOMEDIR}"
 # gegen /config/plugins/... - und ein 'cp' ins Leere sieht aus wie Erfolg.
 if [ -z "$BASE" ] || [ ! -d "$BASE/config/plugins" ]; then
     echo "<INFO> preupgrade: LoxBerry-Wurzel nicht ermittelbar - nichts gesichert."
-    exit 0
+    exit 2
 fi
 # Der Ordnername darf keinen Pfadtrenner tragen - weiter unten wird mit ihm
 # verschoben und geloescht (dieselbe Pruefung wie in preinstall.sh).
 case "$PFOLDER" in
-    ''|*/*|*..*) echo "<INFO> preupgrade: unzulaessiger Ordnername '$PFOLDER' - nichts gesichert."; exit 0 ;;
+    ''|*/*|*..*) echo "<INFO> preupgrade: unzulaessiger Ordnername '$PFOLDER' - nichts gesichert."; exit 2 ;;
 esac
 
 # ---------- Ist das die Wiederholung eines abgebrochenen Updates? ----------
@@ -79,6 +79,37 @@ else
     echo "<INFO> Plugin bleibt unveraendert. Bitte Rechte und freien Platz unter $BASE/data/plugins pruefen."
     exit 2
 fi
+# ---------- Update-Schutz (05.11.2026, Bauart Govee 0.9.34) ----------
+# plugininstall.pl bricht nur bei Rueckgabewert >1 vor purge_installation ab. Die Kopie entsteht als <Ziel>.neu.<pid>, traegt 0600,
+# BEVOR Inhalt hineinkommt, wird mit cmp verglichen und erst dann per mv an ihren Platz gestellt: eine heile Sicherung bleibt heil.
+ZS_FEHL=""
+zs_hinlegen() {   # $1 Quelle, $2 Ziel
+    [ -d "$2" ] && return 1
+    zs_neu="$2.neu.$$"
+    rm -f "$zs_neu" 2>/dev/null
+    if { : > "$zs_neu"; } 2>/dev/null && chmod 600 "$zs_neu" 2>/dev/null \
+       && cp "$1" "$zs_neu" 2>/dev/null && cmp -s "$1" "$zs_neu" \
+       && mv -f "$zs_neu" "$2" 2>/dev/null; then
+        return 0
+    fi
+    rm -f "$zs_neu" 2>/dev/null
+    return 1
+}
+zs_sichere() {   # $1 Quelle, $2 Ziel: fehlt die Datei oder ist sie leer, ist ein Fehlschlag keiner
+    [ -f "$1" ] || return 0
+    zs_hinlegen "$1" "$2" && return 0
+    [ -s "$1" ] || return 1
+    echo "<WARNING> $(basename "$1") liess sich nicht sichern ($2)."
+    ZS_FEHL="$ZS_FEHL $(basename "$1")"
+    return 1
+}
+zs_schluss() {   # Fehlschlag gesammelt: Marke weg, Abbruch vor purge_installation
+    [ -n "$ZS_FEHL" ] || return 0
+    echo "<FAIL> Nicht gesichert:$ZS_FEHL - die Aktualisierung wird abgebrochen, damit der Purge die Originale nicht loescht."
+    echo "<FAIL> Die bisherige Fassung bleibt installiert. Bitte Platz und Rechte unter config/plugins und data/plugins pruefen."
+    [ -n "$SP_WIEDERHOLUNG" ] || rm -f "$BASE/data/plugins/$PFOLDER.upgrade_laeuft" 2>/dev/null
+    exit 2
+}
 
 # ---------- Die Befehlsbruecke anhalten (seit 0.12.7, Gruppe 11) ----------
 # NACH der Marke: befehlsbruecke.sh start und der Waechter pruefen dieselbe Marke und starten nicht, solange sie
@@ -222,7 +253,7 @@ for f in sprachsteuerung.json saetze.json; do
     MERKMAL=aktionstoken
     [ "$f" = saetze.json ] && MERKMAL=saetze
     if sp_hat_inhalt "$CF" "$MERKMAL"; then
-        cp -p "$CF" "$BK"
+        zs_sichere "$CF" "$BK"
     elif [ -f "$BK" ]; then
         echo "<WARNING> $f traegt keinen Inhalt - die vorhandene Zweitschrift bleibt unveraendert:"
         echo "<WARNING> $BK"
@@ -285,8 +316,7 @@ chmod 0700 "$LANG_SICHER" 2>/dev/null
     || date +%s > "$LANG_SICHER/angelegt" 2>/dev/null
 for LANG_F in verlauf.json messwerte.json ansagen.json ruhe.json; do
     [ -n "$SP_WIEDERHOLUNG" ] && [ -f "$LANG_SICHER/$LANG_F" ] && continue
-    [ -f "$BASE/data/plugins/$PFOLDER/$LANG_F" ] \
-        && cp -p "$BASE/data/plugins/$PFOLDER/$LANG_F" "$LANG_SICHER/$LANG_F" 2>/dev/null
+    zs_sichere "$BASE/data/plugins/$PFOLDER/$LANG_F" "$LANG_SICHER/$LANG_F"
 done
 # Die Wirkung pruefen, nicht den Rueckgabewert: liegt hinterher etwas da?
 # Gezaehlt werden die drei Langzeitdateien - der Zeitpunkt allein ist keine
@@ -313,6 +343,7 @@ fi
 # Bei einer Wiederholung (0.12.0) stammt er aus dem abgebrochenen Versuch
 # DIESES Updates - der Datenordner mit dem eigentlichen Merker ist dann schon
 # fort, und ohne den Nachbarn bliebe der Dienst nach dem Update aus.
+zs_schluss
 [ -n "$SP_WIEDERHOLUNG" ] || rm -f "$BASE/data/plugins/$PFOLDER.soll_laufen" 2>/dev/null
 if [ -e "$BASE/data/plugins/$PFOLDER/soll_laufen" ]; then
     touch "$BASE/data/plugins/$PFOLDER.soll_laufen" 2>/dev/null \
