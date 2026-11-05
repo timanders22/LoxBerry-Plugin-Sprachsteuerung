@@ -586,6 +586,7 @@ if ($sp_post && isset($_POST['log_holen'])) {
     $sp_was = sp_post_text('log_holen');
     $sp_datei = $sp_was === 'mitschnitt' ? $sp_p['mitschnitt'] : ($sp_was === 'protokoll' ? $sp_p['log'] : '');
     if ($sp_datei !== '' && is_file($sp_datei)) {
+        while (ob_get_level() > 0) { @ob_end_clean(); }
         header('Content-Type: text/plain; charset=utf-8');
         header('Content-Disposition: attachment; filename="sprachsteuerung_' . $sp_was . '_' . date('Ymd_Hi') . '.log"');
         header('Content-Length: ' . (int) filesize($sp_datei));
@@ -619,6 +620,7 @@ if ($sp_post && isset($_POST['vorlage'])) {
         $sp_fehler[] = sp_t('LOX.KEINE_ZIELE_VORLAGE');
         $sp_tab = 'tab-loxone';
     } else {
+        while (ob_get_level() > 0) { @ob_end_clean(); }
         header('Content-Type: application/x-download');
         header('Content-Disposition: attachment; filename="' . $sp_name . '"');
         echo $sp_inhalt;
@@ -626,6 +628,7 @@ if ($sp_post && isset($_POST['vorlage'])) {
     }
 }
 if ($sp_post && isset($_POST['sicherung_holen'])) {
+    while (ob_get_level() > 0) { @ob_end_clean(); }
     header('Content-Type: application/x-download');
     header('Content-Disposition: attachment; filename="sprachsteuerung_sicherung_'
            . date('Ymd_Hi') . '.json"');
@@ -633,6 +636,7 @@ if ($sp_post && isset($_POST['sicherung_holen'])) {
     exit;
 }
 if ($sp_post && isset($_POST['verlauf_csv'])) {
+    while (ob_get_level() > 0) { @ob_end_clean(); }
     header('Content-Type: application/x-download');
     header('Content-Disposition: attachment; filename="sprachsteuerung_verlauf_'
            . date('Ymd_Hi') . '.csv"');
@@ -1435,6 +1439,7 @@ if ($sp_post && isset($_POST['probe_holen'])) {
     // Oberflaeche.
     $sp_wav = $sp_p['datadir'] . '/probe.wav';
     if (is_file($sp_wav)) {
+        while (ob_get_level() > 0) { @ob_end_clean(); }
         header('Content-Type: audio/wav');
         header('Content-Disposition: attachment; filename="sprachprobe.wav"');
         header('Content-Length: ' . (int) filesize($sp_wav));
