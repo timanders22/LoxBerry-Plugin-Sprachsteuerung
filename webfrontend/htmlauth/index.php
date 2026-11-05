@@ -299,7 +299,7 @@ function sp_eingabe_felder($formular)
         'ansagen' => array('tts_template', 'ruhe_ein', 'ruhe_von', 'ruhe_bis', 'ansage_abstand_s',
                            'ansage_je_tag', 'miniserver_url_loeschen', 'wakeword', 'wakeword_frei',
                            'sprache', 'wartezeit', 'verlauf_zeilen'),
-        'mqtt'    => array('mqtt_ein', 'mqtt_topic', 'herzschlag_s', 'mqtt_dauer_ein', 'kalender_fragen_ein'),
+        'mqtt'    => array('mqtt_ein', 'mqtt_topic', 'herzschlag_s', 'mqtt_dauer_ein', 'kalender_fragen_ein', 'wetter_fragen_ein'),
         'modelle' => array('whisper_modell', 'whisper_modell_frei', 'piper_stimme', 'piper_stimme_frei',
                            'llm_modell', 'llm_modell_frei'),
         'mikros'  => array('m_name', 'm_art', 'm_host', 'm_port', 'm_raum', 'm_zone', 'm_alt',
@@ -700,6 +700,8 @@ if ($sp_post && isset($_POST['mqtt_save'])) {
     $sp_cfg['befehle_cmd_ein'] = isset($_POST['befehle_cmd_ein']) ? 1 : 0;
     // Gruppe 20 (0.12.8, V3/E-E4): Kalenderfragen aus haus/kalender/* (Leseverbindung des Dienstes).
     $sp_cfg['kalender_fragen_ein'] = isset($_POST['kalender_fragen_ein']) ? 1 : 0;
+    // 0.12.13: Wetterfragen aus haus/wetter/* (Weatherdata), ersatzweise weatherdata/* (dieselbe Leseverbindung).
+    $sp_cfg['wetter_fragen_ein'] = isset($_POST['wetter_fragen_ein']) ? 1 : 0;
     if (!$sp_fehler && $sp_cfg['befehle_mqtt_ein'] === 1 && !sp_bb_praefix_ok($sp_cfg['mqtt_topic'])) {
         $sp_fehler[] = sp_e(sprintf(sp_t('BEFEHL.M_PRAEFIX'), (string) $sp_cfg['mqtt_topic']));
         sp_bean('mqtt_topic');
@@ -2531,6 +2533,21 @@ foreach ($sp_themen as $sp_th => $sp_sch) {
   <table class="sm-tbl">
   <tr><th><?= sp_e(sp_t('MQTT.T_THEMA')) ?></th><th><?= sp_e(sp_t('UI013.T_RICHTUNG')) ?></th><th><?= sp_e(sp_t('MQTT.T_BEDEUTUNG')) ?></th></tr>
   <tr><td><span class="sm-mono">haus/kalender/…</span> <?= sp_e(sp_t('UI020.T_KALENDER_THEMEN')) ?></td><td><?= sp_e(sp_t('UI013.R_EIN')) ?></td><td><?= sp_e(sp_t('UI020.B_KALENDER')) ?></td></tr>
+  </table>
+  </div>
+</div>
+<?php /* 0.12.13: Wetterfragen - ab Werk aus, gespeichert mit dem vorhandenen Knopf (mqtt_save). Liest haus/wetter/ von
+   Weatherdata, ersatzweise weatherdata/, ueber dieselbe Leseverbindung wie die Kalenderfragen. */ ?>
+<div class="sm-feld" id="sp-wetter">
+  <label style="display:inline-flex;align-items:center;gap:8px;">
+    <input data-role="none" type="checkbox" name="wetter_fragen_ein" value="1" <?= sp_x2_haken('wetter_fragen_ein', (int) $sp_cfg['wetter_fragen_ein'] === 1) ? 'checked' : '' ?><?= sp_x2_mark('wetter_fragen_ein') ?>>
+    <?= sp_e(sp_t('UI021.L_WETTER')) ?>
+  </label>
+  <div class="sm-hilfe"><?= sp_e(sp_t('UI021.H_WETTER')) ?></div>
+  <div class="sm-roll">
+  <table class="sm-tbl">
+  <tr><th><?= sp_e(sp_t('MQTT.T_THEMA')) ?></th><th><?= sp_e(sp_t('UI013.T_RICHTUNG')) ?></th><th><?= sp_e(sp_t('MQTT.T_BEDEUTUNG')) ?></th></tr>
+  <tr><td><span class="sm-mono">haus/wetter/…</span> <?= sp_e(sp_t('UI021.T_WETTER_THEMEN')) ?></td><td><?= sp_e(sp_t('UI013.R_EIN')) ?></td><td><?= sp_e(sp_t('UI021.B_WETTER')) ?></td></tr>
   </table>
   </div>
 </div>

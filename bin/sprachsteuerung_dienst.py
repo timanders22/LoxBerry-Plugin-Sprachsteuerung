@@ -337,9 +337,10 @@ TTS_VORLAGE_MS4H = "http://{ip}:{port}/tts?text={text}&zone={zones}&vol={vol}"
 # Gruppe 11 (0.12.7): dazu die vier Haken der Umstellung - befehle_mqtt_ein/_steuern liest die Befehlsbruecke
 # (PHP), befehle_cmd_ein der Dienst (alter Weg <praefix>/cmd/...), endpunkt_ein der HTTP-Endpunkt.
 # Gruppe 20 (0.12.8): kalender_fragen_ein - Kalenderfragen aus haus/kalender/* (Leseverbindung zum Broker).
+# 0.12.13: wetter_fragen_ein - Wetterfragen aus haus/wetter/* bzw. weatherdata/* (dieselbe Leseverbindung).
 SCHALTER_0_1 = ("mqtt_dauer_ein", "musik_ducken", "musik_steuern", "docker_neustart",
                 "befehle_mqtt_ein", "befehle_mqtt_steuern", "befehle_cmd_ein", "endpunkt_ein",
-                "kalender_fragen_ein")
+                "kalender_fragen_ein", "wetter_fragen_ein")
 
 _LAUF = True
 _LOG = logging.getLogger("sprachsteuerung")
@@ -3781,7 +3782,8 @@ def dauer_abgleichen(cfg: dict, v) -> None:
     # anderem Praefix.
     voll = bool(cfg.get("mqtt_dauer_ein"))
     kalender = bool(cfg.get("kalender_fragen_ein"))
-    soll = voll or kalender
+    wetter = bool(cfg.get("wetter_fragen_ein"))     # 0.12.13: auch die Wetterfragen lesen ueber diese Verbindung
+    soll = voll or kalender or wetter
     praefix = praefix_von(cfg)
     if _DAUER is not None and (not soll or _DAUER.praefix != praefix or _DAUER.voll != voll):
         _DAUER.anhalten()
@@ -3790,7 +3792,8 @@ def dauer_abgleichen(cfg: dict, v) -> None:
         _DAUER = MqttDauer(praefix, voll)
         _DAUER.starten()
     if _DAUER is not None:
-        _DAUER.themen_setzen((dauer_themen(v) if voll else []) + (list(KALENDER_THEMEN) if kalender else []))
+        _DAUER.themen_setzen((dauer_themen(v) if voll else []) + (list(KALENDER_THEMEN) if kalender else [])
+                             + (list(WETTER_THEMEN) if wetter else []))
         # N1 (Gruppe 20): der alte Befehlsweg nur mit befehle_cmd_ein UND mqtt_dauer_ein - sonst ginge er mit dem
         # Kalender-Haken ohne Quittung auf.
         cmd = bool(cfg.get("befehle_cmd_ein")) and voll
@@ -4021,6 +4024,365 @@ KALENDER_SELBSTFAELLE = (
 )
 KALENDER_MUSTERFRAGEN = ("ist morgen schulfrei", "ist heute ein feiertag", "wann sind die naechsten ferien",
                          "wie lange dauern die ferien noch", "wann ist der naechste feiertag", "is there school tomorrow")
+
+
+# ---------------------------------------------------------------------------
+# 0.12.13: Wetterfragen - Abnehmer von haus/wetter/* (Anbieter Weatherdata ab 0.9.8; Vertrag
+# Pruefung-Durchgang-2026-09-29/vb_wd_skripte/wd098_themenvertrag.md, nur Vorschlag fuer Regeln/07). Ab Werk aus
+# (wetter_fragen_ein). Quelle je Frage: ZUERST haus/wetter - nur solange haus/wetter/zaehler/weatherdata sich binnen
+# WETTER_FRIST_S live aendert, das zuletzt live empfangene haus/wetter/ok 1 ist, heute/morgen/pollen nur bei datum =
+# heute und jetzt/warnung nur bei zeit juenger als WETTER_ZEIT_S. Fehlt dort ein Wert, den die Frage braucht, gelten die
+# Linienthemen weatherdata/... (fester Vorgabepraefix, Retain-Tabelle von Weatherdata: alle fluechtig, Vollversand
+# hoechstens alle 5 Minuten) - nur solange weatherdata/status/zaehler binnen WETTER_FRIST_S live wechselt,
+# status/ok 1 ist und der Wert hoechstens WETTER_LINIE_ALTER_S alt ist (Tageswerte zusaetzlich nach Mitternacht
+# empfangen). Ist beides nicht da: "Wetterdaten sind nicht verfuegbar" - nie raten, nie eine Vorgabe einsetzen.
+# Gelesen wird ueber dieselbe Leseverbindung wie die Kalenderfragen (MqttDauer, ohne Letzten Willen).
+# ---------------------------------------------------------------------------
+WETTER_FRIST_S = 120
+WETTER_ZEIT_S = 3600
+WETTER_LINIE_ALTER_S = 900
+WETTER_LINIE_PRAEFIX = "weatherdata"
+# Wortgleich mit wd_haus_themen() in Weatherdata 0.9.8 (die Probe vergleicht gegen wd098_vertrag_themen.txt).
+WETTER_HAUS_THEMEN = (
+    "haus/wetter/datum", "haus/wetter/zeit", "haus/wetter/sprache",
+    "haus/wetter/jetzt/grad", "haus/wetter/jetzt/gefuehlt_grad", "haus/wetter/jetzt/feuchte_prozent",
+    "haus/wetter/jetzt/wind_kmh", "haus/wetter/jetzt/boeen_kmh", "haus/wetter/jetzt/regen", "haus/wetter/jetzt/regen_mm_h",
+    "haus/wetter/heute/tief_grad", "haus/wetter/heute/hoch_grad", "haus/wetter/heute/regen_mm",
+    "haus/wetter/heute/regen_prozent", "haus/wetter/heute/code", "haus/wetter/heute/wort",
+    "haus/wetter/morgen/tief_grad", "haus/wetter/morgen/hoch_grad", "haus/wetter/morgen/regen_mm",
+    "haus/wetter/morgen/regen_prozent", "haus/wetter/morgen/code", "haus/wetter/morgen/wort",
+    "haus/wetter/warnung/stufe", "haus/wetter/warnung/text", "haus/wetter/pollen/stufe", "haus/wetter/pollen/art",
+    "haus/wetter/ok", "haus/wetter/zaehler/weatherdata")
+_WETTER_POLLEN = ("hasel", "erle", "esche", "birke", "graeser", "roggen", "beifuss", "ambrosia")
+# Linienthema (ohne Praefix) -> einheitlicher Schluessel. Nur Themen aus der Tabelle von Weatherdata 0.9.7.
+WETTER_LINIE_KARTE = {
+    "jetzt/temp_c": "jetzt/grad", "gefuehlt/c": "jetzt/gefuehlt_grad", "jetzt/rf_pct": "jetzt/feuchte_prozent",
+    "jetzt/wind_kmh": "jetzt/wind_kmh", "jetzt/boe_kmh": "jetzt/boeen_kmh", "jetzt/regnet": "jetzt/regen",
+    "jetzt/regen_mmh": "jetzt/regen_mm_h",
+    "prog/tag0/tmin_c": "heute/tief_grad", "prog/tag0/tmax_c": "heute/hoch_grad", "prog/tag0/code": "heute/code",
+    "prog/h12/regen_mm": "heute/regen_mm", "prog/h12/regen_w_pct": "heute/regen_prozent",
+    "prog/tag1/tmin_c": "morgen/tief_grad", "prog/tag1/tmax_c": "morgen/hoch_grad", "prog/tag1/code": "morgen/code",
+    "warnung/stufe": "warnung/stufe", "warnung/klasse": "warnung/klasse",
+}
+_WETTER_LINIE_TAG = ("heute/", "morgen/")
+_WETTER_LINIE_GATE = {"jetzt/": "jetzt/ok", "heute/": "prog/ok", "morgen/": "prog/ok", "warnung/": "warnung/ok"}
+
+
+def wetter_linie_themen(praefix: str = WETTER_LINIE_PRAEFIX) -> tuple:
+    t = ["status/zaehler", "status/ok", "jetzt/ok", "prog/ok", "warnung/ok", "pollen/ok"] + list(WETTER_LINIE_KARTE)
+    t += ["pollen/%s/heute" % a for a in _WETTER_POLLEN]
+    return tuple("%s/%s" % (praefix, x) for x in t)
+
+
+WETTER_THEMEN = WETTER_HAUS_THEMEN + wetter_linie_themen()
+# Welche Werte eine Frage braucht (die ersten muessen da sein; Zusatz nur, wenn vorhanden).
+WETTER_BRAUCHT = {
+    "temperatur": (("jetzt/grad",), ("jetzt/gefuehlt_grad",)),
+    "wind": (("jetzt/wind_kmh",), ("jetzt/boeen_kmh",)),
+    "warnung": (("warnung/stufe",), ("warnung/text", "warnung/klasse")),
+    "pollen": (("pollen/stufe",), ("pollen/art",)),
+}
+_WETTER_WMO = {
+    0: ("klar", "clear"), 1: ("überwiegend klar", "mostly clear"), 2: ("teils bewölkt", "partly cloudy"),
+    3: ("bedeckt", "overcast"), 45: ("Nebel", "fog"), 48: ("Nebel mit Reif", "freezing fog"),
+    51: ("leichter Nieselregen", "light drizzle"), 53: ("Nieselregen", "drizzle"), 55: ("starker Nieselregen", "heavy drizzle"),
+    56: ("gefrierender Nieselregen", "freezing drizzle"), 57: ("gefrierender Nieselregen", "freezing drizzle"),
+    61: ("leichter Regen", "light rain"), 63: ("Regen", "rain"), 65: ("starker Regen", "heavy rain"),
+    66: ("gefrierender Regen", "freezing rain"), 67: ("gefrierender Regen", "freezing rain"),
+    71: ("leichter Schneefall", "light snow"), 73: ("Schneefall", "snow"), 75: ("starker Schneefall", "heavy snow"),
+    77: ("Schneegriesel", "snow grains"), 80: ("Regenschauer", "rain showers"), 81: ("Regenschauer", "rain showers"),
+    82: ("heftige Regenschauer", "violent rain showers"), 85: ("Schneeschauer", "snow showers"),
+    86: ("starke Schneeschauer", "heavy snow showers"), 95: ("Gewitter", "thunderstorms"),
+    96: ("Gewitter mit Hagel", "thunderstorms with hail"), 99: ("Gewitter mit Hagel", "thunderstorms with hail"),
+}
+_WETTER_KLASSE = {
+    "wind": ("Sturm", "wind"), "gewitter": ("Gewitter", "thunderstorms"), "regen": ("Starkregen", "heavy rain"),
+    "schnee": ("Schnee", "snow"), "glaette": ("Glätte", "ice"), "frost": ("Frost", "frost"), "hitze": ("Hitze", "heat"),
+    "uv": ("UV-Strahlung", "UV radiation"), "nebel": ("Nebel", "fog"),
+}
+_WETTER_POLLEN_WORT = {
+    "hasel": ("Hasel", "hazel"), "erle": ("Erle", "alder"), "esche": ("Esche", "ash"), "birke": ("Birke", "birch"),
+    "graeser": ("Gräser", "grass"), "roggen": ("Roggen", "rye"), "beifuss": ("Beifuß", "mugwort"),
+    "ambrosia": ("Ambrosia", "ragweed"),
+}
+
+
+def _wetter_zahl(roh, unten: float, oben: float, ohne=None):
+    """Zahl im Bereich oder None; der Wert "ohne Aussage" des Vertrags (-999/-1) und "-" zaehlen wie fehlend."""
+    t = str(roh if roh is not None else "").strip()
+    if not re.fullmatch(r"-?[0-9]{1,10}(\.[0-9]{1,3})?", t):
+        return None
+    z = float(t)
+    if ohne is not None and z == ohne:
+        return None
+    return z if unten <= z <= oben else None
+
+
+def _wetter_haus_wert(kurz: str, roh):
+    if kurz.endswith("grad"):     # jetzt/grad und alle *_grad: Temperaturen, ohne Aussage -999
+        return _wetter_zahl(roh, -90, 70, ohne=-999)
+    if kurz in ("heute/wort", "morgen/wort", "warnung/text", "pollen/art", "sprache"):
+        t = str(roh if roh is not None else "").strip()
+        return t if t and t != "-" else None
+    if kurz in ("heute/code", "morgen/code"):
+        return _wetter_zahl(roh, 0, 99, ohne=-1)
+    if kurz == "warnung/stufe":
+        return _wetter_zahl(roh, 0, 4, ohne=-1)
+    if kurz == "pollen/stufe":
+        return _wetter_zahl(roh, 0, 3, ohne=-1)
+    if kurz == "jetzt/regen":
+        return _wetter_zahl(roh, 0, 1, ohne=-1)
+    return _wetter_zahl(roh, 0, 1000, ohne=-1)
+
+
+def _wetter_lebt(d, thema: str) -> tuple:
+    """(lebt, grund) - der Zaehler kam live (nicht zurueckbehalten) und hat sich binnen der Frist geaendert."""
+    z = d.wert(thema)
+    if not z.get("ok") or z.get("zurueckbehalten"):
+        return False, ("wartet" if (time.monotonic() - d.verbunden_mono) < WETTER_FRIST_S else "schweigt")
+    if int(z.get("geaendert_s", 10 ** 6)) > WETTER_FRIST_S:
+        return False, "schweigt"
+    return True, "frisch"
+
+
+def wetter_lage(d=None, heute: str | None = None, jetzt: float | None = None) -> dict:
+    """{'lage', 'haus': {...}, 'linie': {...}, 'grund'} - je Quelle die einheitlichen Werte (None = ohne Aussage) oder
+    {} wenn die Quelle nicht gilt. lage: getrennt | haus | linie | beide | keine (keine Quelle lebt)."""
+    d = _DAUER if d is None else d
+    aus = {"lage": "getrennt", "haus": {}, "linie": {}, "grund": "", "haus_lage": "", "linie_lage": ""}
+    if d is None or not d.verbunden:
+        aus["grund"] = "" if d is None else str(d.fehler or "")[:200]
+        return aus
+    heute = heute or time.strftime("%Y%m%d")
+    jetzt = time.time() if jetzt is None else float(jetzt)
+    # ---- haus/wetter ----
+    lebt, aus["haus_lage"] = _wetter_lebt(d, "haus/wetter/zaehler/weatherdata")
+    ok = d.wert("haus/wetter/ok")
+    if lebt and not (ok.get("ok") and not ok.get("zurueckbehalten") and str(ok.get("nutzlast") or "").strip() == "1"):
+        lebt, aus["haus_lage"] = False, "ohne_daten"
+    if lebt:
+        roh = {t[len("haus/wetter/"):]: d.wert(t) for t in WETTER_HAUS_THEMEN[:-2]}
+        dat = str(roh["datum"].get("nutzlast") or "").strip() if roh["datum"].get("ok") else ""
+        zt = _wetter_zahl(roh["zeit"].get("nutzlast"), 0, 4102444800) if roh["zeit"].get("ok") else None
+        tag_gilt = dat == heute
+        jetzt_gilt = zt is not None and 0 <= jetzt - zt <= WETTER_ZEIT_S
+        w = {}
+        for kurz, e in roh.items():
+            if kurz in ("datum", "zeit"):
+                continue
+            gilt = tag_gilt if kurz.split("/")[0] in ("heute", "morgen", "pollen") else (
+                jetzt_gilt if kurz.split("/")[0] in ("jetzt", "warnung") else True)
+            w[kurz] = _wetter_haus_wert(kurz, e.get("nutzlast")) if (gilt and e.get("ok")) else None
+        aus["haus"] = w
+        if not tag_gilt and not jetzt_gilt:
+            aus["haus_lage"] = "veraltet"
+    # ---- weatherdata/... (Rueckfall) ----
+    p = WETTER_LINIE_PRAEFIX + "/"
+    lebt2, aus["linie_lage"] = _wetter_lebt(d, p + "status/zaehler")
+    so = d.wert(p + "status/ok")
+    if lebt2 and not (so.get("ok") and str(so.get("nutzlast") or "").strip() == "1"):
+        lebt2, aus["linie_lage"] = False, "ohne_daten"
+    if lebt2:
+        mitternacht = time.mktime(time.strptime(heute, "%Y%m%d"))
+        def frisch(e, tageswert=False):
+            if not e.get("ok") or int(e.get("alter_s", 10 ** 6)) > WETTER_LINIE_ALTER_S:
+                return False
+            return (not tageswert) or (jetzt - int(e.get("alter_s", 0)) >= mitternacht)
+        w = {}
+        for lt, kurz in WETTER_LINIE_KARTE.items():
+            e = d.wert(p + lt)
+            tor = _WETTER_LINIE_GATE[kurz.split("/")[0] + "/"]
+            g = d.wert(p + tor)
+            torok = frisch(g) and str(g.get("nutzlast") or "").strip() == "1"
+            if not (torok and frisch(e, kurz.startswith(_WETTER_LINIE_TAG))):
+                w[kurz] = None
+                continue
+            if kurz == "warnung/klasse":
+                t = str(e.get("nutzlast") or "").strip()
+                w[kurz] = t if t and t != "-" else None
+            else:
+                w[kurz] = _wetter_haus_wert(kurz, e.get("nutzlast"))
+        po = d.wert(p + "pollen/ok")
+        stufe, art = None, None
+        if frisch(po, True) and str(po.get("nutzlast") or "").strip() == "1":
+            for a in _WETTER_POLLEN:
+                e = d.wert("%spollen/%s/heute" % (p, a))
+                v = _wetter_zahl(e.get("nutzlast"), 0, 3) if frisch(e, True) else None
+                if v is not None and (stufe is None or v > stufe):
+                    stufe, art = v, a
+        w["pollen/stufe"] = stufe
+        w["pollen/art"] = (art if stufe and stufe > 0 else ("keine" if stufe == 0 else None))
+        aus["linie"] = w
+    aus["lage"] = ("beide" if aus["haus"] and aus["linie"] else "haus" if aus["haus"] else
+                   "linie" if aus["linie"] else "keine")
+    return aus
+
+
+def _wr(x) -> int:
+    """Kaufmaennisch runden (0.5 aufwaerts, -0.5 abwaerts) - nicht Pythons Bankrundung."""
+    return int(math.floor(abs(x) + 0.5)) * (1 if x >= 0 else -1)
+
+
+def _wetter_grad(x, cfg: dict) -> str:
+    n = _wr(x)
+    if n < 0:
+        return ("minus %d" if _sprache(cfg) == "de" else "minus %d") % -n
+    return "%d" % n
+
+
+def _wetter_quelle(aktion: str, wtag: str, lage: dict) -> tuple:
+    """(Quelle, Werte) fuer eine Frage: haus/wetter, wenn es alle Pflichtwerte hat, sonst weatherdata/..., sonst
+    (None, {}). Fuer die Tagesfragen (wetter, regen, schirm) zaehlt "mindestens ein Wert des Tages"."""
+    if aktion in WETTER_BRAUCHT:
+        pflicht = WETTER_BRAUCHT[aktion][0]
+        for q in ("haus", "linie"):
+            w = lage.get(q) or {}
+            if w and all(w.get(k) is not None for k in pflicht):
+                return q, w
+        return None, {}
+    t = wtag if wtag in ("heute", "morgen") else "heute"
+    for q in ("haus", "linie"):
+        w = lage.get(q) or {}
+        if not w:
+            continue
+        if aktion == "wetter" and any(w.get(t + "/" + k) is not None for k in ("tief_grad", "hoch_grad", "code")):
+            return q, w
+        if aktion in ("regen", "schirm") and (any(w.get(t + "/" + k) is not None for k in ("regen_mm", "regen_prozent"))
+                                              or (t == "heute" and w.get("jetzt/regen") == 1)):
+            return q, w
+    return None, {}
+
+
+def wetter_antwort(aktion: str, wtag: str, mit_jetzt, lage: dict, cfg: dict) -> tuple:
+    """(grund, antwort) - kurz, Zahlen gerundet, Einheiten ausgesprochen. grund beginnt IMMER mit 'wetter'."""
+    if lage.get("lage") in ("getrennt", "keine"):
+        return "wetter_" + ("getrennt" if lage.get("lage") == "getrennt" else "fehlt"), sagen(cfg, "wet_fehlt")
+    q, w = _wetter_quelle(aktion, wtag, lage)
+    if q is None:
+        return "wetter_fehlt", sagen(cfg, "wet_fehlt")
+    sp = 0 if _sprache(cfg) == "de" else 1
+    t = wtag if wtag in ("heute", "morgen") else "heute"
+    tagwort = sagen(cfg, "wet_" + t)
+    if aktion == "temperatur":
+        g, f = w.get("jetzt/grad"), w.get("jetzt/gefuehlt_grad")
+        if f is not None and abs(_wr(f) - _wr(g)) >= 2:
+            return "wetter", sagen(cfg, "wet_temp_gefuehlt", t=_wetter_grad(g, cfg), g=_wetter_grad(f, cfg))
+        return "wetter", sagen(cfg, "wet_temp", t=_wetter_grad(g, cfg))
+    if aktion == "wind":
+        v, b = _wr(w["jetzt/wind_kmh"]), w.get("jetzt/boeen_kmh")
+        if b is not None and _wr(b) >= v + 10:
+            return "wetter", sagen(cfg, "wet_wind_boeen", v=v, b=_wr(b))
+        return "wetter", sagen(cfg, "wet_wind", v=v)
+    if aktion == "warnung":
+        s = int(w["warnung/stufe"])
+        if s == 0:
+            return "wetter", sagen(cfg, "wet_warnung_keine")
+        text = w.get("warnung/text") if q == "haus" and (w.get("sprache") or "de") == _sprache(cfg) else None
+        if text is None and w.get("warnung/klasse") in _WETTER_KLASSE:
+            text = _WETTER_KLASSE[w["warnung/klasse"]][sp]
+        if text and text != "keine":
+            return "wetter", sagen(cfg, "wet_warnung_text", s=s, text=text)
+        return "wetter", sagen(cfg, "wet_warnung", s=s)
+    if aktion == "pollen":
+        s = float(w["pollen/stufe"])
+        if s <= 0:
+            return "wetter", sagen(cfg, "wet_pollen_keine")
+        stufe = sagen(cfg, "wet_pollen_%d" % min(6, max(1, int(round(s * 2)))))
+        art = w.get("pollen/art")
+        if art in _WETTER_POLLEN_WORT:
+            return "wetter", sagen(cfg, "wet_pollen_art", stufe=stufe, art=_WETTER_POLLEN_WORT[art][sp])
+        return "wetter", sagen(cfg, "wet_pollen", stufe=stufe)
+    if aktion == "wetter":
+        teile = []
+        code = w.get(t + "/code")
+        if code is not None and int(code) in _WETTER_WMO:
+            teile.append(_WETTER_WMO[int(code)][sp])
+        lo, hi = w.get(t + "/tief_grad"), w.get(t + "/hoch_grad")
+        if lo is not None and hi is not None:
+            teile.append(sagen(cfg, "wet_spanne", lo=_wetter_grad(lo, cfg), hi=_wetter_grad(hi, cfg)))
+        elif hi is not None:
+            teile.append(sagen(cfg, "wet_bis", hi=_wetter_grad(hi, cfg)))
+        p = w.get(t + "/regen_prozent")
+        if p is not None and _wr(p) >= 30:
+            teile.append(sagen(cfg, "wet_regenrisiko", p=_wr(p)))
+        satz = sagen(cfg, "wet_tag", tag=tagwort[:1].upper() + tagwort[1:], text=", ".join(teile))
+        if mit_jetzt and w.get("jetzt/grad") is not None:
+            satz = sagen(cfg, "wet_temp", t=_wetter_grad(w["jetzt/grad"], cfg)) + " " + satz
+        return "wetter", satz
+    # regen und schirm
+    if t == "heute" and w.get("jetzt/regen") == 1:
+        return "wetter", sagen(cfg, "wet_schirm_jetzt" if aktion == "schirm" else "wet_regen_jetzt")
+    mm, p = w.get(t + "/regen_mm"), w.get(t + "/regen_prozent")
+    nass = (mm is not None and mm >= 0.3) or (p is not None and p >= 50)
+    vielleicht = not nass and p is not None and 30 <= p < 50
+    if nass:
+        menge = (sagen(cfg, "wet_menge", mm=_wr(mm)) if mm is not None and mm >= 1 else sagen(cfg, "wet_menge_etwas"))
+        return "wetter", sagen(cfg, "wet_schirm_ja" if aktion == "schirm" else "wet_regen_ja", tag=tagwort, menge=menge)
+    if vielleicht:
+        return "wetter", sagen(cfg, "wet_vielleicht", p=_wr(p))
+    return "wetter", sagen(cfg, "wet_schirm_nein" if aktion == "schirm" else "wet_regen_nein", tag=tagwort)
+
+
+def wetter_beantworten(erkannt: dict, cfg: dict, trocken: bool, beginn: float) -> dict:
+    """Absicht 'wetter': eine Frage, kein Befehl - nichts geht als Befehl an Loxone, nichts unter haus/, kein Kontext.
+    ok=1 nur bei einer Antwort aus frischen Werten. Das Protokoll nennt Lage und Grund (gedrosselt), nie Werte."""
+    aktion = str(erkannt.get("aktion") or "")
+    if not cfg.get("wetter_fragen_ein"):
+        lage = {"lage": "aus"}
+        grund, antwort = "wetter_aus", sagen(cfg, "nicht_verstanden")
+    else:
+        lage = wetter_lage()
+        grund, antwort = wetter_antwort(aktion, str(erkannt.get("wtag") or ""), erkannt.get("jetzt"), lage, cfg)
+    if grund != "wetter":
+        melde_gebremst("wetter_lage_" + str(lage["lage"]), "Wetterfrage (%s) ohne Antwort aus frischen Daten: Lage %s, "
+                       "Grund %s." % (aktion, lage["lage"], grund), 900)
+    return _abschluss(_ergebnis(erkannt, cfg, beginn, trocken, ok=1 if grund == "wetter" else 0, grund=grund,
+                                wetter_lage=str(lage["lage"]), antwort=antwort), cfg, trocken)
+
+
+def wetter_abbild(cfg: dict):
+    """Block 'wetter' fuer das Abbild (Reiter Test) - nur mit dem Haken. Ohne Sekundenalter (wie kalender_abbild())."""
+    if not cfg.get("wetter_fragen_ein"):
+        return None
+    k = wetter_lage()
+    h, l = k.get("haus") or {}, k.get("linie") or {}
+    return {"lage": k["lage"], "haus_lage": k.get("haus_lage", ""), "linie_lage": k.get("linie_lage", ""),
+            "grund": k["grund"] if k["lage"] == "getrennt" else "",
+            "grad": (h.get("jetzt/grad") if h.get("jetzt/grad") is not None else l.get("jetzt/grad")),
+            "warnstufe": (h.get("warnung/stufe") if h.get("warnung/stufe") is not None else l.get("warnung/stufe"))}
+
+
+# Feste Faelle fuer den Selbsttest: (aktion, wtag, jetzt, Quelle, abweichende Werte, erwarteter Schluessel).
+_WET_W = {"jetzt/grad": 7.4, "jetzt/gefuehlt_grad": 6.0, "jetzt/wind_kmh": 12.0, "jetzt/boeen_kmh": 15.0, "jetzt/regen": 0,
+          "heute/tief_grad": 3.0, "heute/hoch_grad": 9.0, "heute/code": 3, "heute/regen_mm": 0.0, "heute/regen_prozent": 10,
+          "morgen/tief_grad": -2.0, "morgen/hoch_grad": 4.0, "morgen/code": 61, "morgen/regen_mm": 4.2,
+          "morgen/regen_prozent": 80, "warnung/stufe": 0, "warnung/text": "keine", "pollen/stufe": 0, "pollen/art": "keine",
+          "sprache": "de"}
+WETTER_SELBSTFAELLE = (
+    ("temperatur", "", 0, {}, "wet_temp"),
+    ("temperatur", "", 0, {"jetzt/gefuehlt_grad": 2.0}, "wet_temp_gefuehlt"),
+    ("wind", "", 0, {}, "wet_wind"),
+    ("wind", "", 0, {"jetzt/boeen_kmh": 40.0}, "wet_wind_boeen"),
+    ("regen", "heute", 0, {}, "wet_regen_nein"),
+    ("regen", "heute", 0, {"jetzt/regen": 1}, "wet_regen_jetzt"),
+    ("regen", "morgen", 0, {}, "wet_regen_ja"),
+    ("regen", "heute", 0, {"heute/regen_prozent": 40}, "wet_vielleicht"),
+    ("schirm", "heute", 0, {}, "wet_schirm_nein"),
+    ("schirm", "morgen", 0, {}, "wet_schirm_ja"),
+    ("schirm", "heute", 0, {"jetzt/regen": 1}, "wet_schirm_jetzt"),
+    ("warnung", "", 0, {}, "wet_warnung_keine"),
+    ("warnung", "", 0, {"warnung/stufe": 2, "warnung/text": "Sturmböen"}, "wet_warnung_text"),
+    ("pollen", "", 0, {}, "wet_pollen_keine"),
+    ("pollen", "", 0, {"pollen/stufe": 2.0, "pollen/art": "birke"}, "wet_pollen_art"),
+    ("wetter", "morgen", 0, {}, "wet_tag"),
+    ("temperatur", "", 0, {"jetzt/grad": None}, "wet_fehlt"),
+    ("pollen", "", 0, {"pollen/stufe": None}, "wet_fehlt"),
+    ("warnung", "", 0, {"warnung/stufe": None}, "wet_fehlt"),
+    ("wetter", "morgen", 0, {"morgen/tief_grad": None, "morgen/hoch_grad": None, "morgen/code": None}, "wet_fehlt"),
+)
+WETTER_MUSTERFRAGEN = ("wie warm ist es draussen", "wie wird das wetter morgen", "regnet es heute noch",
+                       "brauche ich einen schirm", "gibt es eine wetterwarnung", "wie ist der pollenflug",
+                       "how cold is it outside")
 
 
 def alexa_token_ok(token) -> bool:
@@ -4952,6 +5314,39 @@ SPRECHTEXTE = {
         "kal_getrennt": "Dazu habe ich gerade keine Kalenderdaten, die Verbindung zum MQTT-Broker steht nicht.",
         "kal_heute": "heute",
         "kal_morgen": "morgen",
+        # 0.12.13: Wetterfragen - kurz, Zahlen gerundet, Einheiten ausgesprochen.
+        "wet_fehlt": "Wetterdaten sind nicht verfügbar.",
+        "wet_heute": "heute",
+        "wet_morgen": "morgen",
+        "wet_temp": "Draußen sind es {t} Grad.",
+        "wet_temp_gefuehlt": "Draußen sind es {t} Grad, gefühlt {g} Grad.",
+        "wet_wind": "Draußen weht der Wind mit {v} Kilometern pro Stunde.",
+        "wet_wind_boeen": "Draußen weht der Wind mit {v} Kilometern pro Stunde, in Böen bis {b}.",
+        "wet_warnung_keine": "Nein, es gibt keine Wetterwarnung.",
+        "wet_warnung": "Ja, es gibt eine Wetterwarnung der Stufe {s}.",
+        "wet_warnung_text": "Ja, Warnstufe {s}: {text}.",
+        "wet_pollen_keine": "Heute ist kein Pollenflug zu erwarten.",
+        "wet_pollen": "Heute {stufe} Pollenflug.",
+        "wet_pollen_art": "Heute {stufe} Pollenflug, vor allem {art}.",
+        "wet_pollen_1": "kaum",
+        "wet_pollen_2": "geringer",
+        "wet_pollen_3": "geringer bis mittlerer",
+        "wet_pollen_4": "mittlerer",
+        "wet_pollen_5": "mittlerer bis starker",
+        "wet_pollen_6": "starker",
+        "wet_spanne": "{lo} bis {hi} Grad",
+        "wet_bis": "bis {hi} Grad",
+        "wet_regenrisiko": "Regenwahrscheinlichkeit {p} Prozent",
+        "wet_tag": "{tag}: {text}.",
+        "wet_regen_jetzt": "Ja, es regnet gerade.",
+        "wet_regen_ja": "Ja, {tag} gibt es voraussichtlich {menge}.",
+        "wet_regen_nein": "Nein, {tag} ist kein Regen zu erwarten.",
+        "wet_vielleicht": "Vielleicht, die Regenwahrscheinlichkeit liegt bei {p} Prozent.",
+        "wet_schirm_jetzt": "Ja, nimm einen Schirm mit, es regnet gerade.",
+        "wet_schirm_ja": "Ja, nimm besser einen Schirm mit, {tag} gibt es voraussichtlich {menge}.",
+        "wet_schirm_nein": "Nein, {tag} brauchst du wohl keinen Schirm.",
+        "wet_menge": "etwa {mm} Millimeter Regen",
+        "wet_menge_etwas": "etwas Regen",
     },
     "en": {
         "nicht_verstanden": "Sorry, I didn't understand that.",
@@ -5044,6 +5439,38 @@ SPRECHTEXTE = {
         "kal_getrennt": "I don't have calendar data right now, the connection to the MQTT broker is down.",
         "kal_heute": "today",
         "kal_morgen": "tomorrow",
+        "wet_fehlt": "Weather data is not available.",
+        "wet_heute": "today",
+        "wet_morgen": "tomorrow",
+        "wet_temp": "It is {t} degrees outside.",
+        "wet_temp_gefuehlt": "It is {t} degrees outside, it feels like {g}.",
+        "wet_wind": "The wind is blowing at {v} kilometres per hour.",
+        "wet_wind_boeen": "The wind is blowing at {v} kilometres per hour, with gusts up to {b}.",
+        "wet_warnung_keine": "No, there is no weather warning.",
+        "wet_warnung": "Yes, there is a weather warning of level {s}.",
+        "wet_warnung_text": "Yes, warning level {s}: {text}.",
+        "wet_pollen_keine": "No pollen is expected today.",
+        "wet_pollen": "Today the pollen count is {stufe}.",
+        "wet_pollen_art": "Today the pollen count is {stufe}, mainly {art}.",
+        "wet_pollen_1": "very low",
+        "wet_pollen_2": "low",
+        "wet_pollen_3": "low to moderate",
+        "wet_pollen_4": "moderate",
+        "wet_pollen_5": "moderate to high",
+        "wet_pollen_6": "high",
+        "wet_spanne": "{lo} to {hi} degrees",
+        "wet_bis": "up to {hi} degrees",
+        "wet_regenrisiko": "{p} percent chance of rain",
+        "wet_tag": "{tag}: {text}.",
+        "wet_regen_jetzt": "Yes, it is raining right now.",
+        "wet_regen_ja": "Yes, {tag} there will probably be {menge}.",
+        "wet_regen_nein": "No, no rain is expected {tag}.",
+        "wet_vielleicht": "Maybe, the chance of rain is {p} percent.",
+        "wet_schirm_jetzt": "Yes, take an umbrella, it is raining right now.",
+        "wet_schirm_ja": "Yes, better take an umbrella, {tag} there will probably be {menge}.",
+        "wet_schirm_nein": "No, you probably won't need an umbrella {tag}.",
+        "wet_menge": "about {mm} millimetres of rain",
+        "wet_menge_etwas": "some rain",
     },
 }
 
@@ -5536,7 +5963,8 @@ def satz_kern(satz: str, cfg: dict, v, mikrofon: str = "", raum: str = "",
     # Schalter bleibt "mach lauter" so unverstanden wie bisher.
     # Gruppe 20 (0.12.8): die Kalenderfragen nur mit kalender_fragen_ein (wie die Musik mit musik_steuern).
     eingebaut = (tuple(EINGEBAUT_VORGABE) + (("musik",) if cfg.get("musik_steuern") else ())
-                 + (("kalender",) if cfg.get("kalender_fragen_ein") else ()))
+                 + (("kalender",) if cfg.get("kalender_fragen_ein") else ())
+                 + (("wetter",) if cfg.get("wetter_fragen_ein") else ()))     # 0.12.13
     erkannt = (_erkennen(v, satz, vorgabe, eingebaut) if v is not None
                else {"ok": 0, "grund": "keine_regeln"})
     quelle = "muster"
@@ -5624,6 +6052,8 @@ def _ausfuehren_mit(erkannt: dict, cfg: dict, beginn: float, trocken: bool, v) -
         return musik_ausfuehren(erkannt, cfg, trocken, beginn)
     if absicht == "kalender":
         return kalender_beantworten(erkannt, cfg, trocken, beginn)
+    if absicht == "wetter":
+        return wetter_beantworten(erkannt, cfg, trocken, beginn)
     if absicht == "relativ":
         aufgeloest = relativ_aufloesen(erkannt, cfg, v, beginn, trocken)
         if aufgeloest.get("_fertig"):
@@ -5680,7 +6110,7 @@ def _mehrteilig(satz, cfg, v, vorgabe, eingebaut, grunddaten, mikrofon, zone, sc
     for teil in teile:
         e = _erkennen(v, teil, vorgabe, eingebaut)
         # Gruppe 20 (0.12.8, E-E12): eine Kalenderfrage ist kein Befehl - wie die Timer-Verwaltung nicht zerlegen.
-        if not e.get("ok") or e.get("bestaetigen") or str(e.get("absicht") or "") in ("timer", "kalender") \
+        if not e.get("ok") or e.get("bestaetigen") or str(e.get("absicht") or "") in ("timer", "kalender", "wetter") \
                 or _dauer_fehler(e, cfg) is not None:
             return None
         erkannte.append(dict(e, quelle="muster", mikrofon=mikrofon, zone=zone,
@@ -8558,7 +8988,7 @@ def abbild_schreiben(cfg: dict, sats: dict | None = None) -> dict:
     # letzten zusaetzlichen Ansage (ok -1 = gesendet, Ausgang unklar). Die
     # Feldnamen liest webfrontend/htmlauth/sp_test.php.
     # Gruppe 20 (0.12.8, N2): der Block auch mit den Kalenderfragen (Leseverbindung); dazu der Block kalender.
-    if cfg.get("mqtt_dauer_ein") or cfg.get("kalender_fragen_ein"):
+    if cfg.get("mqtt_dauer_ein") or cfg.get("kalender_fragen_ein") or cfg.get("wetter_fragen_ein"):
         d = _DAUER
         daten["mqtt_dauer"] = {
             "verbunden": 1 if (d is not None and d.verbunden) else 0,
@@ -8570,6 +9000,9 @@ def abbild_schreiben(cfg: dict, sats: dict | None = None) -> dict:
     kal = kalender_abbild(cfg)
     if kal is not None:
         daten["kalender"] = kal
+    wet = wetter_abbild(cfg)     # 0.12.13
+    if wet is not None:
+        daten["wetter"] = wet
     letzte = json_lesen(DATEI_AUSGABE)
     if letzte.get("ts"):
         daten["letzte_ansage"] = {
@@ -9187,6 +9620,51 @@ def selbsttest() -> int:
                 zeilen.append("[INFO] Kalenderfragen: '%s' wird nicht als Kalenderfrage erkannt%s." % (
                     frage, (" - die Regel '%s' der Satzdatei greift vorher" % e.get("muster"))
                     if e.get("muster") else ""))
+    # ---- 0.12.13: Wetterfragen ----
+    wet_f = 0
+    for aktion, wtag, mj, abw, soll_schl in WETTER_SELBSTFAELLE:
+        w = dict(_WET_W, **abw)
+        g, a = wetter_antwort(aktion, wtag, mj, {"lage": "haus", "haus": w, "linie": {}}, cfg)
+        vorlage = SPRECHTEXTE[_sprache(cfg)].get(soll_schl) or ""
+        kopf = vorlage.split("{")[0]
+        if g != ("wetter_fehlt" if soll_schl == "wet_fehlt" else "wetter") or not a.startswith(kopf):
+            wet_f += 1
+            zeilen.append("[FEHL] Wetterfragen: Antwortfall %s %s %s ergibt %s/%r." % (aktion, wtag, abw, g, a[:60]))
+    for lage, soll_grund in (("getrennt", "wetter_getrennt"), ("keine", "wetter_fehlt")):
+        if wetter_antwort("temperatur", "", 0, {"lage": lage, "haus": {}, "linie": {}}, cfg)[0] != soll_grund:
+            wet_f += 1
+            zeilen.append("[FEHL] Wetterfragen: Lage %s ergibt nicht %s." % (lage, soll_grund))
+    fehler += wet_f
+    if not cfg.get("wetter_fragen_ein"):
+        zeilen.append("[INFO] Wetterfragen: aus (Reiter MQTT, 'Wetterfragen beantworten'); %d Antwortfaelle offline %s."
+                      % (len(WETTER_SELBSTFAELLE), "ohne Befund" if not wet_f else "mit Befund"))
+    else:
+        wab = json_lesen(DATEI_LOXONE).get("wetter")
+        lage = str(wab.get("lage") or "") if isinstance(wab, dict) else ""
+        if lage in ("haus", "beide"):
+            zeilen.append("[OK]   Wetterfragen: Weatherdata liefert die Wetteruebersicht (haus/wetter).")
+        elif lage == "linie":
+            zeilen.append("[HINW] Wetterfragen: nur ueber den Ersatzweg weatherdata/... - in Weatherdata Reiter MQTT "
+                          "'Wetter an andere Plugins geben' anhaken.")
+        elif lage == "keine" and isinstance(wab, dict) and "wartet" in (wab.get("haus_lage"), wab.get("linie_lage")):
+            zeilen.append("[INFO] Wetterfragen: warte auf das erste Lebenszeichen von Weatherdata (hoechstens 2 Minuten).")
+        elif lage in ("keine", "getrennt"):
+            fehler += 1
+            zeilen.append("[FEHL] Wetterfragen: %s - Fragen werden mit 'Wetterdaten sind nicht verfuegbar' beantwortet. "
+                          "Ist Weatherdata installiert, 'Werte ueber MQTT senden' an und 'Wetter an andere Plugins geben' "
+                          "angehakt?" % ("keine frischen Wetterdaten" if lage == "keine" else "keine Verbindung zum Broker"))
+        else:
+            zeilen.append("[INFO] Wetterfragen: der laufende Dienst meldet noch keinen Wetterstand "
+                          "(laeuft er, und ist der Haken gespeichert?).")
+        zeilen.append("[INFO] Wetterfragen: %d Antwortfaelle offline %s." % (
+            len(WETTER_SELBSTFAELLE), "ohne Befund" if not wet_f else "mit Befund"))
+        if v is not None:
+            for frage in WETTER_MUSTERFRAGEN:
+                e = _erkennen(v, frage, "", tuple(EINGEBAUT_VORGABE) + ("wetter",))
+                if e.get("ok") and e.get("absicht") == "wetter":
+                    continue
+                zeilen.append("[INFO] Wetterfragen: '%s' wird nicht als Wetterfrage erkannt%s." % (
+                    frage, (" - die Regel '%s' der Satzdatei greift vorher" % e.get("muster")) if e.get("muster") else ""))
     if cfg.get("musik_ducken") or cfg.get("musik_steuern"):
         mz = [str(e.get("name") or e.get("host")) for e in (cfg.get("satelliten") or [])
               if isinstance(e, dict) and musik_zone(cfg, e.get("zone"))[0]]

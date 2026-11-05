@@ -353,6 +353,29 @@ function sp_test_dienstzeilen(array $cfg, array $abbild)
             $zeilen[] = sp_pruefzeile(-1, sp_t('UI020.F_KALENDER'), sp_e(sp_t('UI020.A_KALENDER_UNBEKANNT')));
         }
     }
+    /* 0.12.13: Wetterfragen aus dem Abbild-Block wetter {lage, haus_lage, linie_lage, grund, grad, warnstufe}. Aus ist grau,
+     * der Ersatzweg gruen mit Hinweis, ohne frische Daten rot mit Hilfe. */
+    if (empty($cfg['wetter_fragen_ein'])) {
+        $zeilen[] = sp_pruefzeile(-1, sp_t('UI021.F_WETTER'), sp_e(sp_t('UI021.A_WETTER_AUS')));
+    } else {
+        $sp_w = isset($abbild['wetter']) && is_array($abbild['wetter']) ? $abbild['wetter'] : array();
+        $sp_wl = isset($sp_w['lage']) && is_string($sp_w['lage']) ? $sp_w['lage'] : '';
+        $sp_wz = function ($k) use ($sp_w) { return (isset($sp_w[$k]) && is_numeric($sp_w[$k])) ? (string) (int) round((float) $sp_w[$k]) : '-'; };     // (int): nie "-0"
+        if ($sp_wl === 'haus' || $sp_wl === 'beide') {
+            $zeilen[] = sp_pruefzeile(1, sp_t('UI021.F_WETTER'), sp_e(sprintf(sp_t('UI021.A_WETTER_HAUS'), $sp_wz('grad'), $sp_wz('warnstufe'))));
+        } elseif ($sp_wl === 'linie') {
+            $zeilen[] = sp_pruefzeile(1, sp_t('UI021.F_WETTER'), sp_e(sprintf(sp_t('UI021.A_WETTER_LINIE'), $sp_wz('grad'))));
+        } elseif ($sp_wl === 'keine' && in_array('wartet', array($sp_w['haus_lage'] ?? '', $sp_w['linie_lage'] ?? ''), true)) {
+            $zeilen[] = sp_pruefzeile(-1, sp_t('UI021.F_WETTER'), sp_e(sp_t('UI021.A_WETTER_WARTET')));
+        } elseif ($sp_wl === 'keine') {
+            $zeilen[] = sp_pruefzeile(0, sp_t('UI021.F_WETTER'), sp_e(sp_t('UI021.A_WETTER_KEINE')));
+        } elseif ($sp_wl === 'getrennt') {
+            $sp_wg = isset($sp_w['grund']) && is_scalar($sp_w['grund']) && (string) $sp_w['grund'] !== '' ? (string) $sp_w['grund'] : '-';
+            $zeilen[] = sp_pruefzeile(0, sp_t('UI021.F_WETTER'), sp_e(sprintf(sp_t('UI021.A_WETTER_GETRENNT'), $sp_wg)));
+        } else {
+            $zeilen[] = sp_pruefzeile(-1, sp_t('UI021.F_WETTER'), sp_e(sp_t('UI021.A_WETTER_UNBEKANNT')));
+        }
+    }
     // Letzte Ansage: Block letzte_ansage {ok, grund, ts} oder ansage_ok/ansage_grund/ansage_ts.
     $la = isset($abbild['letzte_ansage']) && is_array($abbild['letzte_ansage']) ? $abbild['letzte_ansage'] : array();
     $ok = $wert($la, array('ok'));

@@ -1005,12 +1005,112 @@ def _kalender_regeln():
 EINGEBAUTE_REGELN = EINGEBAUTE_REGELN + _kalender_regeln()
 
 
+# ---------------------------------------------------------------------------
+# 0.12.13: Wetterfragen - Abnehmer von haus/wetter/* (Anbieter Weatherdata ab 0.9.8, Vertrag vb_wd_skripte/
+# wd098_themenvertrag.md, nur Vorschlag fuer Regeln/07), Rueckfall auf die Linienthemen weatherdata/*. Nur auf Anfrage
+# des Dienstes (Haken wetter_fragen_ein, ab Werk aus). Feste Muster ohne {ziel} wie die Kalenderfragen; eine Regel der
+# Satzdatei geht vor ("wie warm ist es {ziel}" mit einem Fuehler draussen bleibt beim Fuehler).
+# aktion temperatur | wind | wetter (wtag heute|morgen, jetzt=1: dazu die Temperatur jetzt) | regen (wtag) |
+# schirm (wtag) | warnung | pollen.
+# ---------------------------------------------------------------------------
+def _wetter_regeln():
+    draussen = "[draussen|aussen|im freien|vor der tuer|]"
+    regeln = [
+        _r("wetter", "wie [warm|kalt|heiss] ist es [gerade|jetzt|] " + draussen, "wetter", "temperatur"),
+        _r("wetter", "wie [warm|kalt|heiss] ist es " + draussen + " [gerade|jetzt|]", "wetter", "temperatur"),
+        _r("wetter", "wie viel grad [hat es|haben wir|sind es|ist es|hat's] [gerade|jetzt|] " + draussen, "wetter",
+           "temperatur"),
+        _r("wetter", "wie viel grad [sind es|hat es] " + draussen + " [gerade|jetzt|]", "wetter", "temperatur"),
+        _r("wetter", "[welche|was fuer eine] temperatur [hat es|haben wir|ist es|ist] [gerade|jetzt|] " + draussen,
+           "wetter", "temperatur"),
+        _r("wetter", "wie [hoch|] ist die [aussentemperatur|temperatur draussen|temperatur aussen]", "wetter",
+           "temperatur"),
+        _r("wetter", "wie windig ist es [gerade|jetzt|] " + draussen, "wetter", "wind"),
+        _r("wetter", "wie [stark|kraeftig] ist der wind [gerade|jetzt|] " + draussen, "wetter", "wind"),
+        _r("wetter", "wie ist das wetter [gerade|jetzt|] " + draussen, "wetter", "wetter", wtag="heute", jetzt=1),
+        _r("wetter", "wie wird das wetter", "wetter", "wetter", wtag="heute"),
+        _r("wetter", "gibt es eine [wetterwarnung|unwetterwarnung|warnung vor unwetter|amtliche warnung]",
+           "wetter", "warnung"),
+        _r("wetter", "gibt es [gerade|heute|] [eine|irgendeine|] [wetterwarnung|unwetterwarnung|unwetterwarnungen|"
+           "wetterwarnungen]", "wetter", "warnung"),
+        _r("wetter", "[liegt|besteht] [gerade|] eine [wetterwarnung|unwetterwarnung] vor", "wetter", "warnung"),
+        _r("wetter", "[ist|sind] [eine|] [wetterwarnung|unwetterwarnung|wetterwarnungen|unwetterwarnungen] "
+           "[aktiv|da]", "wetter", "warnung"),
+        _r("wetter", "wie [ist|steht es um] den pollenflug [heute|]", "wetter", "pollen"),
+        _r("wetter", "wie ist der pollenflug [heute|]", "wetter", "pollen"),
+        _r("wetter", "wie [stark|hoch] ist der pollenflug [heute|]", "wetter", "pollen"),
+        _r("wetter", "[gibt es|fliegen] [heute|] [viele|] pollen [heute|]", "wetter", "pollen"),
+        _r("wetter", "wie ist die pollenbelastung [heute|]", "wetter", "pollen"),
+    ]
+    for tag in ("heute", "morgen"):
+        regeln += [
+            _r("wetter", "wie [wird|ist] das wetter " + tag, "wetter", "wetter", wtag=tag),
+            _r("wetter", "wie [wird|ist] " + tag + " das wetter", "wetter", "wetter", wtag=tag),
+            _r("wetter", "was sagt der wetterbericht [fuer|] " + tag, "wetter", "wetter", wtag=tag),
+            _r("wetter", "[wie ist die|was sagt die] [wettervorhersage|vorhersage] [fuer|] " + tag, "wetter",
+               "wetter", wtag=tag),
+            _r("wetter", "wie [warm|kalt|heiss] wird es " + tag, "wetter", "wetter", wtag=tag),
+            _r("wetter", "wie [warm|kalt|heiss] wird es " + tag + " [draussen|aussen]", "wetter", "wetter", wtag=tag),
+            _r("wetter", "wetter " + tag, "wetter", "wetter", wtag=tag),
+            _r("wetter", "regnet es " + tag + " [noch|]", "wetter", "regen", wtag=tag),
+            _r("wetter", "wird es " + tag + " [noch|] regnen", "wetter", "regen", wtag=tag),
+            _r("wetter", "gibt es " + tag + " [noch|] regen", "wetter", "regen", wtag=tag),
+            _r("wetter", "[brauche ich|brauchen wir|brauch ich] " + tag + " einen [regenschirm|schirm]", "wetter",
+               "schirm", wtag=tag),
+            _r("wetter", "[brauche ich|brauchen wir|brauch ich] einen [regenschirm|schirm] " + tag, "wetter",
+               "schirm", wtag=tag),
+            _r("wetter", "[soll|sollte] ich " + tag + " einen [regenschirm|schirm] mitnehmen", "wetter", "schirm",
+               wtag=tag),
+        ]
+    regeln += [
+        _r("wetter", "regnet es [gerade|jetzt|noch|]", "wetter", "regen", wtag="heute"),
+        _r("wetter", "wird es [noch|] regnen", "wetter", "regen", wtag="heute"),
+        _r("wetter", "[brauche ich|brauchen wir|brauch ich] einen [regenschirm|schirm]", "wetter", "schirm",
+           wtag="heute"),
+        _r("wetter", "[soll|sollte] ich einen [regenschirm|schirm] mitnehmen", "wetter", "schirm", wtag="heute"),
+    ]
+    aussen_en = "[outside|outdoors|out there|]"
+    regeln += [
+        _r("wetter", "how [warm|cold|hot] is it [now|right now|] " + aussen_en, "wetter", "temperatur"),
+        _r("wetter", "how [warm|cold|hot] is it " + aussen_en + " [now|right now|]", "wetter", "temperatur"),
+        _r("wetter", "what [is|s] the [outside|outdoor|] temperature [outside|now|]", "wetter", "temperatur"),
+        _r("wetter", "how windy is it [now|] " + aussen_en, "wetter", "wind"),
+        _r("wetter", "how [strong|hard] is the wind [now|] " + aussen_en, "wetter", "wind"),
+        _r("wetter", "[what s|what is|how s|how is] the weather [like|] [now|right now|] " + aussen_en, "wetter",
+           "wetter", wtag="heute", jetzt=1),
+        _r("wetter", "is there [a|any] [weather warning|severe weather warning|storm warning|weather alert]", "wetter",
+           "warnung"),
+        _r("wetter", "are there any [weather warnings|severe weather warnings|weather alerts]", "wetter", "warnung"),
+        _r("wetter", "[what s|what is|how is|how s] the pollen [count|level|] [today|]", "wetter", "pollen"),
+        _r("wetter", "is the pollen [count|] high [today|]", "wetter", "pollen"),
+        _r("wetter", "is it raining [now|right now|]", "wetter", "regen", wtag="heute"),
+        _r("wetter", "do i need an umbrella", "wetter", "schirm", wtag="heute"),
+        _r("wetter", "should i take an umbrella", "wetter", "schirm", wtag="heute"),
+    ]
+    for tag_en, tag in (("today", "heute"), ("tomorrow", "morgen")):
+        regeln += [
+            _r("wetter", "[what s|what is|how s|how is|what will] the weather [be|] [like|] " + tag_en, "wetter",
+               "wetter", wtag=tag),
+            _r("wetter", "what is the [weather forecast|forecast] [for|] " + tag_en, "wetter", "wetter", wtag=tag),
+            _r("wetter", "how [warm|cold|hot] will it [be|get] " + tag_en, "wetter", "wetter", wtag=tag),
+            _r("wetter", "[will it|is it going to] rain " + tag_en, "wetter", "regen", wtag=tag),
+            _r("wetter", "is it raining " + tag_en, "wetter", "regen", wtag=tag),
+            _r("wetter", "do i need an umbrella " + tag_en, "wetter", "schirm", wtag=tag),
+            _r("wetter", "should i take an umbrella " + tag_en, "wetter", "schirm", wtag=tag),
+        ]
+    return tuple(regeln)
+
+
+EINGEBAUTE_REGELN = EINGEBAUTE_REGELN + _wetter_regeln()
+
+
 # Ohne Angabe des Dienstes: alle Gruppen ausser Musik und Kalender - beide brauchen einen
 # Schalter (die Musik dazu eine Zone, der Kalender den Anbieter haus/kalender/*; siehe oben).
 EINGEBAUT_VORGABE = ("timer", "erinnerung", "relativ")
 # Die Reihenfolge der Gruppen: Musik vor den relativen Befehlen - "mach
 # lauter" ohne Ziel gehoert der Musik. Gruppe 20 (0.12.8): der Kalender davor (feste Muster ohne Ziel).
-_GRUPPEN_FOLGE = ("timer", "erinnerung", "musik", "kalender", "relativ")
+# 0.12.13: das Wetter nach dem Kalender, ebenfalls feste Muster ohne Ziel und nur auf Anfrage (wetter_fragen_ein).
+_GRUPPEN_FOLGE = ("timer", "erinnerung", "musik", "kalender", "wetter", "relativ")
 
 
 class Verstehen:

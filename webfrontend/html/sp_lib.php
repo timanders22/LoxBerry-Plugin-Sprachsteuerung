@@ -636,9 +636,9 @@ function sp_config($erzeugen = true)
 
     /* Gruppe 11 (0.12.7): die vier Haken der Umstellung nur als 0 oder 1 - wie SCHALTER_0_1 im Dienst. Ein Text wie
      * "nein" oder eine Liste ist AUS, nicht "irgendwie wahr". */
-    // Gruppe 20 (0.12.8): dazu kalender_fragen_ein (Kalenderfragen, ab Werk aus).
+    // Gruppe 20 (0.12.8): dazu kalender_fragen_ein (Kalenderfragen, ab Werk aus); 0.12.13 wetter_fragen_ein.
     foreach (array('befehle_mqtt_ein', 'befehle_mqtt_steuern', 'befehle_cmd_ein', 'endpunkt_ein',
-                   'kalender_fragen_ein') as $sp_h) {
+                   'kalender_fragen_ein', 'wetter_fragen_ein') as $sp_h) {
         $sp_w = isset($cfg[$sp_h]) ? $cfg[$sp_h] : 0;
         $cfg[$sp_h] = ($sp_w === 1 || $sp_w === true || $sp_w === '1') ? 1 : 0;
     }

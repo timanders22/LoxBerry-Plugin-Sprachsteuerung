@@ -203,6 +203,7 @@ function sp_wert_pruefen($pfad, $wert)
         case 'befehle_cmd_ein':
         case 'endpunkt_ein':
         case 'kalender_fragen_ein':     // Gruppe 20 (0.12.8, N4)
+        case 'wetter_fragen_ein':       // 0.12.13
         case 'musik_ducken':
         case 'musik_steuern':
         case 'docker_neustart':
@@ -455,7 +456,9 @@ function sp_cfg_pruefen(array $cfg)
                      // Gruppe 11 (0.12.7): fehlen sie (Sicherung bis 0.12.6), ist das kein Fehler.
                      'befehle_mqtt_ein', 'befehle_mqtt_steuern', 'befehle_cmd_ein', 'endpunkt_ein',
                      // Gruppe 20 (0.12.8, N4): fehlt er (Sicherung bis 0.12.7), ist das kein Fehler.
-                     'kalender_fragen_ein');
+                     'kalender_fragen_ein',
+                     // 0.12.13: fehlt er (Sicherung bis 0.12.12), ist das kein Fehler.
+                     'wetter_fragen_ein');
     foreach ($einfach as $k) {
         if (!array_key_exists($k, $cfg)) { continue; }
         $t = sp_wert_pruefen($k, $cfg[$k]);

@@ -13,6 +13,15 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 
 ---
 
+## Neu in 0.12.13
+
+Ohne echtes Mikrofon und ohne echten Broker gebaut; gegen einen Prüf-Broker und mit dem echten Dienstcode gefahren.
+
+- **Wetterfragen** (Reiter MQTT, Haken „Wetterfragen beantworten“, ab Werk aus): „Wie warm ist es draußen?“, „Wie ist das Wetter?“, „Wie wird das Wetter heute/morgen?“, „Regnet es heute noch?“, „Brauche ich einen Schirm?“, „Gibt es eine Wetterwarnung?“, „Wie ist der Pollenflug?“, „Wie windig ist es?“ – auf Deutsch und Englisch. Antworten kurz, Zahlen gerundet, Einheiten ausgesprochen („Draußen sind es 7 Grad, gefühlt 4 Grad.“), eine Warnung nur mit Stufe und kurzem Namen.
+- **Woher:** zuerst die Wetterübersicht `haus/wetter/…` von Weatherdata (ab 0.9.8, dort Reiter MQTT „Wetter an andere Plugins geben“). Fehlt sie oder ist sie zu alt, die eigenen Werte von Weatherdata unter `weatherdata/…`. Ist beides nicht da: „Wetterdaten sind nicht verfügbar“ – die Anlage rät nie.
+- **So geht es:** 1. Weatherdata installieren, dort im Reiter MQTT „Wetter an andere Plugins geben“ anhaken. 2. Hier im Reiter MQTT „Wetterfragen beantworten“ anhaken und speichern. 3. Nach höchstens zwei Minuten fragen. Der Reiter Test zeigt die Zeile „Wetterfragen“.
+- Eine Wetterfrage ist kein Befehl: an Loxone gehen nur antwort, ok und grund (`grund` beginnt mit „wetter“). Eine eigene Regel der Satzdatei geht vor.
+
 ## Neu in 0.12.12
 
 - **Update:** Scheitert die Sicherung oder die Marke, bricht das Update ab und die bisherige Fassung bleibt.

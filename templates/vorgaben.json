@@ -56,6 +56,7 @@
     "befehle_cmd_ein": 0,
     "endpunkt_ein": 0,
     "kalender_fragen_ein": 0,
+    "wetter_fragen_ein": 0,
 
     "miniserver_url": "",
     "aktionstoken": "",
@@ -184,6 +185,13 @@
     "                        1.1.4): Raum, Lautstaerke (-1 = 40 von SonoX), Sprache",
     "Der alte Befehlsweg <praefix>/cmd/... gilt nur mit befehle_cmd_ein UND",
     "mqtt_dauer_ein (N1)."
+  ],
+
+  "_hinweis_0_12_13": [
+    "Seit 0.12.13, ab Werk aus (0):",
+    "  wetter_fragen_ein     Wetterfragen (Wie warm ist es draussen?) aus haus/wetter/*",
+    "                        von Weatherdata, ersatzweise weatherdata/*; dieselbe",
+    "                        Leseverbindung wie die Kalenderfragen; fehlt der Schluessel: 0"
   ],
 
   "retain": {
