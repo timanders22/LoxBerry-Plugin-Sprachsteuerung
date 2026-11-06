@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.12.12
+Version 0.12.14
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,11 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.12.14
+
+- **Kein Ausweichen, wenn Google oder Alexa bewusst schweigen.** Chromecast 4 Lox NG ab 1.3.31 und Alexa-NG ab 1.0.12 melden ehrlich, wenn sie eine Ansage absichtlich nicht sprechen: derselbe Text lief eben (`429 GRUND=DOPPELT`), die Sperre aus Loxone ist gesetzt (`409 GRUND=GESPERRT`) oder in Alexa-NG gilt die Ruhezeit (`409 GRUND=RUHEZEIT`). Die Sprachsteuerung wertet das wie ihre eigene Ruhezeit bzw. Wiederholungsbremse: Bei Antwortweg „nur Loxone“ sprechen dann nicht ersatzweise die Lautsprecher der Sprachgeräte. Echte Ausfälle (Plugin antwortet nicht, Token falsch, kein Lautsprecher verbunden, Stundengrenze) weichen weiter aus.
+- **Sprachmodul 1.4.2:** Wird eine Ansage bewusst nicht gesprochen (gerade schon gesagt, Sperre aus Loxone, Ruhezeit), steht das im Protokoll nicht mehr als Fehler, sondern als „nicht gesprochen“ mit Grund – und kein anderer Lautsprecher springt ein.
 
 ## Neu in 0.12.13
 

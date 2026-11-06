@@ -4627,6 +4627,10 @@ def alexa_ansagen(cfg: dict, tts: dict, text: str, dringend: bool = False) -> di
         return {"ok": 0, "grund": "alexa_fehlt",
                 "meldung": "Alexa-NG ist nicht installiert oder antwortet nicht wie erwartet "
                            "(HTTP %d)." % code}
+    bewusst = bewusst_grund(code, zeile)      # 0.12.14
+    if bewusst:
+        return {"ok": 0, "grund": bewusst,
+                "meldung": "Alexa-NG: HTTP %d %s - bewusst nicht gesprochen, kein Rueckfall" % (code, zeile[:160])}
     return {"ok": 0, "grund": "alexa_fehler", "meldung": "Alexa-NG: HTTP %d %s" % (code, zeile[:160])}
 
 
@@ -4649,7 +4653,8 @@ def alexa_lage(tts: dict) -> tuple:
 # Ansage-3: Google-Lautsprecher ueber Chromecast 4 Lox NG (ab Werk nicht
 # gewaehlt). Schnittstelle wie Alexa-NG; gesendet ist eine Ansage NUR bei
 # HTTP 200 und Zeilenanfang SPRECHEN;OK=1 - das schliesst UNVERAENDERT (gleicher
-# Text binnen 30 s) und TEXT_NULL ein, wie bei Alexa-NG. OK=1 heisst "dort
+# Text binnen 30 s, bis Chromecast 1.3.30) und TEXT_NULL ein, wie bei Alexa-NG.
+# Seit 0.12.14: 429 DOPPELT, 409 GESPERRT/RUHEZEIT -> bewusst_grund(), kein Rueckfall. OK=1 heisst "dort
 # eingereiht", nicht "gesprochen". Kein eigener Wiederholversuch: binnen 30 s
 # waere er UNVERAENDERT, und bei UNKLAR=1 kann die Ansage schon laufen.
 # Faellt der Weg aus, sprechen die Lautsprecher der Sprachgeraete
@@ -4676,6 +4681,22 @@ def _google_grund(zeile: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+# 0.12.14 (Befund Hausherr 05.11.2026): Chromecast 4 Lox NG ab 1.3.31 und Alexa-NG ab 1.0.12 antworten auf eine bewusst nicht
+# gesprochene Ansage ehrlich mit OK=0 - 429 DOPPELT (derselbe Text lief eben), 409 GESPERRT (Sperre aus Loxone), 409 RUHEZEIT
+# (Ruhezeit von Alexa-NG). Das ist kein Ausfall: grund "bremse" bzw. "ruhe" wie die eigenen Sperren, damit
+# satelliten_sprechen() nicht auf die Lautsprecher der Sprachgeraete ausweicht (die Ansage kaeme doppelt oder trotz Sperre).
+# Alte Gegenseiten (200 OK=1 UNVERAENDERT/UEBERSPRUNGEN) sind ok=1 und weichen ohnehin nicht aus. Andere 409/429
+# (SPRECHEN_AUS, STUNDENGRENZE, BREMSE von Alexa-NG) bleiben Ausfaelle wie bisher.
+BEWUSST_NICHT_GESPROCHEN = {(429, "DOPPELT"): "bremse", (409, "GESPERRT"): "ruhe", (409, "RUHEZEIT"): "ruhe"}
+
+
+def bewusst_grund(code: int, zeile: str) -> str:
+    """'bremse', 'ruhe' oder '' - siehe BEWUSST_NICHT_GESPROCHEN."""
+    if not str(zeile or "").startswith("SPRECHEN;OK=0"):
+        return ""
+    return BEWUSST_NICHT_GESPROCHEN.get((int(code or 0), _google_grund(zeile)), "")
+
+
 def google_bewerten(code: int, zeile: str, fehler: str, art: str = "SPRECHEN") -> dict:
     """Antwort des Endpunkts -> Ergebnis. Die Meldung nennt HTTP-Code und
     Antwortzeile (mit GRUND) - nie Token oder Ansagetext."""
@@ -4694,6 +4715,10 @@ def google_bewerten(code: int, zeile: str, fehler: str, art: str = "SPRECHEN") -
     if not grund:
         return {"ok": 0, "grund": "google_unerwartet",
                 "meldung": "%s antwortet nicht wie erwartet (HTTP %d, ohne GRUND)." % (GOOGLE_NAME, code)}
+    bewusst = bewusst_grund(code, zeile) if art == "SPRECHEN" else ""
+    if bewusst:
+        return {"ok": 0, "grund": bewusst,
+                "meldung": "%s: HTTP %d %s - bewusst nicht gesprochen, kein Rueckfall" % (GOOGLE_NAME, code, zeile[:160])}
     hinweis = GOOGLE_GRUENDE.get(grund, "")
     return {"ok": 0, "grund": "google_fehler",
             "meldung": "%s: HTTP %d %s%s" % (GOOGLE_NAME, code, zeile[:160],
