@@ -299,7 +299,11 @@ function sp_eingabe_felder($formular)
         'ansagen' => array('tts_template', 'ruhe_ein', 'ruhe_von', 'ruhe_bis', 'ansage_abstand_s',
                            'ansage_je_tag', 'miniserver_url_loeschen', 'wakeword', 'wakeword_frei',
                            'sprache', 'wartezeit', 'verlauf_zeilen'),
-        'mqtt'    => array('mqtt_ein', 'mqtt_topic', 'herzschlag_s', 'mqtt_dauer_ein', 'kalender_fragen_ein', 'wetter_fragen_ein'),
+        'mqtt'    => array('mqtt_ein', 'mqtt_topic', 'herzschlag_s', 'mqtt_dauer_ein', 'kalender_fragen_ein', 'wetter_fragen_ein',
+                           // 0.12.15 (Bestandspruefung 09.11.2026): der Handler mqtt_save liest auch die drei Befehle-Haken
+                           // und beanstandet gerade dann, wenn befehle_mqtt_ein angehakt ist - ohne Eintrag hier kam nach
+                           // der Beanstandung der gespeicherte Haken zurueck.
+                           'befehle_mqtt_ein', 'befehle_mqtt_steuern', 'befehle_cmd_ein'),
         'modelle' => array('whisper_modell', 'whisper_modell_frei', 'piper_stimme', 'piper_stimme_frei',
                            'llm_modell', 'llm_modell_frei'),
         'mikros'  => array('m_name', 'm_art', 'm_host', 'm_port', 'm_raum', 'm_zone', 'm_alt',
