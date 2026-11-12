@@ -2853,31 +2853,36 @@ function sp_vorlage_pruefen(&$geprueft = null, &$gesamt = null)
  * Aliasnamen, MQTT-Themen. Bis 0.9.11 liess sie sich nur ueber ein einziges
  * Textfeld bearbeiten und nirgends sichern.
  *
- * Das AKTIONSTOKEN und die Miniserver-Adresse gehen NICHT mit: in ihnen
- * stecken Zugangsdaten, und eine Sicherungsdatei liegt am Ende im Download-
- * Ordner eines Rechners, der nicht der LoxBerry ist.
+ * 0.12.17 (Entscheidung des Hausherrn 12.11.2026, CLAUDE.md §9): die
+ * Sicherung traegt das AKTIONSTOKEN, die Miniserver-Adresse (samt
+ * Zugangsdaten darin) und die Schluessel der ESPHome-Mikrofone. Ohne sie ist
+ * sie nach einem Umzug auf einen zweiten LoxBerry wertlos: jede Adresse im
+ * Miniserver bekaeme HTTP 403, und die Mikrofone muessten neu eingerichtet
+ * werden. Bis 0.12.16 blieben alle drei draussen (Sicherungsfassung 1); eine
+ * solche Datei bleibt zurueckspielbar und laesst die geltenden Werte stehen
+ * (sp_sicherung_lesen(), Hinweis LIB012.SICH_ALT).
+ *
+ * Weiterhin NICHT mit gehen die Sprechtoken fuer Alexa-NG und Chromecast 4
+ * Lox NG (gemeinsame Sprachausgabe, Nr. 36 b - dieselbe Regel in allen
+ * Linien mit Sprachmodul, Muster WOLF ISM NG) und das Formularmerkmal: es
+ * steht nicht in der Konfiguration, sondern wird aus formgeheimnis
+ * abgeleitet (sp_formtoken()).
  * ================================================================== */
+define('SP_SICHERUNG_FASSUNG', 2);
+
 function sp_sicherung_bauen($pruefen = true)
 {
     $cfg = sp_config();
-    foreach (array('aktionstoken', 'miniserver_url') as $geheim) {
-        unset($cfg[$geheim]);
-    }
-    // Auch die Schluessel der ESPHome-Mikrofone bleiben hier.
-    if (isset($cfg['satelliten']) && is_array($cfg['satelliten'])) {
-        foreach ($cfg['satelliten'] as $i => $s) {
-            if (is_array($s)) { unset($cfg['satelliten'][$i]['schluessel']); }
-        }
-    }
-    // Und die Sprechtoken fuer Alexa-NG (Ansage-1) und Chromecast 4 Lox NG
-    // (Ansage-3) - sie werden wie Kennwoerter behandelt. Nr. 36 b: eine Quelle.
+    // Die Sprechtoken fuer Alexa-NG (Ansage-1) und Chromecast 4 Lox NG
+    // (Ansage-3) bleiben draussen. Nr. 36 b: eine Quelle.
     if (isset($cfg['tts'])) { $cfg['tts'] = ansage_sicherung_bereinigen($cfg['tts']); }
     $sp_sich = array(
         'art'      => 'sprachsteuerung-sicherung',
-        'fassung'  => 1,
+        'fassung'  => SP_SICHERUNG_FASSUNG,
         'erzeugt'  => date('c'),
-        'hinweis'  => 'Aktionstoken, Miniserver-Adresse, Mikrofon-Schluessel und die '
-                    . 'Sprechtoken fuer Alexa-NG und Chromecast 4 Lox NG sind absichtlich NICHT enthalten.',
+        'hinweis'  => 'Enthaelt das Aktionstoken, die Miniserver-Adresse samt Zugangsdaten darin und die '
+                    . 'Schluessel der ESPHome-Mikrofone - wie ein Kennwort behandeln. Die Sprechtoken fuer '
+                    . 'Alexa-NG und Chromecast 4 Lox NG sind nicht enthalten.',
         'config'   => $cfg,
         'saetze'   => sp_saetze(),
     );
@@ -2916,6 +2921,110 @@ function sp_rueckspiel_altwerte()
 }
 
 /**
+ * 0.12.17: Form des Aktionstokens in einer Sicherung. So weit, wie Token
+ * wirklich aussehen (Regeln/05, VolkswagenID 0.9.10): was ohne Kodierung in
+ * eine Adresse passt, bis 64 Zeichen. sp_token_erzeugen() bildet nur
+ * Kleinbuchstaben und Ziffern; ein anders gebildetes Token darf mehr. Die
+ * Untergrenze 16 ist die des Endpunkts (webfrontend/html/index.php: unter 16
+ * Zeichen gilt kein Token als eingerichtet) - ein kuerzeres Token schaltete
+ * jede Adresse im Miniserver auf 403, und sp_token() ersetzte es nicht, weil
+ * es nicht leer ist. Leer heisst "kein Token gesichert" und ist kein
+ * unzulaessiger Wert - dann bleibt das geltende (sp_sicherung_lesen()).
+ */
+function sp_sicherung_token_ok($t)
+{
+    return is_string($t) && preg_match('/^(?:[A-Za-z0-9_.\-]{16,64})?\z/', $t) === 1;
+}
+
+/**
+ * 0.12.17: Form des Schluessels eines ESPHome-Mikrofons in einer Sicherung.
+ * Das Formular nimmt jede Zeichenkette (Reiter Mikrofone); deshalb hier nur,
+ * was in einer Zeichenkette dieser Art nichts zu suchen hat: Steuerzeichen,
+ * mehr als 256 Byte, kein Text. Leer heisst "kein Schluessel".
+ */
+function sp_sicherung_mikroschluessel_ok($k)
+{
+    return is_string($k) && strlen($k) <= 256 && preg_match('/[\x00-\x1F\x7F]/', $k) !== 1;
+}
+
+/**
+ * 0.12.17: Welche Schluessel kennt diese Fassung? Dieselbe Herkunft wie die
+ * Vorgaben in sp_config(): templates/vorgaben.json, die Runde-2-Vorgaben
+ * (sp_vorgaben_r2()), die Grenzen und die Haken, die sp_config() selbst setzt.
+ * Im Block tts die Felder, die sp_config() liest, und die Sprechtoken; je
+ * Mikrofon die Felder des Formulars (Reiter Mikrofone) und "passwort", das
+ * der Dienst fuer ESPHome liest (bin/sprachsteuerung_dienst.py, APIClient).
+ * Rueckgabe null, wenn vorgaben.json nicht lesbar ist - dann ist "bekannt"
+ * nicht feststellbar, und das Zurueckspielen weist ab.
+ */
+function sp_sicherung_bekannte_schluessel()
+{
+    $vor = sp_vorgaben();
+    if (!$vor) { return null; }
+    list($r2, $r2g) = sp_vorgaben_r2();
+    $oben = array_keys($vor + $r2 + array('aktionstoken' => '', 'miniserver_url' => '', 'antwortweg' => '',
+                                          'mqtt_topic' => '', 'satelliten' => array(), 'tts' => array(),
+                                          'ruhe' => array()));
+    foreach (array_keys(sp_grenzen() + $r2g) as $g) {
+        if (strpos((string) $g, 'tts_') !== 0) { $oben[] = (string) $g; }
+    }
+    foreach (array('befehle_mqtt_ein', 'befehle_mqtt_steuern', 'befehle_cmd_ein', 'endpunkt_ein',
+                   'kalender_fragen_ein', 'wetter_fragen_ein') as $h) {
+        $oben[] = $h;
+    }
+    $tts = array_merge(array_keys(isset($vor['tts']) && is_array($vor['tts']) ? $vor['tts'] : array()),
+                       array_keys(isset($r2['tts']) && is_array($r2['tts']) ? $r2['tts'] : array()),
+                       ansage_geheim(),
+                       array('mode', 'ip', 'port', 'zones', 'volume', 'lang', 'template', 'stimme', 'cc_praefix',
+                             'cc_ziel', 'alexa_geraet', 'alexa_token', 'alexa_laut', 'google_geraet', 'google_token',
+                             'google_laut', 'sonos_zone', 'sonos_laut', 'sonox_raum', 'sonox_laut', 'sonox_sprache'));
+    return array('oben' => array_fill_keys($oben, true), 'tts' => array_fill_keys($tts, true),
+                 'ruhe' => array_fill_keys(array('ein', 'von', 'bis'), true),
+                 'satellit' => array_fill_keys(array('name', 'art', 'host', 'port', 'raum', 'zone', 'schluessel',
+                                                     'ausgabe', 'passwort'), true));
+}
+
+/** Der Name eines verworfenen Schluessels fuer Meldung und Protokoll: er stammt aus der Datei, also nur, was in
+ *  eine Zeile gehoert (kein Zeilenumbruch, kein Semikolon), hoechstens 64 Zeichen. */
+function sp_sicherung_name($n)
+{
+    $n = (string) preg_replace('/[^A-Za-z0-9_.\-\[\]]/', '?', (string) $n);
+    return strlen($n) > 64 ? substr($n, 0, 64) . '...' : $n;
+}
+
+/**
+ * 0.12.17: Unbekannte Schluessel aus dem config-Teil einer Sicherung
+ * entfernen. Rueckgabe: die Namen ('fremd', 'tts.x', 'satelliten[2].y'),
+ * nie Werte. Ein Block, der kein Block ist, bleibt der Pruefung ueberlassen
+ * (sp_cfg_pruefen(), sp_satelliten_befunde()).
+ */
+function sp_sicherung_fremdes_verwerfen(array &$c, array $bekannt)
+{
+    $weg = array();
+    foreach (array_keys($c) as $k) {
+        if (!isset($bekannt['oben'][(string) $k])) { $weg[] = sp_sicherung_name($k); unset($c[$k]); }
+    }
+    foreach (array('tts', 'ruhe') as $b) {
+        if (!isset($c[$b]) || !is_array($c[$b])) { continue; }
+        foreach (array_keys($c[$b]) as $k) {
+            if (!isset($bekannt[$b][(string) $k])) { $weg[] = $b . '.' . sp_sicherung_name($k); unset($c[$b][$k]); }
+        }
+    }
+    if (isset($c['satelliten']) && is_array($c['satelliten'])) {
+        foreach ($c['satelliten'] as $i => $s) {
+            if (!is_array($s)) { continue; }
+            foreach (array_keys($s) as $k) {
+                if (!isset($bekannt['satellit'][(string) $k])) {
+                    $weg[] = 'satelliten[' . (is_int($i) ? $i + 1 : '?') . '].' . sp_sicherung_name($k);
+                    unset($c['satelliten'][$i][$k]);
+                }
+            }
+        }
+    }
+    return $weg;
+}
+
+/**
  * Eine Sicherung pruefen und einspielen.
  *
  * Geprueft wird die FORM, und abgewiesen wird benannt - nicht
@@ -2937,6 +3046,14 @@ function sp_sicherung_lesen($roh, $nur_pruefen = false)
     if (!isset($d['art']) || $d['art'] !== 'sprachsteuerung-sicherung') {
         return array(0, sp_t('LIB012.SICH_KENNZEICHEN'));
     }
+    /* 0.12.17: die Sicherungsfassung entscheidet, was die Datei tragen MUSS.
+     * 1 (bis 0.12.16, auch ohne Angabe): ohne Aktionstoken, Miniserver-Adresse
+     * und Mikrofon-Schluessel. 2 (ab 0.12.17): mit allen dreien. Eine andere
+     * Angabe stammt nicht aus "Sicherung herunterladen" dieser Fassungen. */
+    $sp_fs = array_key_exists('fassung', $d) ? $d['fassung'] : 1;
+    if ($sp_fs !== 1 && $sp_fs !== 2) {
+        return array(0, sp_t('LIB012.SICH_FASSUNG'));
+    }
     if (!isset($d['config']) || !is_array($d['config'])
         || !isset($d['saetze']) || !is_array($d['saetze'])) {
         return array(0, sp_t('LIB012.SICH_TEILE'));
@@ -2945,6 +3062,17 @@ function sp_sicherung_lesen($roh, $nur_pruefen = false)
         || !isset($d['saetze']['ziele']) || !is_array($d['saetze']['ziele'])) {
         return array(0, sp_t('LIB012.SICH_LISTEN'));
     }
+    /* 0.12.17 (Entscheidung des Hausherrn 12.11.2026, CLAUDE.md §9 "Fremdes wird vor dem Zusammenfuehren
+     * abgelehnt"): Schluessel, die diese Fassung nicht kennt, werden NICHT uebernommen. Bis 0.12.16 legte
+     * array_merge() sie still in die Konfiguration. Die Datei wird deswegen nicht abgewiesen - es ist eine
+     * Sicherung dieses Plugins (Kennzeichen oben); die Erfolgsmeldung und das Protokoll nennen die verworfenen
+     * Namen, nie Werte. Dieselbe Regel in den Bloecken tts, ruhe und je Mikrofon. Ohne lesbare Vorgaben laesst
+     * sich "bekannt" nicht feststellen - dann wird abgewiesen, nicht geraten (fail closed). */
+    $sp_bekannt = sp_sicherung_bekannte_schluessel();
+    if ($sp_bekannt === null) {
+        return array(0, sp_t('LIB012.SICH_VORGABEN_FEHLEN'));
+    }
+    $sp_verworfen = sp_sicherung_fremdes_verwerfen($d['config'], $sp_bekannt);
     // Ansage-1: die neuen Felder werden geprueft wie im Formular - eine
     // Sicherung mit einem unbrauchbaren Wert wird benannt abgewiesen, nicht
     // zurechtgebogen (Klasse 10). Ein leeres Ziel ist erlaubt: so steht es in
@@ -2975,13 +3103,70 @@ function sp_sicherung_lesen($roh, $nur_pruefen = false)
             return array(0, sprintf(sp_t('LIB012.SICH_WERTE'), implode(', ', $falsch)));
         }
     }
-    // Das laufende Token und die Miniserver-Adresse BLEIBEN - sie stehen
-    // nicht in der Sicherung, und ein Einspielen darf die Adressen im
-    // Miniserver nicht ungueltig machen.
+    /* 0.12.17: die Zugangsdaten der Sicherung. Fassung 2 MUSS Aktionstoken,
+     * Miniserver-Adresse und je Mikrofon den Schluessel tragen - fehlt einer,
+     * ist die Datei unvollstaendig und wird als Ganzes abgewiesen (sonst
+     * fiele der Wert still auf den geltenden oder leeren zurueck). Geprueft
+     * wird die FORM, nie wird ein Wert in eine Meldung geschrieben; die
+     * Beanstandungen kommen unten mit denen des Formulars in EINE Meldung.
+     * Fassung 1 traegt keinen davon: dann gelten die bisherigen weiter, und
+     * die Erfolgsmeldung sagt es (LIB012.SICH_ALT). */
+    $sp_zugang = array();
+    $sp_hinweise = array();
+    $sp_dc = $d['config'];
+    if ($sp_fs === 2) {
+        foreach (array('aktionstoken', 'miniserver_url') as $sp_g) {
+            if (!array_key_exists($sp_g, $sp_dc)) {
+                $sp_zugang[] = sprintf(sp_t('LIB012.SICH_ZUGANG_FEHLT'), $sp_g);
+            }
+        }
+        if (array_key_exists('aktionstoken', $sp_dc) && !sp_sicherung_token_ok($sp_dc['aktionstoken'])) {
+            $sp_zugang[] = sprintf(sp_t('LIB012.SICH_ZUGANG_FORM'), 'aktionstoken');
+        }
+        if (isset($sp_dc['satelliten']) && is_array($sp_dc['satelliten'])) {
+            foreach ($sp_dc['satelliten'] as $sp_i => $sp_s) {
+                if (!is_array($sp_s)) { continue; }     // benennt sp_satelliten_befunde()
+                $sp_n = 'satelliten[' . (is_int($sp_i) ? $sp_i + 1 : '?') . '].schluessel';
+                if (!array_key_exists('schluessel', $sp_s)) {
+                    $sp_zugang[] = sprintf(sp_t('LIB012.SICH_ZUGANG_FEHLT'), $sp_n);
+                } elseif (!sp_sicherung_mikroschluessel_ok($sp_s['schluessel'])) {
+                    $sp_zugang[] = sprintf(sp_t('LIB012.SICH_ZUGANG_FORM'), $sp_n);
+                }
+            }
+        }
+    }
     $alt = sp_config();
     $neu = array_merge($alt, $d['config']);
-    $neu['aktionstoken'] = $alt['aktionstoken'];
-    $neu['miniserver_url'] = $alt['miniserver_url'];
+    if ($sp_fs === 2 && array_key_exists('aktionstoken', $sp_dc) && is_string($sp_dc['aktionstoken'])
+        && $sp_dc['aktionstoken'] !== '') {
+        // Das Token der Sicherung gilt; sp_token() erzeugt danach keins neu (es ist nicht leer).
+        $neu['aktionstoken'] = $sp_dc['aktionstoken'];
+        $sp_tokenweg = 'aus der Sicherung, gleich';
+        if (!hash_equals((string) $alt['aktionstoken'], $sp_dc['aktionstoken'])) {
+            $sp_hinweise[] = sp_t('LIB012.SICH_TOKEN_NEU');
+            $sp_tokenweg = 'aus der Sicherung, geaendert';
+        }
+    } else {
+        // Fassung 1, oder Fassung 2 mit leerem Token ("nicht gesichert", Entscheidung des
+        // Hausherrn 12.11.2026: ein leerer Wert ueberschreibt keinen bestehenden): das
+        // geltende bleibt - die Adressen im Miniserver behalten ihre Gueltigkeit. Genannt
+        // wird es nur, wenn es eines gibt; geleert wird das Token nie beim Zurueckspielen.
+        $neu['aktionstoken'] = $alt['aktionstoken'];
+        $sp_tokenweg = 'beibehalten (Sicherung bis 0.12.16)';
+        if ($sp_fs === 2) {
+            $sp_tokenweg = 'beibehalten (Sicherung ohne Token)';
+            if (trim((string) $alt['aktionstoken']) !== '') { $sp_hinweise[] = sp_t('LIB012.SICH_TOKEN_LEER'); }
+        }
+    }
+    /* Die Miniserver-Adresse: dieselbe Regel. Eine leere Adresse in der Sicherung heisst "nicht
+     * gesichert"; eine hier eingetragene bleibt und wird genannt, eine leere bleibt leer, ohne
+     * Meldung. Leeren geht nur im Formular (Haken "Adresse loeschen"). */
+    if ($sp_fs === 2 && array_key_exists('miniserver_url', $sp_dc) && $sp_dc['miniserver_url'] !== '') {
+        $neu['miniserver_url'] = $sp_dc['miniserver_url'];     // Form: sp_cfg_pruefen() unten
+    } else {
+        $neu['miniserver_url'] = $alt['miniserver_url'];
+        if ($sp_fs === 2 && (string) $alt['miniserver_url'] !== '') { $sp_hinweise[] = sp_t('LIB012.SICH_URL_LEER'); }
+    }
     // Die Sprechtoken stehen nicht in der Sicherung und bleiben. Ist der
     // tts-Block der Sicherung kein Block, gilt der alte ganz - sonst gingen
     // die Token mit ihm verloren.
@@ -2999,29 +3184,57 @@ function sp_sicherung_lesen($roh, $nur_pruefen = false)
             }
         }
     }
-    /* Die Schluessel der ESPHome-Mikrofone stehen nicht in der Sicherung.
-     * Bis 0.11.15 kamen sie nach der LISTENPOSITION zurueck: eine Sicherung
+    /* Die Schluessel der ESPHome-Mikrofone stehen in einer Sicherung der
+     * Fassung 1 (bis 0.12.16) nicht. Bis 0.11.15 kamen sie nach der LISTENPOSITION zurueck: eine Sicherung
      * mit anderer Reihenfolge (ein Mikrofon dazwischen, eines entfernt) gab
      * Mikrofon B den Schluessel von Mikrofon A. Jetzt nach Rechner und Port,
-     * dann nach Rechner, dann nach Namen - und nur bei genau einem Treffer. */
+     * dann nach Rechner, dann nach Namen - und nur bei genau einem Treffer.
+     * 0.12.17: Fassung 2 traegt den Schluessel selbst. Ein LEERER heisst dort
+     * "nicht gesichert" (Entscheidung des Hausherrn 12.11.2026: ein leerer
+     * Wert ueberschreibt keinen bestehenden) - ein hier eingetragener
+     * Schluessel desselben Mikrofons bleibt, gefunden wie oben, und die
+     * Meldung nennt das Mikrofon beim Namen, nie den Schluessel. Gibt es hier
+     * keinen, bleibt er leer, ohne Meldung. Leeren geht nur im Formular
+     * (Haken "Schluessel loeschen"). Geprueft wird "leer" als '' - nicht mit
+     * empty(), das hielte den Schluessel "0" fuer leer. */
+    $sp_mikro_behalten = 0;
     if (isset($alt['satelliten']) && is_array($alt['satelliten'])
         && isset($neu['satelliten']) && is_array($neu['satelliten'])) {
         foreach ($neu['satelliten'] as $i => $s) {
-            if (!is_array($s) || !empty($s['schluessel'])) { continue; }
+            if (!is_array($s) || (isset($s['schluessel']) && $s['schluessel'] !== '')) { continue; }
             $k = sp_satellit_schluessel_finden($s, $alt['satelliten']);
-            if ($k !== '') { $neu['satelliten'][$i]['schluessel'] = $k; }
+            if ($k !== '') {
+                $neu['satelliten'][$i]['schluessel'] = $k;
+                $sp_mikro_behalten++;
+                if ($sp_fs === 2) {
+                    $sp_mn = (isset($s['name']) && is_scalar($s['name']) && (string) $s['name'] !== '')
+                           ? (string) $s['name'] : (isset($s['host']) && is_scalar($s['host']) ? (string) $s['host'] : '?');
+                    $sp_hinweise[] = sprintf(sp_t('LIB012.SICH_MIKRO_LEER'), $sp_mn);
+                }
+            }
         }
+    }
+    if ($sp_fs === 1) {
+        $sp_hinweise[] = sprintf(sp_t('LIB012.SICH_ALT'), $sp_mikro_behalten);
     }
     /* I2 (0.12.0): dieselben Regeln wie das Formular, auf die
      * zusammengefuehrte Konfiguration - also genau das, was gespeichert
      * wuerde. Eine Sicherung mit mqtt_topic "#" nahm bis 0.11.15 jeder
      * Weg an, den das Formular abweist. */
-    if (function_exists('sp_cfg_pruefen')) {
-        $sp_fehler = sp_cfg_pruefen($neu);
-        if (is_array($sp_fehler) && $sp_fehler) {
-            return array(0, sprintf(sp_t('LIB012.SICH_FELDER'),
-                                    implode('; ', array_map('strval', array_slice($sp_fehler, 0, 8)))));
+    if ($sp_verworfen) {
+        $sp_hinweise[] = sprintf(sp_t('LIB012.SICH_FREMD_VERWORFEN'), implode(', ', $sp_verworfen));
+    }
+    $sp_fehler = function_exists('sp_cfg_pruefen') ? sp_cfg_pruefen($neu) : array();
+    if (!is_array($sp_fehler)) { $sp_fehler = array(); }
+    // 0.12.17: die Zugangsdaten zuerst - alle Beanstandungen in einer Meldung, nicht die erste.
+    $sp_fehler = array_merge($sp_zugang, array_map('strval', $sp_fehler));
+    if ($sp_fehler) {
+        // Zwei woertliche Aufrufe statt eines Ternaers in sp_t() (die Pruefwerkzeuge lesen die Aufrufstelle woertlich).
+        $sp_liste = implode('; ', array_slice($sp_fehler, 0, 8 + count($sp_zugang)));
+        if ($sp_zugang) {
+            return array(0, sprintf(sp_t('LIB012.SICH_ABGEWIESEN'), $sp_liste));
         }
+        return array(0, sprintf(sp_t('LIB012.SICH_FELDER'), $sp_liste));
     }
     // X-3: bis hierher geprueft, nichts geschrieben.
     if ($nur_pruefen) {
@@ -3033,10 +3246,14 @@ function sp_sicherung_lesen($roh, $nur_pruefen = false)
     if (!sp_saetze_speichern(sp_steuerzeichen_weg($d['saetze']))) {
         return array(0, sp_t('LIB012.SICH_SAETZE_SCHREIBEN'));
     }
-    sp_log('Sicherung eingespielt (' . count($d['saetze']['regeln']) . ' Regeln, '
-           . count($d['saetze']['ziele']) . ' Ziele).');
-    return array(1, sprintf(sp_t('LIB012.SICH_EINGESPIELT'),
-                            count($d['saetze']['regeln']), count($d['saetze']['ziele'])));
+    // Nie ein Wert im Protokoll - nur, woher Token und Adresse jetzt stammen.
+    sp_log('Sicherung eingespielt (Fassung ' . $sp_fs . ', ' . count($d['saetze']['regeln']) . ' Regeln, '
+           . count($d['saetze']['ziele']) . ' Ziele; Aktionstoken ' . $sp_tokenweg
+           . ($sp_verworfen ? '; nicht uebernommen, weil dieser Fassung unbekannt: ' . implode(', ', $sp_verworfen) : '')
+           . ').');
+    return array(1, trim(sprintf(sp_t('LIB012.SICH_EINGESPIELT'),
+                                 count($d['saetze']['regeln']), count($d['saetze']['ziele']))
+                         . ' ' . implode(' ', $sp_hinweise)));
 }
 
 /**

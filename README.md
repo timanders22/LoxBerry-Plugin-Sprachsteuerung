@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.12.16
+Version 0.12.17
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,16 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.12.17
+
+- **Die Sicherung trägt jetzt die Zugangsdaten** (Entscheidung des Hausherrn vom 12.11.2026): „Sicherung herunterladen“ im Reiter *Sätze* schreibt das Aktionstoken, die Miniserver-Adresse samt einer Anmeldung darin und die Schlüssel der ESPHome-Mikrofone mit in die Datei. Bis 0.12.16 blieben alle drei draußen; nach einem Umzug auf einen zweiten LoxBerry bekam dann jede Adresse im Miniserver HTTP 403, und die Mikrofone mussten neu eingerichtet werden. Die Datei ist damit wie ein Kennwort zu behandeln. Die Sprechtoken für Alexa-NG und Chromecast 4 Lox NG stehen weiterhin nicht darin.
+- **Zurückspielen:** Eine Sicherung ab 0.12.17 (Sicherungsfassung 2) muss alle drei tragen. Fehlt eines, oder hat das Token keine zulässige Form (16 bis 64 Zeichen aus Buchstaben, Ziffern, `_`, `.` und `-`; unter 16 Zeichen nimmt der Endpunkt kein Token an), wird die Datei als Ganzes abgewiesen und nichts geändert; die Meldung nennt die Namen, nie die Werte. Weicht das Token der Sicherung vom bisherigen ab, sagt die Meldung das: Adressen im Miniserver mit dem bisherigen Token bekommen dann HTTP 403. Beim Zurückspielen wird kein Token neu erzeugt.
+- **Ein leerer Wert überschreibt keinen bestehenden** (Entscheidung des Hausherrn vom 12.11.2026): Trägt die Sicherung das Aktionstoken, die Miniserver-Adresse oder den Schlüssel eines Mikrofons leer, heißt das „nicht gesichert“. Ein hier eingetragener Wert bleibt dann stehen, und die Erfolgsmeldung nennt ihn beim Namen, etwa „Die Miniserver-Adresse blieb, die Sicherung trug sie leer“ oder das Mikrofon mit seinem Namen; den Wert nennt sie nie. Ist er hier ebenfalls leer, bleibt er leer, ohne Meldung. Geleert wird ein Wert nur im Formular.
+- **Unbekannte Einstellungen werden nicht übernommen** (Entscheidung des Hausherrn vom 12.11.2026): Trägt eine Sicherung dieses Plugins Einstellungen, die diese Fassung nicht kennt (nicht in `templates/vorgaben.json` und den übrigen Vorgaben, ebenso in den Blöcken der Sprachausgabe, der Ruhezeit und je Mikrofon), wird die Datei trotzdem zurückgespielt, diese Einstellungen aber nicht. Erfolgsmeldung und Protokoll nennen sie mit Namen, nie mit Wert („Nicht übernommen, weil dieser Fassung unbekannt: …“). Bis 0.12.16 kamen sie still in die Konfiguration. Eine Sicherung eines anderen Plugins wird weiter als Ganzes abgewiesen. Sind die Vorgaben selbst nicht lesbar, wird abgewiesen.
+- **Ältere Sicherungen:** Eine Datei bis 0.12.16 bleibt zurückspielbar. Aktionstoken und Miniserver-Adresse bleiben dann, wie sie sind, die Mikrofon-Schlüssel werden wie bisher nach Rechner und Port aus der geltenden Einstellung übernommen; die Erfolgsmeldung sagt das. Eine Datei mit unbekannter Sicherungsfassung wird abgewiesen.
+- Der Dienst liest die Einstellungen jede Sekunde neu; nach dem Zurückspielen ist kein Neustart nötig. Das Protokoll nennt, woher das Aktionstoken stammt, nie seinen Wert.
+- Gemessen mit einem Prüfstand unter PHP 7.4 und 8.4 auf dem Arbeitsrechner (gültige, halb gültige, fremde und ältere Sicherung); am Gerät nicht gemessen.
 
 ## Neu in 0.12.16
 
@@ -1474,9 +1484,10 @@ liefert 3.11.
 - Eingaben, die nicht zum Muster passen, werden **abgelehnt und benannt**, nie
   stillschweigend zurechtgebogen.
 - Die Container-Ports hören nur auf `127.0.0.1`.
-- Die Sicherungsdatei enthält **weder Token noch Miniserver-Adresse noch
-  Mikrofon-Schlüssel noch die Sprechtoken für Alexa-NG und Chromecast 4 Lox
-  NG**. Eine Sicherung, die ein Sprechtoken trägt, wird abgewiesen; jede
+- Die Sicherungsdatei enthält seit 0.12.17 **das Aktionstoken, die
+  Miniserver-Adresse und die Mikrofon-Schlüssel** und ist wie ein Kennwort zu
+  behandeln. Die **Sprechtoken für Alexa-NG und Chromecast 4 Lox NG** stehen
+  nicht darin; eine Sicherung, die eines trägt, wird abgewiesen. Jede
   eingespielte Sicherung wird mit denselben Regeln geprüft wie das Formular.
 - Ansage-Adressen gehen nur ins Heimnetz: Benutzerdaten in der Adresse und
   Zahlformen wie `134744072` (= 8.8.8.8) werden abgewiesen, auch auf dem Weg
