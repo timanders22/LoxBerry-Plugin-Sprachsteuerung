@@ -8,6 +8,10 @@
 # JEDEM Upgrade. Bis 0.10.1 stand hier, die Modelle blieben erhalten; sie
 # waren nach jedem Update fort und wurden neu geladen (mehrere Gigabyte).
 # Deshalb wandert der Ordner weiter unten NEBEN den Plugin-Ordner.
+# [upgrade_daten] Argumente des Installers festhalten - unten sichert der gemeinsame Baustein
+# [upgrade_daten] upgrade_daten.sh (neben diesem Skript) den ganzen Datenordner.
+UPGD_ORDNER="$3"; UPGD_WURZEL="$5"
+
 ARGV3=$3
 ARGV5=$5
 PFOLDER="${ARGV3:-sprachsteuerung}"
@@ -399,5 +403,51 @@ if [ -d "$SP_VENV" ] && [ ! -L "$SP_VENV" ]; then
         echo "<INFO> Die virtuelle Python-Umgebung liess sich nicht beiseite schieben - sie"
         echo "<INFO> wird nach dem Update neu angelegt (dafuer braucht es eine Internetverbindung)."
     fi
+fi
+# 0.12.18: Was das Update bewusst NICHT ueberlebt (Baustein 1.1.0, Angabe UPGD_OHNE; Entscheidung des Hausherrn
+# 15.11.2026, "Einheitlich ausnehmen", Regeln/06):
+#   befehle    die Warteschlange des Dienstes (Auftraege, die er beim Start ab 60 s Alter ohnehin verwirft) und der
+#              Ordner der Befehlsbruecke - darin die Mosquitto-Optionsdateien mit dem Broker-Kennwort, zustand.json,
+#              waechter.json und die Sperrdatei. Damit liegt das Kennwort in keiner Update-Sicherung.
+#   antworten  Antworten des Dienstes an eine wartende Seite, nur Sekunden gueltig.
+#   modelle    kommt wie bisher per Umzug (oben, ohne zu kopieren) ueber das Update. Liegt der Ordner hier noch
+#              (Umzug nicht moeglich, etwa wegen eines liegengebliebenen .modelle_umzug), werden die Gigabyte nicht
+#              kopiert; es bleibt beim Verhalten bis 0.12.17.
+# postinstall.sh legt befehle/ und antworten/ leer neu an; die Bruecke legt befehle/ (0700) samt Optionsdateien (0600,
+# Kennwort aus config/system/general.json) beim ersten Start durch den Waechter selbst neu an (nachgestellt in WSL
+# 16.11.2026, Pruefung-Sprachsteuerung-0.12.18/update_nachgestellt/).
+UPGD_OHNE="befehle antworten modelle"
+# Der Fehlerweg (Baustein 1.1.0): scheitert das Sichern, bricht der Installer ab, und die bisherige Fassung bleibt
+# installiert. Modelle und virtuelle Umgebung liegen dann aber schon neben ihren Ordnern (oben verschoben) - ohne
+# diesen Rueckweg fehlte der weiter installierten Fassung die venv, und der Dienst startete nicht.
+upgd_bei_fehler() {
+    upgd_bf_rc=0
+    if [ -d "$BASE/data/plugins/$PFOLDER.modelle_umzug" ] && [ -d "$BASE/data/plugins/$PFOLDER" ] \
+       && [ ! -e "$BASE/data/plugins/$PFOLDER/modelle" ] && [ ! -L "$BASE/data/plugins/$PFOLDER/modelle" ]; then
+        if mv "$BASE/data/plugins/$PFOLDER.modelle_umzug" "$BASE/data/plugins/$PFOLDER/modelle" 2>/dev/null; then
+            echo "<INFO> Die heruntergeladenen Modelle liegen wieder an ihrem Platz."
+        else
+            echo "<WARNING> Die Modelle liegen weiter unter $BASE/data/plugins/$PFOLDER.modelle_umzug."
+            upgd_bf_rc=1
+        fi
+    fi
+    if [ -d "$SP_VENV_UMZUG" ] && [ ! -L "$SP_VENV_UMZUG" ] && [ ! -e "$SP_VENV" ] && [ ! -L "$SP_VENV" ]; then
+        if mv "$SP_VENV_UMZUG" "$SP_VENV" 2>/dev/null; then
+            echo "<INFO> Die virtuelle Python-Umgebung liegt wieder an ihrem Platz."
+        else
+            echo "<WARNING> Die virtuelle Python-Umgebung liegt weiter unter $SP_VENV_UMZUG."
+            upgd_bf_rc=1
+        fi
+    fi
+    return $upgd_bf_rc
+}
+# [upgrade_daten] Gemeinsamer Baustein (Werkzeuge/gemeinsam/upgrade_daten.sh): den ganzen Datenordner
+# [upgrade_daten] neben den Ordner sichern; misslingt das, bricht die Aktualisierung mit Rueckgabe 2 ab.
+if [ -f "$(dirname "$0")/upgrade_daten.sh" ] && . "$(dirname "$0")/upgrade_daten.sh"; then
+    upgrade_daten_sichern "$UPGD_ORDNER" "$UPGD_WURZEL" || exit 2
+else
+    echo "<FAIL> Der Baustein upgrade_daten.sh fehlt neben $(basename "$0") - die Aktualisierung wird abgebrochen,"
+    echo "<FAIL> die bisherige Fassung bleibt installiert."
+    exit 2
 fi
 exit 0

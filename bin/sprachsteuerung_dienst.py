@@ -38,6 +38,8 @@ Aufrufe (der Schalter steht IMMER an erster Stelle, siehe argumente_lesen()):
         dahinter wahlweise --raum="<raum>"; die alte Form mit Leerzeichen
         (--satz "..." --raum "...") gilt weiter, aber nur an genau der Stelle
     sprachsteuerung_dienst.py --mqtt-leeren zurueckbehaltene Themen leeren
+    sprachsteuerung_dienst.py --vervollstaendigen-probe  Probe fuer den Reiter Test
+        (Vervollstaendigen an einer Probedatei im temporaeren Verzeichnis, eine Zeile VPROBE;...)
 """
 
 from __future__ import annotations
@@ -858,9 +860,17 @@ def cfg_vervollstaendigen() -> list:
 
     Geprueft wird mit 'in', NICHT mit einer Wahrheitspruefung: ein bewusst
     geleerter Wert wuerde sonst bei jedem Lauf zurueckgeschrieben.
+
+    Seit 0.12.18 (Entscheidung des Hausherrn 15.11.2026, "Ja, nennen und
+    stehen lassen"; Regeln/05 "fremd -> NENNEN, stehen lassen"): Schluessel der
+    Datei, die diese Fassung nicht kennt, bleiben stehen wie bisher und werden
+    in der Protokollzeile mit Namen genannt, nie mit Werten; fehlt nichts,
+    steht die Zeile nur, wenn es solche gibt. Bis 0.12.17 blieben sie stehen,
+    ohne dass es irgendwo stand. Dieselbe Regel wie sp_cfg_vervollstaendigen()
+    in der Oberflaeche.
     """
-    roh = json_lesen_streng(DATEI_CONFIG)
-    if roh is None:
+    erg = cfg_vervollstaendigen_datei(DATEI_CONFIG)
+    if erg["stand"] == "kaputt":
         # Laut, nicht still: bis 0.11.15 galt eine unlesbare Datei als leer,
         # und hier wurden die Vorgaben darueber geschrieben - Aktionstoken,
         # Mikrofone und Miniserver-Zugang waren danach weg.
@@ -871,14 +881,74 @@ def cfg_vervollstaendigen() -> list:
                   "gueltiges JSON). Sie wurde nicht ueberschrieben; bitte reparieren oder "
                   "im Reiter Einstellungen neu speichern.", "cfg_kaputt")
         return []
+    if erg["zeile"]:
+        _LOG.info("%s", erg["zeile"])
+    return erg["fehlten"]
+
+
+def schluessel_name(name) -> str:
+    """Ein Schluesselname aus einer Datei fuer eine Protokollzeile: nur Namenszeichen, hoechstens 64 - dieselbe Regel
+    wie sicherung_name() des gemeinsamen Sicherungsmoduls (keine Zeilenumbrueche, kein Semikolon, nie ein Wert)."""
+    n = re.sub(r"[^A-Za-z0-9_.\-\[\]]", "?", str(name)) or "?"
+    return n[:64] + "..." if len(n) > 64 else n
+
+
+def cfg_vervollstaendigen_datei(datei: Path) -> dict:
+    """Der Kern von cfg_vervollstaendigen() an einer bestimmten Datei (seit 0.12.18 getrennt, damit der Reiter Test
+    ihn an einer Probedatei messen kann: --vervollstaendigen-probe). Schreibt kein Protokoll; die Zeile dafuer steht
+    in 'zeile' (nur Namen, nie Werte; '' = nichts zu melden). Rueckgabe {'stand': kaputt|vollstaendig|ergaenzt|
+    fehler, 'fehlten': [...], 'fremd': [...], 'zeile': str}."""
+    roh = json_lesen_streng(datei)
+    if roh is None:
+        return {"stand": "kaputt", "fehlten": [], "fremd": [], "zeile": ""}
+    fremd = [schluessel_name(k) for k in roh if VORGABEN and k not in VORGABEN]
+    fremd_satz = ("; unbekannt, nicht veraendert und nicht entfernt: " + ", ".join(fremd)) if fremd else ""
     fehlten = [k for k in VORGABEN if k not in roh]
     if not fehlten:
-        return []
+        return {"stand": "vollstaendig", "fehlten": [], "fremd": fremd,
+                "zeile": ("Konfiguration vollstaendig" + fremd_satz) if fremd else ""}
     for k in fehlten:
         roh[k] = VORGABEN[k]
-    if json_schreiben(DATEI_CONFIG, roh, 0o600):
-        _LOG.info("Konfiguration ergaenzt: %s", ", ".join(fehlten))
-    return fehlten
+    if not json_schreiben(datei, roh, 0o600):
+        return {"stand": "fehler", "fehlten": fehlten, "fremd": fremd, "zeile": ""}
+    return {"stand": "ergaenzt", "fehlten": fehlten, "fremd": fremd,
+            "zeile": "Konfiguration ergaenzt: " + ", ".join(fehlten) + fremd_satz}
+
+
+def vervollstaendigen_probe() -> int:
+    """--vervollstaendigen-probe (seit 0.12.18, fuer den Reiter Test): nennt das Vervollstaendigen beim Dienststart
+    eine unbekannte Einstellung mit Namen, laesst es sie stehen, und bleibt ihr Wert aus der Protokollzeile? Gemessen
+    mit Wirkung an einer PROBEDATEI in einem eigenen Ordner unter dem temporaeren Verzeichnis, nie an der echten
+    Konfiguration: die Vorgaben ohne wartezeit, eine unbekannte Einstellung mit Wert. Danach wird der Ordner entfernt.
+    Ausgabe eine Zeile VPROBE;STAND=1|0|-1;NAME=...;MANGEL=name,wert,weg,ergaenzt (nie der Wert). Rueckgabe 0 bei
+    STAND=1, sonst 1."""
+    name = "zz_probe_unbekannt"
+    wert = "ProbeWert" + secrets.token_hex(4)
+    ordner = tempfile.mkdtemp(prefix="sp_vprobe_")
+    stand, mangel = -1, []
+    try:
+        datei = Path(ordner) / "sprachsteuerung.json"
+        d = {k: v for k, v in VORGABEN.items() if k != "wartezeit"}
+        d[name] = wert
+        if VORGABEN and "wartezeit" in VORGABEN and json_schreiben(datei, d, 0o600):
+            erg = cfg_vervollstaendigen_datei(datei)
+            nach = json_lesen_streng(datei)
+            zeile = erg["zeile"]
+            if name not in zeile:
+                mangel.append("name")
+            if wert in zeile:
+                mangel.append("wert")
+            if not isinstance(nach, dict) or nach.get(name) != wert:
+                mangel.append("weg")
+            if (not isinstance(nach, dict) or "wartezeit" not in nach or erg["stand"] != "ergaenzt"
+                    or erg["fehlten"] != ["wartezeit"]):
+                mangel.append("ergaenzt")
+            stand = 0 if mangel else 1
+    finally:
+        shutil.rmtree(ordner, ignore_errors=True)
+    print("VPROBE;STAND=%d;NAME=%s;MANGEL=%s;ORDNER_WEG=%d" % (stand, name, ",".join(mangel) or "-",
+                                                                0 if os.path.exists(ordner) else 1))
+    return 0 if stand == 1 else 1
 
 
 def verstehen_laden() -> "Verstehen":
@@ -9114,13 +9184,13 @@ def argumente_lesen(argv: list) -> dict:
     bevorzugt in der Form --trocken=<satz>, und was nach dem Schalter steht,
     wirkt nie als Schalter.
 
-    Rueckgabe {'art': dienst|mqtt-leeren|selbsttest|satz|trocken|fehler,
+    Rueckgabe {'art': dienst|mqtt-leeren|selbsttest|vervollstaendigen-probe|satz|trocken|fehler,
     'satz', 'raum', 'fehler'}.
     """
     if len(argv) < 2:
         return {"art": "dienst"}
     erster = argv[1]
-    if erster in ("--mqtt-leeren", "--selbsttest"):
+    if erster in ("--mqtt-leeren", "--selbsttest", "--vervollstaendigen-probe"):
         return {"art": erster[2:]}
     for schalter in ("--satz", "--trocken"):
         if erster == schalter:
@@ -9999,10 +10069,13 @@ def main() -> int:
     # Vor log_einrichten(): beim Deinstallieren wird kein Protokoll angelegt.
     if arg["art"] == "mqtt-leeren":
         return mqtt_leeren()
+    # 0.12.18: die Probe des Reiters Test - ohne Protokoll, nur an einer Probedatei im temporaeren Verzeichnis.
+    if arg["art"] == "vervollstaendigen-probe":
+        return vervollstaendigen_probe()
     if arg["art"] == "fehler":
         # Bis 0.11.15 startete ein unbekannter Aufruf den DIENST.
         print("Aufruf: %s [--selbsttest | --satz=<satz> | --trocken=<satz> "
-              "[--raum=<raum>] | --mqtt-leeren] - %s"
+              "[--raum=<raum>] | --mqtt-leeren | --vervollstaendigen-probe] - %s"
               % (os.path.basename(sys.argv[0]), arg["fehler"]), file=sys.stderr)
         return 2
     log_einrichten()

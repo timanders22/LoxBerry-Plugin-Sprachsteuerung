@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.12.17
+Version 0.12.18
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,26 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.12.18
+
+- **„Sicherung herunterladen“ und „Sicherung einspielen“ laufen über das gemeinsame Sicherungsmodul** (Fassung 1.2.7), wie in den übrigen Plugins dieses Autors. Was sich ändert:
+  - **Haken vor dem Einspielen:** Der Knopf *Sicherung einspielen* im Reiter *Sätze* wirkt nur, wenn der Haken „Ja, die geltenden Einstellungen durch die Sicherung ersetzen“ unmittelbar davor gesetzt ist. Ohne Haken wird die Datei nicht gelesen und nichts geändert; die Meldung sagt es.
+  - **Neue Form der Datei:** Der Kopf trägt `_hinweis`, `_plugin` = `LoxBerry-Plugin-Sprachsteuerung`, `_fassung` (die Fassung des Plugins) und `_stand`; die Einstellungen stehen oben in der Datei statt unter `config`, daneben wie bisher die Satzdatei unter `saetze`. Inhalt wie bisher: alle Einstellungen samt Aktionstoken, Miniserver-Adresse und den Schlüsseln der ESPHome-Mikrofone; die Sprechtoken für Alexa-NG und Chromecast 4 Lox NG stehen nie darin. Die Datei bitte wie ein Kennwort behandeln. Eine Datei eines anderen Plugins wird als Ganzes abgewiesen.
+  - **Ohne Satzdatei** (Entscheidung des Hausherrn vom 16.11.2026): Gibt es weder die Satzdatei noch ihre Zweitschrift, trägt die Sicherung eine leere Satzdatei (`{"regeln": [], "ziele": {}}`, wie sie die Installation anlegt); beim Einspielen entsteht dann eine leere Satzdatei. Bis 0.12.17 stand dort `[]`, und das Einspielen wies die eigene Sicherung ab.
+  - **Ältere Sicherungen werden angenommen:** Eine Sicherung aus 0.10.0 bis 0.12.17 (Kopf `art`, `fassung`, `erzeugt`, `hinweis`) erkennt das Plugin und spielt sie ein; die Meldung sagt „ältere Sicherung erkannt“. Gemessen mit den Sicherungen aller 39 Fassungen 0.10.0 bis 0.12.18: vorher und nachher 39 angenommen. Einstellungen, die die Fassung der Datei noch nicht kannte, behalten ihren geltenden Wert, und die Meldung nennt sie. Im Block der Sprachausgabe galt das bisher nur für SonoX (Raum, Lautstärke, Sprache); die übrigen später hinzugekommenen Felder (Chromecast-Präfix und -Ziel, Alexa- und Google-Gerät samt Lautstärke, Sonos-Zone und -Lautstärke) fielen bisher still auf die Werkseinstellung.
+  - **Unbekannte Einstellung in der Datei:** wird wie bisher nicht übernommen und mit Namen genannt; der Rest wird eingespielt.
+  - **Unbekannte Einstellung in der geltenden Konfiguration** (etwa von Hand eingetragen): fällt beim Einspielen weg und wird mit Namen genannt, nie mit Wert. Bisher blieb sie stehen, ohne genannt zu werden.
+  - **Leerer Wert in der Datei:** überschreibt keine bestehende Einstellung; sie bleibt und wird genannt. Bisher galt das nur für Aktionstoken, Miniserver-Adresse und Mikrofon-Schlüssel.
+  - **Aktionstoken in einer Sicherung der ersten Form:** Trägt eine solche Datei ein Aktionstoken (etwa von Hand eingetragen), wird es jetzt übernommen, wie jede andere Einstellung. Bisher blieb dann das geltende Token.
+  - **Ein Block der Sprachausgabe, der kein Block ist,** wird abgewiesen; bisher galt dann still der geltende.
+  - **Beanstandungen** nennen jetzt den Namen der Einstellung vor dem Text des Formulars, alle in einer Meldung.
+  - **Wie bisher:** dieselben Regeln wie im Formular; eine Datei mit Sprechtoken wird abgewiesen, die eingetragenen bleiben; eine Sicherung ab 0.12.17 muss Aktionstoken, Miniserver-Adresse und je Mikrofon den Schlüssel tragen; ein leer gesicherter Mikrofon-Schlüssel lässt den hier eingetragenen desselben Mikrofons stehen; weicht das Aktionstoken der Sicherung ab, warnt die Meldung vor HTTP 403 im Miniserver; die Satzdatei braucht `regeln` und `ziele`, wird ohne Steuerzeichen gespeichert, und ihr Stand vor dem Einspielen bleibt unter den früheren Ständen; ist ein Wert unzulässig, ändert sich nichts, auch nicht an der Satzdatei; höchstens 2 MB.
+  - **Zurück auf eine ältere Fassung:** Eine mit 0.12.18 erstellte Sicherung lässt sich in 0.12.17 und älter nicht einspielen.
+- **Konfiguration vervollständigen:** Nach dem Speichern eines Formulars und beim Start des Dienstes nennt die Protokollzeile jetzt auch Einstellungen, die das Plugin nicht kennt, mit Namen und ohne Wert; sie bleiben stehen (Entscheidung des Hausherrn vom 15.11.2026). Zwei neue Prüfzeilen im Reiter *Test* messen das an Probedateien im temporären Ordner, nicht an der echten Konfiguration; der Dienst hat dafür den Aufruf `--vervollstaendigen-probe`.
+- **Update:** Ein Update trägt jetzt den ganzen Datenordner über die Installation (gemeinsamer Baustein `upgrade_daten.sh` 1.1.0). Bisher gingen dabei unter anderem die früheren Stände der Satzdatei (`saetze_staende/`), vorgemerkte Befehle (`timer/`), `loxone.json` und das Formulargeheimnis verloren; jetzt bleiben sie erhalten. Ausgenommen sind die Warteschlange und die Brückendateien in `befehle/` samt dem Kennwort des Brokers sowie `antworten/`, die nach dem Update neu entstehen, und die Modelle, die wie bisher ohne Kopie umziehen. Scheitert das Sichern, bricht das Update ab, und die bisherige Fassung bleibt mit Modellen und Python-Umgebung lauffähig installiert.
+- **Dokumentation:** `plugin.cfg` nennt die Adresse des Repositorys; LoxBerry zeigt sie bei der Installation als Knopf „Dokumentation“.
+- Gemessen auf dem Arbeitsrechner (Prüfstand für Sichern und Einspielen unter PHP 7.4 und 8.4, nachgestellte Aktualisierung in WSL); am Gerät nicht gemessen.
 
 ## Neu in 0.12.17
 

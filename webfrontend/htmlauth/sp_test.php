@@ -205,6 +205,11 @@ function sp_pruefungen()
     $zeilen[] = sp_pruefzeile($st, sp_t('TEST.F_VORGABEN'), $tx);
     list($st, $tx) = sp_zweitschrift_probe();
     $zeilen[] = sp_pruefzeile($st, sp_t('TEST.F_ZWEITSCHRIFT'), $tx);
+    // 0.12.18: nennt das Vervollstaendigen Unbekanntes und laesst es stehen? (an Probedateien; Oberflaeche und Dienst)
+    list($st, $tx) = sp_vervollstaendigen_probe();
+    $zeilen[] = sp_pruefzeile($st, sp_t('TEST.F_VPROBE'), $tx);
+    list($st, $tx) = sp_vervollstaendigen_probe_dienst();
+    $zeilen[] = sp_pruefzeile($st, sp_t('TEST.F_VPROBE_DIENST'), $tx);
     list($st, $tx) = sp_suchmuster_probe();
     $zeilen[] = sp_pruefzeile($st, sp_t('TEST.F_MUSTER'), $tx);
 

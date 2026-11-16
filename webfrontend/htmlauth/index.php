@@ -631,13 +631,22 @@ if ($sp_post && isset($_POST['vorlage'])) {
         exit;
     }
 }
+/* Seit 0.12.18 baut das gemeinsame Sicherungsmodul Kopf und Inhalt (sp_sicherung_bauen(), Beschreibung
+ * sp_sicherung_beschreibung()): _hinweis, _plugin = LoxBerry-Plugin-Sprachsteuerung, _fassung, _stand, bei Bedarf
+ * _warnung (X-3: das eigene Zurueckspielen wiese die Datei ab - nur Namen, nie Werte), danach jede Einstellung oben
+ * und die Satzdatei als Teil saetze. Bis 0.12.17 lagen die Einstellungen unter "config", Kopf art/fassung/erzeugt. */
 if ($sp_post && isset($_POST['sicherung_holen'])) {
-    while (ob_get_level() > 0) { @ob_end_clean(); }
-    header('Content-Type: application/x-download');
-    header('Content-Disposition: attachment; filename="sprachsteuerung_sicherung_'
-           . date('Ymd_Hi') . '.json"');
-    echo sp_sicherung_bauen();
-    exit;
+    $sp_js = sicherung_json(sp_sicherung_bauen());
+    if ($sp_js !== '') {
+        while (ob_get_level() > 0) { @ob_end_clean(); }
+        header('Content-Type: application/x-download');
+        header('Content-Disposition: attachment; filename="sprachsteuerung_sicherung_'
+               . date('Ymd_Hi') . '.json"');
+        echo $sp_js;
+        exit;
+    }
+    $sp_fehler[] = sp_e(sp_t('SICHERUNG.K_SCHREIBFEHLER'));
+    $sp_tab = 'tab-sentences';
 }
 if ($sp_post && isset($_POST['verlauf_csv'])) {
     while (ob_get_level() > 0) { @ob_end_clean(); }
@@ -648,21 +657,53 @@ if ($sp_post && isset($_POST['verlauf_csv'])) {
     exit;
 }
 
-/* ---------------- Sicherung einspielen ---------------- */
+/* ---------------- Sicherung einspielen ----------------
+ *
+ * Seit 0.12.18 ueber das gemeinsame Sicherungsmodul, in jeder Linie gleich.
+ * sicherung_eingang() prueft zuerst den Haken zurueck_ok (ohne ihn wird nichts
+ * gelesen und nichts geaendert), dann is_uploaded_file() - ohne diese Pruefung
+ * liesse sich jede Datei des Servers unterschieben - und die Groesse (2 MB wie
+ * bisher, 'max_byte'). sicherung_zurueckspielen() liest (eine Sicherung 0.10.0
+ * bis 0.12.17 erkennt es am Merkmal art, packt "config" aus und laesst saetze
+ * daneben stehen), prueft jeden Wert, verwirft Unbekanntes mit Namen und aendert
+ * bei einer Beanstandung gar nichts - auch nicht an der Satzdatei. Gespeichert
+ * wird genau der Stand, den das Modul liefert (sp_config_speichern() zieht die
+ * Zweitschrift mit); danach im Rueckruf 'nachziehen' die Satzdatei - vorher
+ * bleibt ihr Stand unter saetze_staende/ (E2), wie bis 0.12.17 nur bei einer
+ * angenommenen Sicherung - mit gelesenem Rueckgabewert, und die Saetze dieser
+ * Linie (Token gewechselt, Mikrofon-Schluessel behalten, Sicherung bis 0.12.16). */
 if ($sp_post && isset($_POST['sicherung_einspielen'])) {
-    if (!isset($_FILES['sicherungsdatei']) || !is_array($_FILES['sicherungsdatei'])
-        || !isset($_FILES['sicherungsdatei']['tmp_name']) || !is_string($_FILES['sicherungsdatei']['tmp_name'])
-        || !is_uploaded_file($_FILES['sicherungsdatei']['tmp_name'])) {
-        $sp_fehler[] = sp_t('SICHER.FEHLER_KEINE_DATEI');
-    } else {
-        $sp_roh = (string) @file_get_contents($_FILES['sicherungsdatei']['tmp_name']);
-        // Die Satzdatei vorher als Stand behalten (E2) - nur, wenn die
-        // Sicherung angenommen wird; die Pruefung schreibt nichts.
-        list($sp_ok) = sp_sicherung_lesen($sp_roh, true);
-        if ($sp_ok) { sp_ui_stand_sichern(); }
-        list($sp_ok, $sp_meld) = sp_sicherung_lesen($sp_roh);
-        if ($sp_ok) { $sp_meldungen[] = sp_e($sp_meld); } else { $sp_fehler[] = sp_e($sp_meld); }
+    $sp_sb = sp_sicherung_beschreibung();
+    list($sp_sroh, $sp_sr) = sicherung_eingang($sp_sb, $_POST, $_FILES, 'sicherungsdatei');
+    if ($sp_sr === null) {
+        $sp_sb['speichern'] = function ($neu) { return sp_config_speichern($neu); };
+        $sp_sb['zweitschrift'] = function () {
+            $p = sp_paths();
+            return array($p['config'], $p['sicherung']);
+        };
+        $sp_sb['nachziehen'] = function ($neu, $jetzt, $r) use (&$sp_fehler, $sp_sroh) {
+            $h = sp_sicherung_hinweise($sp_sroh, $neu, $jetzt);
+            if (isset($r['teile']['saetze']) && is_array($r['teile']['saetze'])) {
+                $s = $r['teile']['saetze'];
+                sp_ui_stand_sichern();
+                if (sp_saetze_speichern(sp_steuerzeichen_weg($s))) {
+                    sp_log('Satzdatei aus der Sicherung eingespielt: ' . count($s['regeln']) . ' Regeln, '
+                           . count($s['ziele']) . ' Ziele.');
+                    array_unshift($h, sp_e(sprintf(sp_t('LIB012.SICH_EINGESPIELT'), count($s['regeln']),
+                                                   count($s['ziele']))));
+                } else {
+                    $sp_fehler[] = sp_e(sp_t('LIB012.SICH_SAETZE_SCHREIBEN'));
+                }
+            }
+            return $h;
+        };
+        $sp_sb['log'] = 'sp_log';
+        $sp_sr = sicherung_zurueckspielen($sp_sb, $sp_sroh);
     }
+    /* Die Saetze des Moduls sind maskiert; die Meldungen dieser Seite werden roh ausgegeben. */
+    $sp_sm = sicherung_meldungen($sp_sb, $sp_sr);
+    foreach ($sp_sm['hinweise'] as $sp_s) { $sp_meldungen[] = $sp_s; }
+    foreach ($sp_sm['fehler'] as $sp_s) { $sp_fehler[] = $sp_s; }
     $sp_tab = 'tab-sentences';
 }
 
@@ -3369,6 +3410,7 @@ if ($sp_x3g) { ?>
   <label for="sicherungsdatei"><?= sp_e(sp_t('SICHER.L_DATEI')) ?></label>
   <input data-role="none" type="file" id="sicherungsdatei" name="sicherungsdatei" accept=".json,application/json">
 </div>
+<?= sicherung_haken_zeile(sp_sicherung_beschreibung()) ?>
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="sicherung_einspielen" value="1"><?= sp_e(sp_t('SICHER.K_EINSPIELEN')) ?></button>
 </div>
