@@ -3728,6 +3728,8 @@ if (!$sp_gw_zeilen) { ?>
     <td><span class="sm-mono">SPRACHSTEUERUNG;OK=1;MIKROFONE=...</span></td></tr>
 <tr><td><span class="sm-mono"><?= sp_e($sp_basis) ?>?aktion=status</span></td>
     <td><span class="sm-mono">FEHLER;OK=0;GRUND=TOKEN</span> (HTTP 403)</td></tr>
+<tr><td><span class="sm-mono">curl -H 'X-Token: x' '<?= sp_e($sp_basis) ?>?selftest=1&amp;token=<?= sp_e($sp_token) ?>'</span></td>
+    <td><span class="sm-mono">SELFTEST;OK=0;ERR=TOKEN_WIDERSPRUCH</span> (HTTP 403)</td></tr>
 <tr><td><span class="sm-mono"><?= sp_e($sp_basis) ?>?token=<?= sp_e($sp_token) ?>&amp;aktion=quatsch</span></td>
     <td><span class="sm-mono">FEHLER;OK=0;GRUND=UNBEKANNTE_AKTION</span> (HTTP 400)</td></tr>
 <tr><td><span class="sm-mono"><?= sp_e($sp_basis) ?>?token=<?= sp_e($sp_token) ?>&amp;aktion=diag</span></td>

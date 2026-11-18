@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.12.18
+Version 0.12.19
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,15 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.12.19
+
+- **Verhalten geändert – widersprüchliche Token werden abgewiesen:** Der Endpunkt nimmt das Token weiter im Kopf `X-Token`, als POST-Feld `token` oder als `?token=` an. Steht es mehrfach in einer Anfrage und unterscheiden sich die Angaben, antwortet er jetzt mit HTTP 403 und `FEHLER;OK=0;GRUND=TOKEN_WIDERSPRUCH` (beim Selbsttest `SELFTEST;OK=0;ERR=TOKEN_WIDERSPRUCH`), auch wenn eine der Angaben stimmt. Bis 0.12.18 galt still die erste vorhandene (Kopf vor POST-Feld vor Adresse), die übrigen wurden nicht angesehen.
+  - Eine leere Angabe zählt mit: eine leere Kopfzeile `X-Token:` neben einem richtigen `?token=` wird abgewiesen; bis 0.12.18 wurde die leere Kopfzeile übergangen.
+  - `?token[]=…` als Liste wird jetzt mit HTTP 400 (`GRUND=PARAMETER`) abgewiesen, auch wenn daneben eine richtige Kopfzeile steht; bis 0.12.18 wurde die Adresse dann gar nicht angesehen.
+  - Ein Aufruf mit nur einer Angabe oder mit gleichen Angaben verhält sich wie bisher. Loxone sendet nur `?token=` und ist nicht betroffen.
+  - Dieselbe Regel gilt für das Stromkennwort der ACTi Kamera (seit 1.9.43). Reiter *Einbindung* (Prüftabelle) und Hilfe nennen den neuen Fall.
+- **Gemeinsames Sicherungsmodul 1.2.9 statt 1.2.7:** Die Neuerungen von 1.2.8 und 1.2.9 betreffen Pflichtangaben in Blöcken und Übergangsregeln, die dieses Plugin nicht verwendet; für Einstellungen sichern und zurückspielen ändert sich nichts. Gemessen mit allen Vorfassungen unter PHP 7.4 und 8.4.
 
 ## Neu in 0.12.18
 
@@ -1494,7 +1503,9 @@ liefert 3.11.
   Aktionen; das Token wird mit `hash_equals` verglichen, und `?selftest=1`
   beantwortet die Tokenfrage, ohne etwas auszulösen. Seit 0.12.0 nimmt er das
   Token auch per POST-Feld `token` oder Kopf `X-Token` (dann steht es in keinem
-  Zugriffsprotokoll) und antwortet mit `Cache-Control: no-store`.
+  Zugriffsprotokoll) und antwortet mit `Cache-Control: no-store`. Seit 0.12.19
+  weist er eine Anfrage ab, die das Token mehrfach mit verschiedenen Werten
+  trägt (`GRUND=TOKEN_WIDERSPRUCH`).
 - **Der Endpunkt schreibt nichts.** Auch ein abgewiesener Aufruf legt keine
   Datei an; alles Schreibende macht der Dienst über die Warteschlange.
 - Jedes Formular der Oberfläche trägt ein **Merkmal gegen fremde Absender**,

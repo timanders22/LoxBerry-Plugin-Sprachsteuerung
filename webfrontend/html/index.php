@@ -11,6 +11,8 @@
  * Das Token darf seit 0.12.0 auch als POST-Feld "token" oder im Kopf
  * "X-Token" kommen - dann steht es nicht im Zugriffsprotokoll des
  * Webservers. ?token= bleibt, weil Loxone-Ausgaenge meist nur GET koennen.
+ * Seit 0.12.19: stehen mehrere davon in der Anfrage und sind verschieden,
+ * antwortet er 403 mit GRUND=TOKEN_WIDERSPRUCH.
  *
  * Pruefend (loest NICHTS aus):
  *   ?selftest=1           stimmt das Token? Sonst passiert nichts.
@@ -97,20 +99,38 @@ $sp_par = function ($name) {
  * erzeugtes Token ist 24 Zeichen lang (sp_token_erzeugen()); unter 16 gilt
  * keins als eingerichtet. */
 $sp_soll = trim((string) $sp_cfg['aktionstoken']);
-/* Woher das Token kommt: Kopf X-Token, POST-Feld token, sonst ?token= (Loxone).
- * Ein POST-Feld als Liste wird abgewiesen wie bei GET. */
-if (isset($_SERVER['HTTP_X_TOKEN']) && is_string($_SERVER['HTTP_X_TOKEN']) && $_SERVER['HTTP_X_TOKEN'] !== '') {
-    $sp_ist = $_SERVER['HTTP_X_TOKEN'];
-} elseif (isset($_POST['token'])) {
+/* Woher das Token kommt: Kopf X-Token, POST-Feld token, ?token= (Loxone).
+ * Ein POST-Feld als Liste wird abgewiesen wie bei GET.
+ *
+ * Seit 0.12.19 (Entscheidung des Hausherrn 18.11.2026, einheitlich mit
+ * ACTiKamera 1.9.43): jede Quelle, die in der Anfrage steht, ist eine Angabe -
+ * auch leer. Stehen zwei oder drei Angaben darin und unterscheiden sie sich,
+ * wird abgewiesen (GRUND=TOKEN_WIDERSPRUCH), auch wenn eine davon stimmt:
+ * zwei Angaben, die sich widersprechen, sind eine Frage, keine Erlaubnis. Bis
+ * 0.12.18 galt still die erste vorhandene (Kopf vor POST vor Adresse), die
+ * uebrigen wurden nicht angesehen, und eine leere Kopfzeile zaehlte nicht. */
+$sp_quellen = array();
+if (isset($_SERVER['HTTP_X_TOKEN']) && is_string($_SERVER['HTTP_X_TOKEN'])) {
+    $sp_quellen[] = $_SERVER['HTTP_X_TOKEN'];
+}
+if (isset($_POST['token'])) {
     if (!is_scalar($_POST['token'])) {
         http_response_code(400);
         echo "FEHLER;OK=0;GRUND=PARAMETER\n";
         echo "Der Parameter token muss ein einzelner Wert sein.\n";
         exit;
     }
-    $sp_ist = (string) $_POST['token'];
-} else {
-    $sp_ist = $sp_par('token');
+    $sp_quellen[] = (string) $_POST['token'];
+}
+if (isset($_GET['token'])) {
+    $sp_quellen[] = $sp_par('token');
+}
+$sp_ist = $sp_quellen ? $sp_quellen[0] : '';
+$sp_widerspruch = false;
+foreach ($sp_quellen as $sp_q) {
+    if (!hash_equals($sp_ist, $sp_q)) {
+        $sp_widerspruch = true;
+    }
 }
 $sp_selftest = !empty($_GET['selftest']);
 
@@ -128,6 +148,16 @@ if (strlen($sp_soll) < 16) {
     }
     echo "FEHLER;OK=0;GRUND=KEIN_TOKEN_GESETZT\n";
     echo "Es ist kein gueltiges Token eingerichtet (mindestens 16 Zeichen) - die Plugin-Oberflaeche oeffnen.\n";
+    exit;
+}
+if ($sp_widerspruch) {
+    http_response_code(403);
+    if ($sp_selftest) {
+        echo "SELFTEST;OK=0;ERR=TOKEN_WIDERSPRUCH\n";
+        exit;
+    }
+    echo "FEHLER;OK=0;GRUND=TOKEN_WIDERSPRUCH\n";
+    echo "Das Token steht mehrfach in der Anfrage (Kopf X-Token, POST-Feld token, ?token=) und ist verschieden.\n";
     exit;
 }
 if (!hash_equals($sp_soll, $sp_ist)) {

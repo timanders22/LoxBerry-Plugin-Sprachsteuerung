@@ -163,6 +163,45 @@
  *      Vorgabe oben noch gueltiger Blockpfad ist, ein Mangel der Beschreibung
  *      ('nie_aus_datei'); ein Eintrag ohne Punkt bleibt wie bis 1.2.6.
  *      Ohne Liste von Paaren und ohne Pfad bleibt alles wie in 1.2.6.
+ *  18. Seit 1.2.8 (Entscheidung des Hausherrn 16.11.2026: "Ja, in 1.2.8"):
+ *      'fehlt' => 'pflicht' auch an Unterschluesseln eines Blocks (auch in
+ *      Bloecken in Bloecken und in den Eintraegen einer Liste), ausdruecklich je
+ *      Unterschluessel gesetzt. Traegt die Datei den Block (bzw. den Eintrag),
+ *      aber nicht diesen Unterschluessel, wird sie abgewiesen wie bei einem
+ *      fehlenden Pflichtschluessel oben: Name block.feld (block.block.feld,
+ *      liste[n].feld) im Satz K_FEHLEND, alle Beanstandungen gesammelt, nichts
+ *      geaendert. Setzt 'vorbehandeln' ihn (Uebergangsregel der Linie), bleibt
+ *      dessen Wert, er ging durch Regel 4, und die Meldung nennt ihn mit
+ *      K_FEHLT_UEBERGANG (oben bis 1.2.8 nur fuer 'behalten', ein
+ *      Pflichtschluessel oben wurde abgewiesen; seit 1.2.9 auch er, Regel 19).
+ *      Fehlt der ganze Block,
+ *      entscheidet die Angabe des Blocks selbst (oben: 'pflicht' ab Werk,
+ *      'vorgabe', 'behalten'; im Block: 'pflicht', 'behalten' oder ohne Angabe);
+ *      seine Unterschluessel werden dann nicht einzeln verlangt. Ein Wert an
+ *      der Stelle des Blocks, der kein Feld ist (auch ''; Regel 3 haelt nur
+ *      Einzelwerte), traegt keinen Unterschluessel. Bis 1.2.7 fehlte ein solcher
+ *      Unterschluessel danach still im Block (gemessen 16.11.2026).
+ *      Beschreibungspruefung (Mangel 'fehlt', K_BESCHREIBUNG, jede Datei
+ *      abgewiesen): unterhalb der obersten Ebene ist 'fehlt' nur 'behalten' oder
+ *      'pflicht' (null = nicht angegeben). Jeder andere Wert ist ein Mangel - auch
+ *      'vorgabe', das ein Block nie umsetzte (bis 1.2.7 still wirkungslos, wie
+ *      jeder Tippfehler). 'pflicht' ist ein Mangel unter einem Teil ('teile',
+ *      auch flach), unter einem Schluessel aus 'alt' oder 'nie_aus_datei' und am
+ *      Knoten eines Vermerks im Block (ein Vermerk kommt nie aus der Datei). Ohne
+ *      'pflicht' und ohne ungueltigen Wert bleibt alles wie in 1.2.7; oben bleibt
+ *      'fehlt' ungeprueft wie bisher (jeder andere Wert wirkt dort als 'pflicht').
+ *  19. Seit 1.2.9 (Entscheidung des Hausherrn 17.11.2026: "Ja, beides in 1.2.9
+ *      umsetzen", "Ich folge deinen Empfehlungen"): ein Pflichtschluessel oben
+ *      ('pflicht' ab Werk, ausdruecklich oder jeder andere Wert als 'vorgabe'
+ *      und 'behalten'), der in der Datei fehlt und den 'vorbehandeln' gesetzt
+ *      hat, ist ein Uebergang wie bei 'behalten' (1.2.2) und im Block (1.2.8,
+ *      Regel 18): sein Wert ging durch Regel 4 und bleibt, die Meldung nennt
+ *      ihn mit K_FEHLT_UEBERGANG ('fehlt_uebergang'). Setzt 'vorbehandeln' ihn
+ *      nicht, wird die Datei abgewiesen wie bisher; bis 1.2.8 wurde sie auch
+ *      dann abgewiesen. Gemessen vorher (17.11.2026, Quelltext aller Linien):
+ *      keine Linie setzt in 'vorbehandeln' einen Pflichtschluessel oben.
+ *      'vorgabe' bleibt im Block ein Mangel (Regel 18). Ohne 'vorbehandeln',
+ *      das einen fehlenden Pflichtschluessel oben setzt, wie in 1.2.8.
  *
  * Die Funktionen tragen das neutrale Kuerzel 'sicherung_' (wie 'ansage_' in
  * sprachausgabe.php). Laufen zwei Abschriften in einem PHP-Prozess, laedt sich
@@ -232,7 +271,16 @@
  *                              Blocks: 'behalten' (Name block.feld genannt);
  *                              seit 1.2.2 oben: setzt 'vorbehandeln' den
  *                              fehlenden Schluessel, bleibt dessen Wert
- *                              (Name in 'fehlt_uebergang')
+ *                              (Name in 'fehlt_uebergang');
+ *                              seit 1.2.9 ebenso bei 'pflicht' oben
+ *                              (Regel 19);
+ *                              seit 1.2.8 auch an Unterschluesseln eines
+ *                              Blocks (auch Block im Block, Eintrag einer
+ *                              Liste): 'pflicht' - fehlt er in einem Block,
+ *                              den die Datei traegt, wird sie abgewiesen
+ *                              (Name block.feld); unterhalb der obersten
+ *                              Ebene ist jeder andere Wert als 'behalten'
+ *                              und 'pflicht' ein Mangel (Regel 18)
  *                    'pruefen' function ($wert, $name, $neu, $roh) -> '' | Text |
  *                              Liste von Texten; ersetzt $b['pruefen']. $roh
  *                              (seit 1.2.0): der Wert, wie er in der Datei
@@ -306,7 +354,9 @@
  *   'fehlt_behalten' Namen, die fehlen und den geltenden Wert behalten
  *   'fehlt_vorgabe' Namen, die fehlen und auf die Vorgabe gehen
  *   'fehlt_uebergang' (1.2.2) Namen, die fehlen und deren Wert 'vorbehandeln'
- *                   gesetzt hat ('fehlt' => 'behalten'; Uebergangsregel der Linie)
+ *                   gesetzt hat ('fehlt' => 'behalten'; Uebergangsregel der Linie);
+ *                   seit 1.2.8 auch block.feld mit 'fehlt' => 'pflicht' (Regel 18);
+ *                   seit 1.2.9 auch Pflichtschluessel oben (Regel 19)
  *   'teile'         Ergebnisse der Teile
  *   'teile_hinweise' (1.2.0) Hinweise der Teile (fertige Saetze)
  *   'jetzt_entfernt' (1.2.4) Namen der Schluessel der geltenden Konfiguration, die
@@ -344,7 +394,7 @@ if (PHP_SAPI !== 'cli') {
 
 if (!defined('SICHERUNG_FASSUNG')) {
 
-define('SICHERUNG_FASSUNG', '1.2.7');
+define('SICHERUNG_FASSUNG', '1.2.9');
 /** Groesste Sicherungsdatei, die gelesen wird (Byte). */
 define('SICHERUNG_MAX_BYTE', 262144);
 /** Feldname des Hakens "Zurueckspielen bestaetigen" (seit 1.1.0; Wert 1). */
@@ -501,6 +551,8 @@ function sicherung_beschreibung_mangel(array $b)
     if (isset($b['nie_aus_datei']) && is_array($b['nie_aus_datei']) && !sicherung_nie_aus_datei_taugt($b)) {
         $m[] = 'nie_aus_datei';
     }
+    // 1.2.8: 'fehlt' unterhalb der obersten Ebene nur 'behalten' oder 'pflicht' (Regel 18) - sonst fiele er still durch
+    if (!sicherung_fehlt_taugt($b)) { $m[] = 'fehlt'; }
     return $m;
 }
 
@@ -683,6 +735,98 @@ function sicherung_huelle_taugt(array $b)
         }
     }
     return true;
+}
+
+/**
+ * 1.2.8: taugen die Angaben 'fehlt' unterhalb der obersten Ebene (Regel 18 im Kopf)? Im Block (auch Block im Block und
+ * Eintrag einer Liste) nur 'behalten' oder 'pflicht', null = nicht angegeben; 'pflicht' nicht unter einem Teil, einem
+ * Schluessel aus 'alt' oder 'nie_aus_datei' und nicht am Knoten eines Vermerks im Block. Sonst fiele die Angabe still
+ * durch - bis 1.2.7 tat jeder andere Wert als 'behalten' im Block nichts (gemessen 16.11.2026).
+ */
+function sicherung_fehlt_taugt(array $b)
+{
+    $schl = isset($b['schluessel']) && is_array($b['schluessel']) ? $b['schluessel'] : array();
+    $teile = isset($b['teile']) && is_array($b['teile']) ? $b['teile'] : array();
+    $ohne = array();        // oben: darunter gibt es kein 'pflicht' (der Wert kommt nie aus der Datei oder geht nirgends hin)
+    foreach (array('alt', 'nie_aus_datei') as $f) {
+        if (isset($b[$f]) && is_array($b[$f])) {
+            foreach ($b[$f] as $x) { if (is_string($x)) { $ohne[$x] = true; } }
+        }
+    }
+    foreach ($schl as $k => $kn) {
+        if (!is_array($kn)) { continue; }
+        $k = (string) $k;
+        if (!sicherung_fehlt_knoten_taugt($kn, !array_key_exists($k, $teile) && !isset($ohne[$k]))) { return false; }
+    }
+    // ein Vermerk im Block ('nie_aus_datei' mit Pfad) kann nicht Pflicht sein: er kommt nie aus der Datei
+    foreach (isset($b['nie_aus_datei']) && is_array($b['nie_aus_datei']) ? $b['nie_aus_datei'] : array() as $x) {
+        $p = sicherung_nie_pfad($b, $x);
+        if ($p === null) { continue; }
+        $kn = sicherung_knoten($b, $p[0]);
+        for ($i = 1; $i < count($p) && is_array($kn); $i++) {
+            $kn = (isset($kn['schluessel'][$p[$i]]) && is_array($kn['schluessel'][$p[$i]])) ? $kn['schluessel'][$p[$i]] : null;
+        }
+        if (is_array($kn) && isset($kn['fehlt']) && $kn['fehlt'] === 'pflicht') { return false; }
+    }
+    return true;
+}
+
+/** 1.2.8: die Unterschluessel eines Knotens (Block, Eintrag einer Liste) und ihre Angaben 'fehlt', rekursiv. */
+function sicherung_fehlt_knoten_taugt(array $knoten, $pflicht_erlaubt)
+{
+    $art = isset($knoten['art']) ? $knoten['art'] : 'wert';
+    if ($art === 'liste') {
+        return !isset($knoten['eintrag']) || !is_array($knoten['eintrag'])
+            || sicherung_fehlt_knoten_taugt($knoten['eintrag'], $pflicht_erlaubt);
+    }
+    if ($art !== 'block' || !isset($knoten['schluessel']) || !is_array($knoten['schluessel'])) { return true; }
+    foreach ($knoten['schluessel'] as $sk) {
+        if (!is_array($sk)) { continue; }
+        if (isset($sk['fehlt'])) {
+            if ($sk['fehlt'] === 'pflicht') {
+                if (!$pflicht_erlaubt) { return false; }
+            } elseif ($sk['fehlt'] !== 'behalten') {
+                return false;
+            }
+        }
+        if (!sicherung_fehlt_knoten_taugt($sk, $pflicht_erlaubt)) { return false; }
+    }
+    return true;
+}
+
+/**
+ * 1.2.8: Pflichtschluessel in einem Block, den die Datei traegt (Regel 18 im Kopf). $wd: der Wert in der Datei, $wb:
+ * derselbe Wert nach 'vorbehandeln' (null = keiner). Ein Unterschluessel mit 'fehlt' => 'pflicht', den $wd nicht
+ * traegt, kommt nach $fehlend (Name block.feld) - oder nach $uebergang, wenn 'vorbehandeln' ihn gesetzt hat. Bloecke in
+ * Bloecken und Eintraege einer Liste ebenso, soweit die Datei sie traegt. Ein Wert, der kein Feld ist (auch ''), traegt
+ * keinen Unterschluessel: Regel 3 haelt nur Einzelwerte, '' ersetzt den Block (gemessen 16.11.2026).
+ */
+function sicherung_pflicht_fehlend(array $knoten, $wd, $wb, $pfad, array &$fehlend, array &$uebergang)
+{
+    $art = isset($knoten['art']) ? $knoten['art'] : 'wert';
+    if ($art === 'liste') {
+        if (!is_array($wd) || !isset($knoten['eintrag']) || !is_array($knoten['eintrag'])) { return; }
+        foreach ($wd as $i => $e) {
+            $name = $pfad . '[' . (is_int($i) ? (string) ($i + 1) : sicherung_name($i)) . ']';
+            sicherung_pflicht_fehlend($knoten['eintrag'], $e, (is_array($wb) && array_key_exists($i, $wb)) ? $wb[$i] : null,
+                                      $name, $fehlend, $uebergang);
+        }
+        return;
+    }
+    if ($art !== 'block' || !isset($knoten['schluessel']) || !is_array($knoten['schluessel'])) { return; }
+    foreach ($knoten['schluessel'] as $sk => $sknoten) {
+        if (!is_array($sknoten)) { continue; }
+        $sk = (string) $sk;
+        $name = $pfad . '.' . sicherung_name($sk);
+        if (!is_array($wd) || !array_key_exists($sk, $wd)) {
+            if (isset($sknoten['fehlt']) && $sknoten['fehlt'] === 'pflicht') {
+                if (is_array($wb) && array_key_exists($sk, $wb)) { $uebergang[] = $name; } else { $fehlend[] = $name; }
+            }
+            continue;
+        }
+        sicherung_pflicht_fehlend($sknoten, $wd[$sk], (is_array($wb) && array_key_exists($sk, $wb)) ? $wb[$sk] : null,
+                                  $name, $fehlend, $uebergang);
+    }
 }
 
 /* ==================================================================
@@ -1177,6 +1321,12 @@ function sicherung_lesen(array $b, $roh, $jetzt = null)
     /* ---- Fehlende Schluessel ---- */
     $fehlend = array();
     foreach (array_keys($vorgaben) as $k) {
+        if (array_key_exists($k, $daten)) {
+            /* 1.2.8: traegt die Datei den Block, muss sie jeden Unterschluessel mit 'fehlt' => 'pflicht' tragen
+             * (Regel 18 im Kopf); setzt 'vorbehandeln' ihn, ist es ein Uebergang. */
+            sicherung_pflicht_fehlend(sicherung_knoten($b, $k), $daten[$k], array_key_exists($k, $bereit) ? $bereit[$k] : null,
+                                      $k, $fehlend, $r['fehlt_uebergang']);
+        }
         if (array_key_exists($k, $daten) || in_array($k, $nie, true)) { continue; }
         $knoten = sicherung_knoten($b, $k);
         $f = isset($knoten['fehlt']) ? $knoten['fehlt'] : 'pflicht';
@@ -1193,6 +1343,13 @@ function sicherung_lesen(array $b, $roh, $jetzt = null)
             if (array_key_exists($k, $jetzt)) { $neu[$k] = $jetzt[$k]; }
             $r['fehlt_behalten'][] = $k;
         } else {
+            /* 1.2.9: auch ein Pflichtschluessel oben (ab Werk, ausdruecklich oder unbekannte Angabe), den
+             * 'vorbehandeln' gesetzt hat, ist ein Uebergang wie bei 'behalten' (1.2.2) und im Block (1.2.8): der
+             * Wert ging durch Regel 4 und bleibt (Regel 19 im Kopf); bis 1.2.8 wurde die Datei abgewiesen. */
+            if (array_key_exists($k, $bereit)) {
+                $r['fehlt_uebergang'][] = $k;
+                continue;
+            }
             $fehlend[] = $k;
         }
     }
@@ -1957,10 +2114,51 @@ function sicherung_selbsttest()
     $dp = $daten;
     unset($dp['ein']);
     $bu4 = $b;
-    $bu4['vorbehandeln'] = function ($bereit) { $bereit['ein'] = 1; return $bereit; };
+    $bu4['vorbehandeln'] = function ($bereit) { $bereit['ein'] = 3; return $bereit; };
     $r = sicherung_lesen($bu4, json_encode($dp), $jetzt);
-    $pruef('uebergang: pflicht bleibt pflicht, auch wenn vorbehandeln ihn setzt',
-           array($r['ok'], isset($r['beanstandet'][0]['name']) ? $r['beanstandet'][0]['name'] : ''), array(false, 'ein'));
+    $pruef('uebergang: pflicht oben seit 1.2.9 ebenso - der Wert der Linie, eigens genannt (bis 1.2.8 abgewiesen)',
+           array($r['ok'], (isset($r['neu']['ein']) ? $r['neu']['ein'] : null), $r['fehlt_uebergang'], $r['beanstandet'], $r['fehlt_behalten']),
+           array(true, 3, array('ein'), array(), array()));
+    $m = sicherung_meldungen($bu4, $r);
+    $h = implode("\n", $m['hinweise']);
+    $pruef('uebergang: pflicht oben - Meldung mit K_FEHLT_UEBERGANG, ohne K_FEHLEND',
+           array(strpos($h, 'K_FEHLT_UEBERGANG [ein]') !== false, strpos(implode("\n", $m['fehler']) . $h, 'K_FEHLEND') === false),
+           array(true, true));
+    $n = count($gespeichert);
+    $r = sicherung_zurueckspielen($bu4 + array('log' => function () {}), json_encode($dp));
+    $pruef('uebergang: pflicht oben - gespeichert mit dem Wert der Linie',
+           array($r['gespeichert'], count($gespeichert) - $n, isset($gespeichert[$n]['ein']) ? $gespeichert[$n]['ein'] : 'fehlt'),
+           array(true, 1, 3));
+    $r = sicherung_lesen($bu3, json_encode($dp), $jetzt);
+    $pruef('uebergang: pflicht oben, vorbehandeln setzt nichts - abgewiesen wie bisher',
+           array($r['ok'], isset($r['beanstandet'][0]['name']) ? $r['beanstandet'][0]['name'] : '', count($r['beanstandet']),
+                 $r['fehlt_uebergang']),
+           array(false, 'ein', 1, array()));
+    $bu6 = $bu4;
+    $bu6['schluessel']['ein'] = array('fehlt' => 'pflicht');
+    $r = sicherung_lesen($bu6, json_encode($dp), $jetzt);
+    $pruef('uebergang: pflicht oben ausdruecklich - ebenso Uebergang',
+           array($r['ok'], (isset($r['neu']['ein']) ? $r['neu']['ein'] : null), $r['fehlt_uebergang']), array(true, 3, array('ein')));
+    $bu6['schluessel']['ein'] = array('fehlt' => 'pflict');
+    $r = sicherung_lesen($bu6, json_encode($dp), $jetzt);
+    $pruef('uebergang: unbekannte Angabe oben wirkt als pflicht - ebenso Uebergang',
+           array($r['ok'], (isset($r['neu']['ein']) ? $r['neu']['ein'] : null), $r['fehlt_uebergang']), array(true, 3, array('ein')));
+    $d = $dp;
+    unset($d['thema']);
+    $r = sicherung_lesen($bu4, json_encode($d), $jetzt);
+    $pruef('uebergang: zwei Pflichtschluessel fehlen, vorbehandeln setzt einen - nur der andere abgewiesen',
+           array($r['ok'], isset($r['beanstandet'][0]['name']) ? $r['beanstandet'][0]['name'] : '', count($r['beanstandet'])),
+           array(false, 'thema', 1));
+    $d = $daten;
+    unset($d['takt']);
+    $bu7 = $b;
+    $bu7['vorbehandeln'] = function ($bereit) { $bereit['takt'] = 5; return $bereit; };
+    $n = count($gespeichert);
+    $r = sicherung_zurueckspielen($bu7 + array('log' => function () {}), json_encode($d));
+    $pruef('uebergang: pflicht oben, Wert der Linie taugt nicht - abgewiesen (Regel 4), nichts gespeichert',
+           array($r['ok'], isset($r['beanstandet'][0]['name']) ? $r['beanstandet'][0]['name'] : '', count($r['beanstandet']),
+                 count($gespeichert) - $n),
+           array(false, 'takt', 1, 0));
     $bu5 = $bu2;
     $bu5['schluessel']['spaet']['pruefen'] = function ($w) { return $w === 9 ? 'spaet unzulaessig' : ''; };
     $r = sicherung_lesen($bu5, json_encode($du), $jetzt);
@@ -2660,6 +2858,214 @@ function sicherung_selbsttest()
     $pruef('vermerk block: Mangel - bauen warnt, statt still zu sichern', array_key_exists('_warnung', sicherung_bauen($bm, $jv)), true);
     $pruef('vermerk block: Pfad als Namensliste', array(sicherung_nie_pfad($bv, 'tief.innen.merk'), sicherung_nie_pfad($bv, 'mqtt.merk'),
            sicherung_nie_pfad($bv, 'vermerk_oben')), array(array('tief', 'innen', 'merk'), array('mqtt', 'merk'), null));
+    // ---- 1.2.8: 'fehlt' => 'pflicht' an Unterschluesseln eines Blocks (Regel 18 im Kopf) ----
+    $bp = array(
+        'kennzeichen' => 'LoxBerry-Plugin-Selbsttest',
+        'vorgaben' => array('a' => 1, 'blk' => array('x' => 1, 'y' => 2, 'z' => 3),
+                            'tief' => array('innen' => array('u' => 1, 'v' => 2)), 'liste' => array(),
+                            'ganz' => array('p' => 1), 'opt' => array('q' => 1)),
+        'schluessel' => array(
+            'blk' => sicherung_block(array('x'), array('y' => array('art' => 'wert', 'fehlt' => 'pflicht'),
+                                                         'z' => array('art' => 'wert', 'fehlt' => 'behalten'))),
+            'tief' => sicherung_block(array(), array('innen' => sicherung_block(array('u'),
+                                                     array('v' => array('art' => 'wert', 'fehlt' => 'pflicht'))))),
+            'liste' => sicherung_liste(array('n'), '', array('m' => array('art' => 'wert', 'fehlt' => 'pflicht'))),
+            'ganz' => sicherung_block(array(), array('p' => array('art' => 'wert', 'fehlt' => 'pflicht')))
+                      + array('fehlt' => 'behalten'),
+            'opt' => sicherung_block(array(), array('q' => array('art' => 'wert', 'fehlt' => 'pflicht')))
+                     + array('fehlt' => 'vorgabe'),
+        ),
+        'pruefen' => function ($k, $w) {
+            return ($k === 'blk' && is_array($w) && isset($w['x']) && $w['x'] === 'falsch') ? 'blk.x falsch' : '';
+        },
+        't' => function ($s) { return $s . ' [%s]'; },
+    );
+    $jp = array('a' => 1, 'blk' => array('x' => 5, 'y' => 6, 'z' => 7), 'tief' => array('innen' => array('u' => 5, 'v' => 6)),
+                'liste' => array(array('n' => 1, 'm' => 1)), 'ganz' => array('p' => 5), 'opt' => array('q' => 5));
+    $dp = array('_plugin' => 'LoxBerry-Plugin-Selbsttest', 'a' => 2, 'blk' => array('x' => 8, 'y' => 9, 'z' => 10),
+                'tief' => array('innen' => array('u' => 8, 'v' => 9)),
+                'liste' => array(array('n' => 2, 'm' => 3), array('n' => 4, 'm' => 5)), 'ganz' => array('p' => 8),
+                'opt' => array('q' => 8));
+    $pnamen = function ($r) {
+        $n = array();
+        foreach ($r['beanstandet'] as $x) { $n[] = $x['name']; }
+        return $n;
+    };
+    $pnur = function ($r) {
+        return array($r['verworfen'], $r['fehlt_behalten'], $r['fehlt_vorgabe'], $r['fehlt_uebergang'], $r['leer_behalten']);
+    };
+    $pruef('pflicht block: Beschreibung ohne Mangel', sicherung_beschreibung_mangel($bp), array());
+    $r = sicherung_lesen($bp, json_encode($dp), $jp);
+    $pruef('pflicht block: Datei mit allen Pflichtschluesseln - angenommen, nichts genannt',
+           array($r['ok'], $r['neu']['blk'], $r['neu']['tief'], $pnur($r)),
+           array(true, array('x' => 8, 'y' => 9, 'z' => 10), array('innen' => array('u' => 8, 'v' => 9)),
+                 array(array(), array(), array(), array(), array())));
+    $d = $dp;
+    unset($d['blk']['y']);
+    $r = sicherung_lesen($bp, json_encode($d), $jp);
+    $pruef('pflicht block: Unterschluessel fehlt - abgewiesen, Name block.feld', array($r['ok'], $r['neu'], $pnamen($r)),
+           array(false, null, array('blk.y')));
+    $pruef('pflicht block: Satz K_FEHLEND wie oben', strpos($r['beanstandet'][0]['text'], 'K_FEHLEND') !== false, true);
+    $bpt = array('t' => function ($s) { return $s === 'SICHERUNG.K_FEHLEND' ? '%d fehlen: %s' : $s . ' [%s]'; }) + $bp;
+    $r = sicherung_lesen($bpt, json_encode($d), $jp);
+    $m = sicherung_meldungen($bpt, $r);
+    $pruef('pflicht block: die Meldung nennt den Namen', array(count($m['fehler']), strpos($m['fehler'][0], 'blk.y') !== false),
+           array(1, true));
+    $d = $dp;
+    unset($d['a'], $d['blk']['y'], $d['tief']['innen']['v'], $d['liste'][1]['m']);
+    $d['blk']['x'] = 'falsch';
+    $r = sicherung_lesen($bp, json_encode($d), $jp);
+    $pruef('pflicht block: alles gesammelt - oben, Block, Block im Block, Liste, dazu ein falscher Wert',
+           array($r['ok'], $pnamen($r)), array(false, array('blk', 'a,blk.y,tief.innen.v,liste[2].m')));
+    $d = $dp;
+    unset($d['blk']['z']);
+    $r = sicherung_lesen($bp, json_encode($d), $jp);
+    $pruef('pflicht block: daneben behalten wie in 1.2.7', array($r['ok'], $r['neu']['blk']['z'], $r['fehlt_behalten']),
+           array(true, 7, array('blk.z')));
+    $d = $dp;
+    unset($d['ganz'], $d['opt']);
+    $r = sicherung_lesen($bp, json_encode($d), $jp);
+    $pruef('pflicht block: ganzer Block fehlt - die Angabe des Blocks entscheidet (behalten, Vorgabe)',
+           array($r['ok'], $r['neu']['ganz'], $r['neu']['opt'], $r['fehlt_behalten'], $r['fehlt_vorgabe'], $pnamen($r)),
+           array(true, array('p' => 5), array('q' => 1), array('ganz'), array('opt'), array()));
+    $d = $dp;
+    unset($d['blk']);
+    $r = sicherung_lesen($bp, json_encode($d), $jp);
+    $pruef('pflicht block: Block mit Pflicht ab Werk fehlt - genannt der Block, nicht seine Unterschluessel',
+           array($r['ok'], $pnamen($r)), array(false, array('blk')));
+    $d = $dp;
+    unset($d['tief']['innen']);
+    $r = sicherung_lesen($bp, json_encode($d), $jp);
+    $pruef('pflicht block: Block im Block fehlt ganz (ohne Angabe) - wie 1.2.7, nicht einzeln verlangt',
+           array($r['ok'], $r['neu']['tief'], $pnamen($r)), array(true, array(), array()));
+    $d = $dp;
+    unset($d['tief']['innen']['v']);
+    $r = sicherung_lesen($bp, json_encode($d), $jp);
+    $pruef('pflicht block: Block im Block - Unterschluessel fehlt', array($r['ok'], $pnamen($r)),
+           array(false, array('tief.innen.v')));
+    $d = $dp;
+    unset($d['liste'][1]['m']);
+    $r = sicherung_lesen($bp, json_encode($d), $jp);
+    $pruef('pflicht block: Liste - im zweiten Eintrag fehlt das Feld', array($r['ok'], $pnamen($r)),
+           array(false, array('liste[2].m')));
+    $d = $dp;
+    $d['liste'] = array();
+    $r = sicherung_lesen($bp, json_encode($d), $jp);
+    $pruef('pflicht block: Liste leer - nichts verlangt', array($r['ok'], $r['neu']['liste']), array(true, array()));
+    $bpv = $bp;
+    $bpv['vorbehandeln'] = function ($bereit) {
+        if (isset($bereit['blk']) && is_array($bereit['blk']) && !array_key_exists('y', $bereit['blk'])) { $bereit['blk']['y'] = 42; }
+        return $bereit;
+    };
+    $d = $dp;
+    unset($d['blk']['y']);
+    $r = sicherung_lesen($bpv, json_encode($d), $jp);
+    $m = sicherung_meldungen($bpv, $r);
+    $pruef('pflicht block: vorbehandeln setzt ihn - Uebergang, der Wert der Linie, genannt',
+           array($r['ok'], $r['neu']['blk']['y'], $r['fehlt_uebergang'], $r['fehlt_behalten'],
+                 count(preg_grep('/K_FEHLT_UEBERGANG.*blk\.y/', $m['hinweise']))),
+           array(true, 42, array('blk.y'), array(), 1));
+    $bpo = $bp;
+    $bpo['vorbehandeln'] = function ($bereit) { $bereit['a'] = 3; return $bereit; };
+    $d = $dp;
+    unset($d['a']);
+    $r = sicherung_lesen($bpo, json_encode($d), $jp);
+    $pruef('pflicht block: oben seit 1.2.9 ebenso Uebergang, wenn vorbehandeln den Schluessel setzt (bis 1.2.8 abgewiesen)',
+           array($r['ok'], $pnamen($r), isset($r['neu']['a']) ? $r['neu']['a'] : null, $r['fehlt_uebergang']), array(true, array(), 3, array('a')));
+    $d = $dp;
+    $d['blk'] = 'kein Block';
+    $r = sicherung_lesen($bp, json_encode($d), $jp);
+    $pruef('pflicht block: Block der Datei ist kein Feld - er traegt den Pflichtschluessel nicht', array($r['ok'], $pnamen($r)),
+           array(false, array('blk.y')));
+    $d = $dp;
+    $d['blk'] = '';
+    $r = sicherung_lesen($bp, json_encode($d), $jp);
+    $pruef('pflicht block: Block leer in der Datei - ersetzte den Block (Regel 3 nur fuer Einzelwerte), traegt ihn nicht',
+           array($r['ok'], $pnamen($r)), array(false, array('blk.y')));
+    $d = $dp;
+    $d['tief']['innen'] = '';
+    $r = sicherung_lesen($bp, json_encode($d), $jp);
+    $pruef('pflicht block: Block im Block leer in der Datei - traegt ihn nicht', array($r['ok'], $pnamen($r)),
+           array(false, array('tief.innen.v')));
+    $bp0 = $bp;
+    $bp0['schluessel']['blk'] = sicherung_block(array('x', 'y'), array('z' => array('art' => 'wert', 'fehlt' => 'behalten')));
+    $d = $dp;
+    unset($d['blk']['y']);
+    $r = sicherung_lesen($bp0, json_encode($d), $jp);
+    $pruef('pflicht block: ohne die Angabe wie 1.2.7 - fehlt still', array($r['ok'], $r['neu']['blk'], $pnur($r)),
+           array(true, array('x' => 8, 'z' => 10), array(array(), array(), array(), array(), array())));
+    $pgesp = array();
+    $pprot = array();
+    $bpz = $bp + array('speichern' => function ($neu) use (&$pgesp) { $pgesp[] = $neu; return true; },
+                       'log' => function ($z) use (&$pprot) { $pprot[] = $z; }, 'jetzt' => function () use ($jp) { return $jp; });
+    $d = $dp;
+    unset($d['blk']['y']);
+    $r = sicherung_zurueckspielen($bpz, json_encode($d));
+    $pruef('pflicht block zurueck: nichts gespeichert, Protokoll nennt den Namen', array($r['ok'], $r['gespeichert'],
+           count($pgesp), strpos(end($pprot), 'abgewiesen') !== false, strpos(end($pprot), 'blk.y') !== false),
+           array(false, false, 0, true, true));
+    $jp2 = $jp;
+    unset($jp2['blk']['y']);
+    $pruef('pflicht block: bauen warnt, wenn die geltende Konfiguration den Pflichtschluessel nicht traegt',
+           array(array_key_exists('_warnung', sicherung_bauen($bp, $jp2)), array_key_exists('_warnung', sicherung_bauen($bp, $jp))),
+           array(true, false));
+    $r = sicherung_lesen($bp, sicherung_json(sicherung_bauen($bp, $jp)), $jp);
+    $pruef('pflicht block: eigene Sicherung zurueck - angenommen, nichts genannt', array($r['ok'], $pnur($r)),
+           array(true, array(array(), array(), array(), array(), array())));
+    // Beschreibungspruefung: unterhalb der obersten Ebene nur 'behalten' oder 'pflicht' (fail closed)
+    foreach (array('pflict' => 'Tippfehler', 'vorgabe' => 'vorgabe im Block', 'PFLICHT' => 'Grossschreibung',
+                   '' => 'leer') as $f => $grund) {
+        $bm = $bp;
+        $bm['schluessel']['blk']['schluessel']['y']['fehlt'] = $f;
+        $pruef('pflicht block: Mangel - ' . $grund, sicherung_beschreibung_mangel($bm), array('fehlt'));
+    }
+    $bm = $bp;
+    $bm['schluessel']['blk']['schluessel']['y']['fehlt'] = true;
+    $pruef('pflicht block: Mangel - kein Text', sicherung_beschreibung_mangel($bm), array('fehlt'));
+    $bm = $bp;
+    $bm['schluessel']['blk']['schluessel']['y']['fehlt'] = null;
+    $pruef('pflicht block: kein Mangel - null gilt als nicht angegeben', sicherung_beschreibung_mangel($bm), array());
+    $bm = $bp;
+    $bm['schluessel']['tief']['schluessel']['innen']['schluessel']['v']['fehlt'] = 'vorgabe';
+    $pruef('pflicht block: Mangel - im Block im Block', sicherung_beschreibung_mangel($bm), array('fehlt'));
+    $bm = $bp;
+    $bm['schluessel']['liste']['eintrag']['schluessel']['m']['fehlt'] = 'pflict';
+    $pruef('pflicht block: Mangel - im Eintrag einer Liste', sicherung_beschreibung_mangel($bm), array('fehlt'));
+    $bm = $bp;
+    $bm['teile'] = array('zug' => function ($w) { return array($w, array()); });
+    $bm['schluessel']['zug'] = sicherung_block(array('n'), array('k' => array('art' => 'wert', 'fehlt' => 'behalten')));
+    $pruef('pflicht block: kein Mangel - behalten unter einem Teil (wie 1.2.7)', sicherung_beschreibung_mangel($bm), array());
+    $bm['schluessel']['zug']['schluessel']['k']['fehlt'] = 'pflicht';
+    $pruef('pflicht block: Mangel - pflicht unter einem Teil', sicherung_beschreibung_mangel($bm), array('fehlt'));
+    $bm['teile_flach'] = array('zug' => 'zug_');
+    $pruef('pflicht block: Mangel - pflicht unter einem flachen Teil', sicherung_beschreibung_mangel($bm), array('fehlt'));
+    $bm = $bp;
+    $bm['alt'] = array('blk');
+    $pruef('pflicht block: Mangel - pflicht unter einem frueheren Schluessel', sicherung_beschreibung_mangel($bm), array('fehlt'));
+    $bm = $bp;
+    $bm['nie_aus_datei'] = array('blk');
+    $pruef('pflicht block: Mangel - pflicht unter einem Vermerk oben', sicherung_beschreibung_mangel($bm), array('fehlt'));
+    $bm = $bp;
+    $bm['nie_aus_datei'] = array('blk.y');
+    $pruef('pflicht block: Mangel - ein Vermerk im Block ist Pflicht', sicherung_beschreibung_mangel($bm), array('fehlt'));
+    $bm = $bp;
+    $bm['nie_aus_datei'] = array('tief.innen.v');
+    $pruef('pflicht block: Mangel - ein Vermerk im Block im Block ist Pflicht', sicherung_beschreibung_mangel($bm), array('fehlt'));
+    $bm = $bp;
+    $bm['nie_aus_datei'] = array('blk.z');
+    $pruef('pflicht block: kein Mangel - Vermerk mit behalten im Knoten (wie 1.2.7)', sicherung_beschreibung_mangel($bm), array());
+    $bm = $bp;
+    $bm['schluessel']['a'] = array('art' => 'wert', 'fehlt' => 'pflict');
+    $pruef('pflicht block: kein Mangel - oben bleibt fehlt ungeprueft (wirkt als pflicht)', sicherung_beschreibung_mangel($bm),
+           array());
+    $bm = $bp;
+    $bm['schluessel']['blk']['schluessel']['y']['fehlt'] = 'vorgabe';
+    $r = sicherung_lesen($bm, json_encode($dp), $jp);
+    $pruef('pflicht block: Mangel weist jede Datei ab (form, K_BESCHREIBUNG mit dem Namen)', array($r['ok'], $r['fremd'],
+           strpos($r['beanstandet'][0]['text'], 'K_BESCHREIBUNG') !== false, strpos($r['beanstandet'][0]['text'], 'fehlt') !== false),
+           array(false, 'form', true, true));
+    $pruef('pflicht block: Mangel - bauen warnt, statt still zu sichern', array_key_exists('_warnung', sicherung_bauen($bm, $jp)),
+           true);
     return array($faelle, $fehl, $zeilen);
 }
 
