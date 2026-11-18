@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.12.20
+Version 0.12.21
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,12 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.12.21
+
+- **Behoben – Takt lief während des Updates:** Während einer Aktualisierung ruht jetzt der Minutentakt, bevor irgendetwas angelegt wird. Bis 0.12.20 lief er in der Lücke zwischen dem Löschen der alten Fassung und `postinstall.sh` und legte im Datenordner `../sprachsteuerung.startsperre`, `befehle/` neu an. Ist die Marke eine Stunde oder älter, liegt sie in der Zukunft oder enthält sie keine Unixzeit, gilt sie nicht, damit eine abgebrochene Aktualisierung den Takt nicht dauerhaft stilllegt. Alle Plugins dieser Reihe fragen die Marke mit demselben Block ab. Es wirkt schon beim Update auf diese Fassung, denn der Installer legt die Takte der neuen Fassung vor der Lücke an, und das `preupgrade.sh` der neuen Fassung legt die Marke an. Gemessen in einer Nachstellung des Update-Ablaufs auf dem Arbeitsrechner (WSL); am Gerät nicht gemessen.
+- **Geändert – Befehlsbrücke 1.0.3:** Während einer Aktualisierung legen Wächter und Start der Befehlsbrücke nichts mehr an. Bis 1.0.2 entstanden in der Lücke `befehle/`, die Optionsdateien und die Sperrdatei, bevor die Marke den Start abwies. Gemessen in einer Nachstellung auf dem Arbeitsrechner (WSL); am Gerät nicht gemessen.
+- **Gemeinsames Sprachmodul 1.4.4:** Das Modul bringt einen gemeinsamen Weg mit, die Einstellungen der Sprachausgabe in der Konfiguration zu prüfen: unbekannte Einträge verwerfen, jeden ungültigen Eintrag einzeln nennen und alles mit denselben Sätzen melden. Dieses Plugin ruft diesen Weg nicht auf; an seinem Verhalten ändert sich dadurch nichts. Gemessen auf dem Arbeitsrechner: Abschrift byte-gleich mit der Stammfassung 1.4.4, die Sprachdateien führen keinen Abschnitt [ANSAGE] und bleiben unberührt, Syntax unter PHP 7.4 und 8.4; am Gerät nicht gemessen.
 
 ## Neu in 0.12.20
 
