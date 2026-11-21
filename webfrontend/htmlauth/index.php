@@ -470,21 +470,11 @@ if ((isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '') !== 'P
  * plugin.cfg eines ausgepackten Archivs. Nichts gefunden: ''. */
 function sp_ui_fassung()
 {
-    if (class_exists('LBSystem', false) && method_exists('LBSystem', 'pluginversion')) {
-        $v = (string) @LBSystem::pluginversion();
-        if ($v !== '') { return $v; }
-    }
-    if (function_exists('sp_plugin_info')) {
-        $i = sp_plugin_info(sp_paths()['plugin']);
-        if (is_array($i) && isset($i['version']) && is_scalar($i['version']) && (string) $i['version'] !== '') {
-            return (string) $i['version'];
-        }
-    }
-    $cfg = dirname(dirname(__DIR__)) . '/plugin.cfg';
-    if (is_file($cfg) && preg_match('/^VERSION=([0-9A-Za-z.\-]{1,30})\s*$/m', (string) @file_get_contents($cfg), $t)) {
-        return $t[1];
-    }
-    return '';
+    /* 21.11.2026 (Fassung im Titel, Entscheidung des Hausherrn): aus dem gemeinsamen Stueck fassung.php,
+     * fuer alle Linien gleich - LBSystem::pluginversion(<ordner>), Plugin-Datenbank ueber den Ordnernamen,
+     * plugin.cfg des entpackten Archivs; nichts gefunden: ''. */
+    require_once __DIR__ . '/fassung.php';
+    return plugin_fassung(__DIR__);
 }
 
 /* E2: die letzten fuenf Staende der Satzdatei, je ein Stand VOR jedem
@@ -1839,7 +1829,8 @@ $sp_ct_amp = ($sp_offen('tab-services')
 $sp_fassung = sp_ui_fassung();
 $sp_rahmen = class_exists('LBWeb', false);
 if ($sp_rahmen) {
-    LBWeb::lbheader('Sprachsteuerung lokal' . ($sp_fassung !== '' ? ' ' . $sp_fassung : ''),
+    require_once __DIR__ . '/fassung.php';   // Fassung im Titel: gemeinsames Stueck fassung.php (21.11.2026)
+    LBWeb::lbheader(plugin_kopftitel('Sprachsteuerung lokal', __DIR__),
                     'https://github.com/timanders22/LoxBerry-Plugin-Sprachsteuerung', 'help.html');
 }
 ?>
