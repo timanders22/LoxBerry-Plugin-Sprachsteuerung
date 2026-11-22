@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.12.22
+Version 0.12.23
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,11 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.12.23
+
+- **Geändert – keine fest eingetragene Fassungsnummer mehr (Entscheidung des Hausherrn 22.11.2026):** Beim Abruf der Strukturdatei vom Miniserver die Kennung beim Abruf (`User-Agent`) nennt jetzt die installierte Fassung aus demselben gemeinsamen Stück wie die Kopfzeile (`fassung.php`); ist keine Fassung feststellbar, steht dort nur der Name. Bis 0.12.22 stand dort fest die gekürzte Nummer 0.12. Dafür liegt die Abschrift `fassung.php` jetzt auch in `webfrontend/html/`.
+- **Berichtigt – unverändertes Speichern legt keinen Stand der Satzdatei mehr an:** Vor dem Speichern der Ziele und Sätze behält das Plugin die letzten fünf Stände der Satzdatei. Bis 0.12.22 entstand bei jedem Speichern ein Stand, auch wenn sich nichts geändert hatte; fünf solche Speichervorgänge verdrängten den letzten echten Vorstand aus dem Verlauf. Jetzt entsteht ein Stand nur, wenn sich der Inhalt ändert, und keiner, wenn der bisherige Inhalt schon als jüngster Stand daliegt. Gemessen auf dem Arbeitsrechner (PHP 7.4 und 8.4); am Gerät nicht gemessen.
 
 ## Neu in 0.12.22
 

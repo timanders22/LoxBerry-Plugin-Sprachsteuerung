@@ -486,13 +486,25 @@ function sp_ui_staende_ordner()
 {
     return sp_paths()['datadir'] . '/saetze_staende';
 }
-function sp_ui_stand_sichern()
+function sp_ui_stand_sichern($neu = null)
 {
     $quelle = sp_paths()['saetze'];
     if (!is_file($quelle)) { return false; }
     $roh = (string) @file_get_contents($quelle);
     $d = json_decode($roh, true);
     if (!is_array($d)) { return false; }
+    /* 0.12.23 (Auftrag des Hausherrn 22.11.2026, Wirkungstest-Altbefund): ein Stand nur, wenn sich der Inhalt
+     * aendert. Bis 0.12.22 legte jedes Speichern einen an, auch ein unveraendertes - fuenf davon verdraengten den
+     * letzten echten Vorstand aus dem Verlauf. Kein neuer Stand, wenn (a) der neue Inhalt $neu dem bisherigen
+     * gleicht (verglichen in der Form, in der sp_json_schreiben() schreibt) oder (b) der bisherige Inhalt schon
+     * als juengster Stand daliegt. Ohne $neu (Einspielen einer Sicherung) gilt nur (b). */
+    $sp_form = JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES;
+    if ($neu !== null && json_encode($neu, $sp_form) === json_encode($d, $sp_form)) { return true; }
+    $sp_juengst = sp_ui_staende();
+    if ($sp_juengst
+        && (string) @file_get_contents(sp_ui_staende_ordner() . '/' . $sp_juengst[0]['datei']) === $roh) {
+        return true;
+    }
     $name = 'stand_' . date('Ymd_His') . '_' . bin2hex(random_bytes(2)) . '.json';
     if (!sp_flash_ablegen(sp_ui_staende_ordner() . '/' . $name, $roh)) { return false; }
     $alle = sp_ui_staende();
@@ -513,10 +525,10 @@ function sp_ui_staende()
     usort($aus, function ($a, $b) { return strcmp($b['datei'], $a['datei']); });
     return $aus;
 }
-/* Die Satzdatei speichern - vorher den bisherigen Stand behalten. */
+/* Die Satzdatei speichern - vorher den bisherigen Stand behalten, wenn sich der Inhalt aendert (0.12.23). */
 function sp_ui_saetze_speichern($d)
 {
-    sp_ui_stand_sichern();
+    sp_ui_stand_sichern($d);
     return sp_saetze_speichern($d);
 }
 

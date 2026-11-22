@@ -6098,6 +6098,18 @@ function sp_lox_arten()
 }
 
 /**
+ * Kennung beim Abruf der Strukturdatei (User-Agent) mit der installierten Fassung aus dem gemeinsamen Stueck
+ * fassung.php (Abschrift im Baum dieser Datei). 0.12.23 (Entscheidung des Hausherrn 22.11.2026, keine fest eingetragene Zahl):
+ * bis 0.12.22 stand hier die gekuerzte Nummer fest eingetragen. Ohne Fassung nur der Name.
+ */
+function sp_user_agent()
+{
+    require_once __DIR__ . '/fassung.php';
+    $f = plugin_fassung(__DIR__);
+    return 'User-Agent: LoxBerry-Sprachsteuerung-Plugin' . ($f !== '' ? '/' . $f : '');
+}
+
+/**
  * Die Strukturdatei holen und Vorschlaege daraus bauen.
  *
  * $host ist entweder eine Adresse (dann gelten $benutzer und $kennwort, wie
@@ -6155,7 +6167,7 @@ function sp_lox_struktur_holen($host, $benutzer = '', $kennwort = '')
               : $host . (($port > 0 && !($schema === 'http' && $port === 80) && !($schema === 'https' && $port === 443))
                          ? ':' . $port : '');
     $url = $schema . '://' . $hostport . '/data/LoxAPP3.json';
-    $kopf = array('User-Agent: LoxBerry-Sprachsteuerung-Plugin/0.12', 'Accept: application/json');
+    $kopf = array(sp_user_agent(), 'Accept: application/json');
     if ((string) $benutzer !== '') {
         // Die Zugangsdaten gehen in den KOPF, nicht in die Adresse: eine
         // Adresse landet im Protokoll des Webservers, ein Kopf nicht.
