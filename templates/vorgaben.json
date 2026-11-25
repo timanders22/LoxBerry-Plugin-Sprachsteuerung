@@ -79,7 +79,8 @@
     "docker_neustart": 0,
 
     "mitschnitt_bis": 0,
-    "messwerte": {}
+    "messwerte": {},
+    "meldung": {"ein": 0, "haken": {"dienste": 1, "spracherkennung": 1, "sprachausgabe": 1, "wortwecker": 1, "sprachmodell": 1, "mikrofon": 1, "container": 1, "ansage": 1, "miniserver": 1, "konfiguration": 1}, "sperre_min": 60}
   },
 
   "grenzen": {

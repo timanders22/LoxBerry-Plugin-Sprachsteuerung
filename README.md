@@ -1,6 +1,6 @@
 # LoxBerry-Plugin: Sprachsteuerung lokal
 
-Version 0.12.24
+Version 0.12.25
 
 Eine **vollständig lokale Sprachsteuerung für Loxone**. Mikrofone verschiedener
 Hersteller, Spracherkennung, Deutung und gesprochene Antwort — alles auf dem
@@ -12,6 +12,13 @@ LoxBerry. Kein Konto, kein Anbieter, kein Home Assistant, kein Node-RED.
 > daraus machen, entscheidet sich erst bei Ihnen.
 
 ---
+
+## Neu in 0.12.25
+
+- **Themen-Präfix auf einem gemeinsamen Bereich (Entscheidung des Hausherrn 23.11.2026 „Nur gemeinsame Bereiche“):** Ein MQTT-Präfix, das einer der gemeinsamen Bereiche unter `haus/` ist oder darin beginnt (`haus/<bereich>` bzw. `haus/<bereich>/…` für abfahrt, abfuhr, alarm, ansage, anwesenheit, energie, fahrzeug, kalender, klima, pv, raumklima, sonne, speicher, strompreis, szene, tag, tuer, usv, wetter), weisen Speichern im Reiter *MQTT* und das Zurückspielen einer Sicherung jetzt mit Namen ab: Dort liefern die Plugins einander Zustände ohne eigenes Präfix. `haus` allein und andere Präfixe unter `haus/` (etwa `haus/fenster`) bleiben erlaubt; Groß und Klein zählen wie bei MQTT. Ist ein solches Präfix schon gespeichert, ändert sich am Betrieb nichts – das Plugin sendet weiter darunter, nennt es einmal im Protokoll, und der Reiter *Test* zeigt die Zeile „Liegt das Themen-Präfix außerhalb der gemeinsamen Bereiche unter haus/?“ rot. Liste und Texte kommen aus dem gemeinsamen Modul `haus_bereiche.php` bzw. `haus_bereiche.py` im Dienst.
+- **Gespeicherte Einstellungen, die beim Laden nicht gelten (Entscheidung des Hausherrn 23./24.11.2026, Regeln/05 „Lade-Beanstandungen“):** Trägt die Konfigurationsdatei einen ungültigen Wert (von Hand bearbeitet oder aus einer alten Fassung), arbeitet das Plugin weiter mit einem gültigen, sagt es aber jetzt. Ein gelber Kasten über den Reitern nennt jetzt jedes Feld mit gespeichertem und verwendetem Wert, die Selbstprüfung im Reiter *Test* zeigt die Zeile „Gelten die gespeicherten Einstellungen beim Laden so, wie sie gespeichert sind?“ rot, und das Protokoll nennt die Namen einmal je Änderung. Bis 0.12.24 geschah das still – ein Sprechtoken falscher Form wurde geleert, das MQTT-Präfix um Zeichen gekürzt. Speichern behält bei einem genannten Feld, das Sie nicht ändern, den gespeicherten Wert, und die angezeigten Werte übernimmt nur der Knopf „Angezeigte Werte übernehmen“ mit gesetztem Haken. Token und Zugangsdaten erscheinen in keiner Meldung mit ihrem Wert, das Protokoll nennt keinen Wert. Gemeinsames Sicherungsmodul 1.3.0.
+- **Statusmeldungen an SignalBot (Entscheidung des Hausherrn 24.11.2026), ab Werk aus:** Im Reiter Einstellungen, Formular Ansagen, gibt es den Block „Meldungen an SignalBot“. Eingeschaltet geht jede Störung, die der Dienst in den Benachrichtigungsbereich des LoxBerry schreibt, zusätzlich unter `haus/meldung/sprachsteuerung` an das Plugin SignalBot (Dienst → Brücke `sp_ansage.php` → gemeinsames Modul `meldung.php`), je Störung abwählbar: zu wenige Sprachdienste, Spracherkennung, Sprachausgabe, Wortwecker, Sprachmodell, Mikrofon, Container, Ansage, Miniserver-Aufruf, Konfiguration. Wie die Benachrichtigung höchstens einmal je Störung und Tag (Container: je Stunde); dazu die Sperrzeit des Blocks (ab Werk 60 Minuten) und höchstens 10 Meldungen je Stunde. Eine Meldung „wieder in Ordnung“ gibt es hier nicht. Nötig ist SignalBot ab 0.9.44 mit „Meldungen unter haus/meldung annehmen“; der Knopf „Testmeldung senden“ prüft den Weg.
+- **Dienst und Oberfläche lesen die Einstellungen gleich (Entscheidung des Hausherrn 24.11.2026):** Oberfläche und Sprachdienst bereinigen gespeicherte Einstellungen jetzt nach denselben Regeln. Ein Schalter gilt auf beiden Seiten nur bei „1“, „true“, „yes“ oder „on“ als an – bisher galt zum Beispiel die Ruhezeit mit dem Wert „0“ im Dienst als eingeschaltet, in der Oberfläche als aus, und vier Schalter wurden in der Oberfläche gar nicht bereinigt. Eine Ruhezeit wie „25:00“ gilt auf beiden Seiten als ungültig, es gilt dann die Vorgabe. Die Textfelder der Sprachausgabe werden auf beiden Seiten gleich gelesen; das Sprachkürzel hat höchstens fünf Buchstaben. Wer seine Einstellungen über das Formular gespeichert hat, merkt keine Änderung.
 
 ## Neu in 0.12.24
 

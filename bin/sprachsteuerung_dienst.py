@@ -572,6 +572,48 @@ def json_schreiben(pfad: Path, daten, rechte: int | None = None) -> bool:
 # Ramdisk, wo niemand hinsieht, solange das Haus noch reagiert. Ein toter
 # Container faellt damit erst auf, wenn jemand davorsteht und redet.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 0.12.25: Statusmeldungen an SignalBot (Entscheidung des Hausherrn 24.11.2026, F2 "Ja, ab Werk aus")
+#
+# Dieselbe Stoerung, die melden() in den Benachrichtigungsbereich schreibt, geht - hinter derselben Bremse - ueber
+# die Bruecke sp_ansage.php (Auftrag art=meldung) an das gemeinsame Modul meldung.php der Oberflaeche: Block
+# "Meldungen an SignalBot" (ab Werk aus), Haken je Anlass, Sperre und Bremse im Modul, Thema haus/meldung/<ordner>.
+# Der Dienst entscheidet nichts davon selbst; ins Protokoll kommt nur das Ergebnis, nie der Text.
+# ---------------------------------------------------------------------------
+_MELD_ANLASS = {"cfg_kaputt": "konfiguration", "tts": "ansage", "llm": "sprachmodell", "miniserver": "miniserver", "wake": "wortwecker", "whisper": "spracherkennung", "piper": "sprachausgabe", "dienste": "dienste"}
+
+
+def meld_anlass(schluessel: str) -> str:
+    """Der Anlass einer Stoerung aus dem Schluessel von melden(); '' = keiner (wird nicht gemeldet)."""
+    s = str(schluessel or "")
+    if s in _MELD_ANLASS:
+        return _MELD_ANLASS[s]
+    for vorsilbe, anlass in (("tts_", "ansage"), ("docker_", "container"), ("sat_", "mikrofon")):
+        if s.startswith(vorsilbe):
+            return anlass
+    return ""
+
+
+def meld_signal(anlass: str, text: str) -> bool:
+    """Eine Stoerung an die Bruecke geben. Rueckgabe True, wenn SignalBot sie angenommen hat."""
+    if not anlass:
+        return False
+    auftrag = {"art": "meldung", "anlass": anlass, "text": str(text or "")}
+    try:
+        e = subprocess.run(["php", str(SELF / "sp_ansage.php"), PNAME],
+                           input=json.dumps(auftrag, ensure_ascii=False).encode("utf-8"),
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError) as err:
+        melde_gebremst("meld_ruf", "SignalBot-Meldung %s: die Bruecke sp_ansage.php war nicht aufrufbar (%s)."
+                       % (anlass, type(err).__name__), 3600)
+        return False
+    zeilen = e.stdout.decode("ascii", "replace").strip().splitlines()
+    roh = zeilen[-1] if zeilen else ""
+    _LOG.info("SignalBot-Meldung %s: rc=%d %s", anlass, e.returncode,
+              "".join(c if (c.isascii() and c.isalnum()) or c in "_.:,|/-=; " else " " for c in roh)[:120])
+    return e.returncode == 0 and "LAGE=angenommen" in roh
+
+
 def melden(schwere: int, text: str, schluessel: str = "", stunden: int = 24) -> None:
     """Eine Meldung ablegen. schwere: 3 = Fehler, 6 = Hinweis.
 
@@ -603,13 +645,15 @@ def melden(schwere: int, text: str, schluessel: str = "", stunden: int = 24) -> 
     if not in_schleife and threading.current_thread() is not threading.main_thread():
         in_schleife = True
     if in_schleife:
-        threading.Thread(target=_melden_ausfuehren, args=(skript, schwere, text),
+        threading.Thread(target=_melden_ausfuehren, args=(skript, schwere, text, schluessel),
                          name="melden", daemon=True).start()
         return
-    _melden_ausfuehren(skript, schwere, text)
+    _melden_ausfuehren(skript, schwere, text, schluessel)
 
 
-def _melden_ausfuehren(skript: Path, schwere: int, text: str) -> None:
+def _melden_ausfuehren(skript: Path, schwere: int, text: str, schluessel: str = "") -> None:
+    # 0.12.25: dieselbe Stoerung an SignalBot (Block "Meldungen an SignalBot", ab Werk aus) - ein Nebenweg wie diese Meldung.
+    meld_signal(meld_anlass(schluessel), text)
     try:
         # Der Pluginordner wird MITGEGEBEN: dem Dienst koennen die
         # LoxBerry-Umgebungsvariablen fehlen, und bei einer Zweitinstallation
@@ -759,38 +803,38 @@ def config() -> dict:
     modi = AUSWAHL.get("tts_mode") or ["musicserver"]
     t["mode"] = t.get("mode") if t.get("mode") in modi else "musicserver"
     tv = VORGABEN.get("tts") or {}
-    t["cc_praefix"] = str(t.get("cc_praefix") or "").strip("/")
-    if not re.fullmatch(r"[A-Za-z0-9_\-]+(/[A-Za-z0-9_\-]+){0,3}", t["cc_praefix"]):
-        t["cc_praefix"] = str(tv.get("cc_praefix") or "chromecast4lox")
-    t["cc_ziel"] = str(t.get("cc_ziel") if t.get("cc_ziel") is not None else "")
-    if not (0 < len(t["cc_ziel"]) <= 60) or re.search(r"[\x00-\x1f\x7f/+#]", t["cc_ziel"]) \
-            or t["cc_ziel"].strip() != t["cc_ziel"]:
-        # Ein unbrauchbares Ziel wird NICHT zu "alle": sonst spraeche das
-        # ganze Haus, weil ein Name nicht stimmt. Leer heisst: kein Ziel,
-        # die Ansage faellt auf den bisherigen Weg zurueck.
-        t["cc_ziel"] = ""
-    t["alexa_geraet"] = str(t.get("alexa_geraet") or "").strip()
-    if len(t["alexa_geraet"]) > 200 or re.search(r"[\x00-\x1f\x7f]", t["alexa_geraet"]):
-        t["alexa_geraet"] = ""
-    t["alexa_token"] = str(t.get("alexa_token") or "")
-    if not re.fullmatch(r"[A-Za-z0-9_\-]{8,128}", t["alexa_token"]):
-        t["alexa_token"] = ""
-    try:
-        t["alexa_laut"] = int(t.get("alexa_laut"))
-    except (TypeError, ValueError):
-        t["alexa_laut"] = -1
-    if not 0 <= t["alexa_laut"] <= 100:
-        t["alexa_laut"] = -1
-    # Ansage-3: Google-Lautsprecher ueber Chromecast 4 Lox NG - dieselben
-    # Regeln wie fuer Alexa-NG, eigene Felder und ein EIGENES Sprechtoken.
-    # Gelesen wie $sp_skalar in sp_config() (sp_lib.php): nur Skalare - eine
-    # Liste wird leer, nie zu "['x']"; die Lautstaerke nur als 0-100.
+
+    # 0.12.25 (Entscheidung des Hausherrn 24.11.2026, Folgepunkt zu Punkt 17): JEDES Textfeld wie $sp_skalar in
+    # sp_config() (sp_lib.php) - nur Skalare, eine Liste wird leer, nie zu "['x']", true zu "1", nie zu "True"; bis hier
+    # galt das nur fuer die Felder ab google_geraet. Geprueft mit sp_normform_pruefen.py.
     def _skalar(w):
         if isinstance(w, bool):
             return "1" if w else ""
         if isinstance(w, float) and w.is_integer():
             return str(int(w))
         return str(w) if isinstance(w, (str, int, float)) else ""
+    t["cc_praefix"] = _skalar(t.get("cc_praefix")).strip("/")
+    if not re.fullmatch(r"[A-Za-z0-9_\-]+(/[A-Za-z0-9_\-]+){0,3}", t["cc_praefix"]):
+        t["cc_praefix"] = str(tv.get("cc_praefix") or "chromecast4lox")
+    t["cc_ziel"] = _skalar(t.get("cc_ziel"))
+    if not (0 < len(t["cc_ziel"]) <= 60) or re.search(r"[\x00-\x1f\x7f/+#]", t["cc_ziel"]) \
+            or t["cc_ziel"].strip() != t["cc_ziel"]:
+        # Ein unbrauchbares Ziel wird NICHT zu "alle": sonst spraeche das
+        # ganze Haus, weil ein Name nicht stimmt. Leer heisst: kein Ziel,
+        # die Ansage faellt auf den bisherigen Weg zurueck.
+        t["cc_ziel"] = ""
+    t["alexa_geraet"] = _skalar(t.get("alexa_geraet")).strip()
+    if len(t["alexa_geraet"]) > 200 or re.search(r"[\x00-\x1f\x7f]", t["alexa_geraet"]):
+        t["alexa_geraet"] = ""
+    t["alexa_token"] = _skalar(t.get("alexa_token"))
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{8,128}", t["alexa_token"]):
+        t["alexa_token"] = ""
+    laut = _skalar(t.get("alexa_laut"))     # 0.12.25 (Punkt 17): wie google_laut und sp_config() - 7.5 ist -1, nicht 7
+    t["alexa_laut"] = int(laut) if re.fullmatch(r"[0-9]{1,3}", laut) and int(laut) <= 100 else -1
+    # Ansage-3: Google-Lautsprecher ueber Chromecast 4 Lox NG - dieselben
+    # Regeln wie fuer Alexa-NG, eigene Felder und ein EIGENES Sprechtoken.
+    # Gelesen wie $sp_skalar in sp_config() (sp_lib.php): nur Skalare - eine
+    # Liste wird leer, nie zu "['x']"; die Lautstaerke nur als 0-100 (_skalar() steht seit 0.12.25 oben im Block).
     t["google_geraet"] = _skalar(t.get("google_geraet")).strip()
     if len(t["google_geraet"]) > 200 or re.search(r"[\x00-\x1f\x7f]", t["google_geraet"]):
         t["google_geraet"] = ""
@@ -829,18 +873,18 @@ def config() -> dict:
             t[feld] = max(klein, min(gross, int(roh)))
         except (TypeError, ValueError):
             t[feld] = tv.get(feld)
-    t["ip"] = str(t.get("ip") or "").strip()
-    t["zones"] = str(t.get("zones") or "1").strip() or "1"
-    t["template"] = str(t.get("template") or "").strip()
-    t["stimme"] = str(t.get("stimme") or "").strip()
-    sprachkuerzel = "".join(z for z in str(t.get("lang") or "de").lower() if z.isalpha())
-    t["lang"] = sprachkuerzel[:5] or "de"
+    t["ip"] = _skalar(t.get("ip")).strip()
+    t["zones"] = _skalar(t.get("zones")).strip() or "1"
+    t["template"] = _skalar(t.get("template")).strip()
+    t["stimme"] = _skalar(t.get("stimme")).strip()
+    # 0.12.25 (Punkt 17): nur a-z wie sp_config() - isalpha() liess auch Umlaute und fremde Schriften durch
+    t["lang"] = re.sub(r"[^a-z]", "", _skalar(t.get("lang")).lower())[:5] or "de"
     c["tts"] = t
 
     r = dict(VORGABEN.get("ruhe") or {})
     if isinstance(c.get("ruhe"), dict):
         r.update(c["ruhe"])
-    r["ein"] = 1 if r.get("ein") else 0
+    r["ein"] = 1 if _ein(r.get("ein")) else 0     # 0.12.25 (Punkt 17): "0" ist aus - wie sp_config()
     for feld in ("von", "bis"):
         z = str(r.get(feld) or "")
         # _minuten() lehnt 25:00 oder 7:61 ab statt zu klemmen; die Vorgabe
@@ -9037,6 +9081,26 @@ def mikrofone_abbild() -> dict:
 _ABBILD_STAND = {}
 
 
+def _haus_bereiche():
+    """0.12.25 (Entscheidung des Hausherrn 23.11.2026 "Nur gemeinsame Bereiche", Regeln/07): das gemeinsame
+    Modul haus_bereiche.py neben dem Dienst, beim ersten Aufruf geladen."""
+    hier = os.path.dirname(os.path.abspath(__file__))
+    if hier not in sys.path:
+        sys.path.insert(0, hier)
+    import haus_bereiche  # noqa: E402
+    return haus_bereiche
+
+
+def praefix_haus_melden(praefix):
+    """0.12.25: einmal je Aenderung eine Protokollzeile, solange das Praefix auf einen gemeinsamen Bereich unter
+    haus/ faellt; der Versand bleibt, wie er ist. Rueckgabe der gemeldete Bereich oder ""."""
+    hb = _haus_bereiche()
+    bereich = hb.hb_melden_faellig(praefix)
+    if bereich:
+        _LOG.warning("%s", hb.hb_logtext(praefix, bereich))
+    return bereich
+
+
 def abbild_schreiben(cfg: dict, sats: dict | None = None) -> dict:
     """Das Abbild fuer Oberflaeche und Herzschlag. Laeuft seit 0.12.0 im
     Faden (dienste_erreichbar() baut bis zu drei TCP-Verbindungen mit je 2 s
@@ -9051,6 +9115,7 @@ def abbild_schreiben(cfg: dict, sats: dict | None = None) -> dict:
     verlauf = (json_lesen(DATEI_VERLAUF).get("saetze") or [])
     letzter = verlauf[0] if verlauf else {}
     letzter_ts = int(letzter.get("ts") or 0)
+    praefix_haus_melden(praefix_von(cfg))   # 0.12.25: im gemeinsamen Bereich? melden, nicht anhalten
     daten = {
         # OK sagt: der DIENST lebt. Bis 0.9.11 stand hier
         # any(zustand != getrennt) - eine Anlage ohne Mikrofon (die es geben
@@ -9059,6 +9124,7 @@ def abbild_schreiben(cfg: dict, sats: dict | None = None) -> dict:
         "ok": 1,
         "ts": int(time.time()),
         "pid": os.getpid(),
+        "haus_bereiche": list(_haus_bereiche().HB_BEREICHE),   # 0.12.25
         "satelliten": sats,
         "anzahl_mikrofone": len(sats),
         "bereit": bereit,

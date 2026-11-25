@@ -678,7 +678,8 @@ if ($sp_post && isset($_POST['sicherung_einspielen'])) {
     $sp_sb = sp_sicherung_beschreibung();
     list($sp_sroh, $sp_sr) = sicherung_eingang($sp_sb, $_POST, $_FILES, 'sicherungsdatei');
     if ($sp_sr === null) {
-        $sp_sb['speichern'] = function ($neu) { return sp_config_speichern($neu); };
+        // 0.12.25: die Werte einer Sicherung sind ausdruecklich - kein "Dateiwert behalten" (Regeln/05)
+        $sp_sb['speichern'] = function ($neu) { return sp_config_speichern($neu, false); };
         $sp_sb['zweitschrift'] = function () {
             $p = sp_paths();
             return array($p['config'], $p['sicherung']);
@@ -731,7 +732,16 @@ if ($sp_post && isset($_POST['mqtt_save'])) {
     $sp_cfg['mqtt_dauer_ein'] = isset($_POST['mqtt_dauer_ein']) ? 1 : 0;
     $sp_topic = $sp_x('mqtt_topic');
     if ($sp_regel('mqtt_topic', $sp_topic === null ? '' : $sp_topic, 'mqtt_topic')) {
-        $sp_cfg['mqtt_topic'] = trim($sp_topic, '/');
+        /* 0.12.25 (Entscheidung des Hausherrn 23.11.2026 "Nur gemeinsame Bereiche", Regeln/07): kein Praefix auf einem
+         * gemeinsamen Bereich unter haus/ - nur hier und beim Zurueckspielen, nicht in der Pruefung beim Lesen der
+         * Konfiguration: ein schon gespeichertes bleibt in Betrieb, der Reiter Test meldet es. */
+        if (hb_bereich(trim($sp_topic, '/')) !== '' && trim($sp_topic, '/') !== (string) $sp_cfg['mqtt_topic']) {   // nur NEUE Eingaben: ein schon gespeichertes Praefix sperrt das Speichern
+            // des Reiters nicht (Regeln/07; Bauart Einspeisebremse 0.9.25)
+            $sp_fehler[] = sp_e(sprintf(sp_t('HAUSBEREICH.FEHLER'), trim($sp_topic, '/'), hb_bereich(trim($sp_topic, '/'))));
+            sp_bean('mqtt_topic');
+        } else {
+            $sp_cfg['mqtt_topic'] = trim($sp_topic, '/');
+        }
     }
     // Die Grenzen aus templates/vorgaben.json (bis 0.11.15 fest 0..3600 hier).
     $sp_takt = $sp_x('herzschlag_s');
@@ -791,7 +801,7 @@ if ($sp_post && isset($_POST['endpunkt_save'])) {
  * dessen Felder mit - bis 0.11.15 speicherte jede Probe saemtliche
  * Einstellungen mit, auch halb eingetippte. Mit probe_stimme wird hier
  * nichts gespeichert; der Handler weiter unten spielt nur die Probe ab. */
-if ($sp_post && isset($_POST['speichern']) && !isset($_POST['probe_stimme'])) {
+if ($sp_post && isset($_POST['speichern']) && !isset($_POST['probe_stimme']) && !isset($_POST['meld_test'])) {     // 0.12.25: der Knopf Testmeldung speichert nicht
     $sp_cfg = sp_config();
     /* WELCHES der beiden Formulare kam? Ein Feld, das nicht mitgeschickt
      * wurde, ist nicht leer - es wurde nicht angezeigt. Nur Ankreuzfelder
@@ -1057,6 +1067,14 @@ if ($sp_post && isset($_POST['speichern']) && !isset($_POST['probe_stimme'])) {
         if ($sp_regel('ruhe.' . $sp_f, $sp_w, 'ruhe_' . $sp_f)) { $sp_ruhe[$sp_f] = $sp_w; }
     }
     $sp_cfg['ruhe'] = $sp_ruhe;
+    /* 0.12.25: der Block 'Meldungen an SignalBot' im Formular Ansagen (eine Beanstandung haelt das Speichern an). */
+    if ($sp_formular === 'ansagen') {
+        $sp_mmangel = array();
+        $sp_mbean = array();
+        $sp_cfg['meldung'] = meld_formular_lesen($_POST, isset($sp_cfg['meldung']) ? $sp_cfg['meldung'] : null, sp_meld_anlaesse(),
+                                                 $sp_mmangel, $sp_mbean, sp_meld_k(), sp_meld_haken_vorgabe());
+        foreach ($sp_mmangel as $sp_mm) { $sp_fehler[] = sp_e($sp_mm['text']); }
+    }
 
     if (!$sp_fehler) {
         if (sp_config_speichern($sp_cfg)) {
@@ -1733,6 +1751,12 @@ if ($sp_post && isset($_POST['mitschnitt']) && is_string($_POST['mitschnitt'])) 
     if ($sp_ok) { $sp_meldungen[] = $sp_meld; } else { $sp_fehler[] = sp_e($sp_meld); }
     $sp_tab = 'tab-log';
 }
+/* 0.12.25: Testmeldung an SignalBot (Knopf im Formular Ansagen). Speichert nichts. */
+if ($sp_post && isset($_POST['meld_test'])) {
+    list($meld_ok, $meld_satz) = sp_meld_test();
+    if ($meld_ok) { $sp_meldungen[] = sp_e($meld_satz); } else { $sp_fehler[] = sp_e($meld_satz); }
+    $sp_tab = 'tab-settings';
+}
 if ($sp_post && isset($_POST['test'])) {
     // sp_test_aktion() liefert seit 0.12.0 maskiertes HTML (F2) - auch die
     // Meldung des Dienstes, die Fremdtext tragen kann.
@@ -1743,6 +1767,31 @@ if ($sp_post && isset($_POST['test'])) {
 if ($sp_post && isset($_POST['selbsttest'])) {
     $sp_ausgabe = sp_selbsttest_ausgabe();
     $sp_tab = 'tab-test';
+}
+
+/* ---------------- Lade-Beanstandungen: angezeigte Werte uebernehmen (0.12.25) ----------------
+ * Nur mit gesetztem Haken (Entscheidung des Hausherrn 24.11.2026, "Haken im gelben Kasten"); ohne ihn bleibt die Datei
+ * byte-gleich. Geschrieben ohne "Dateiwert behalten". */
+if ($sp_post && sicherung_lade_eingang($_POST) !== '') {
+    $sp_lb = sp_lade_b();
+    if (sicherung_lade_eingang($_POST) !== 'ja') {
+        $sp_fehler[] = sp_e(sicherung_t('K_LADE_HAKEN_FEHLT', $sp_lb));
+    } else {
+        $sp_ld = sp_lade_roh();
+        $sp_lv = sp_config(false);
+        $sp_un = array();
+        if ($sp_ld !== null) {
+            list($sp_lneu, $sp_un) = sicherung_lade_uebernehmen_stand($sp_ld, $sp_lv, sicherung_lade_beanstandungen($sp_lb, $sp_ld, $sp_lv));
+            if ($sp_un && !sp_config_speichern($sp_lneu, false)) {
+                $sp_fehler[] = sp_e(sp_t('LIB012.NICHT_GESPEICHERT'));
+                $sp_un = array();
+            }
+        }
+        if ($sp_un) {
+            sp_log('Lade-Beanstandungen: angezeigte Werte uebernommen: ' . implode(', ', array_map('sicherung_name', $sp_un)));
+            $sp_meldungen[] = sprintf(sicherung_t('K_LADE_UEBERNOMMEN', $sp_lb), sp_e(implode(', ', $sp_un)));
+        }
+    }
 }
 
 /* ---------------- PRG: jede POST-Anfrage endet hier mit 303 ----------------
@@ -1948,6 +1997,11 @@ if ($sp_rahmen) {
 <?php foreach ($sp_fehler as $sp_f) { ?><li><?= $sp_f ?></li><?php } ?>
 </ul></div>
 <?php } ?>
+<?php /* 0.12.25: Lade-Beanstandungen (Regeln/05) - gelber Kasten; einmal je Aenderung ins Protokoll. */
+$sp_lade = sp_lade_beanstandungen();
+sp_lade_melden($sp_lade); ?>
+<?= sicherung_lade_kasten(sp_lade_b(), isset($sp_lade) ? $sp_lade : sp_lade_beanstandungen(),
+        '<input data-role="none" type="hidden" name="fmt" value="' . sp_e($sp_fmt) . '"><input data-role="none" type="hidden" name="activetab" value="' . sp_e($sp_tab) . '">') ?>
 <?php if ($sp_hinweise) { ?>
 <div class="sm-warnung"><b><?= sp_e(sp_t('ALLG.HINWEIS')) ?></b>
 <ul style="margin:6px 0 0 18px;padding:0;">
@@ -2432,6 +2486,9 @@ if (!in_array($sp_spr_ist, sp_pruef_sprachen(), true) && !sp_x2_aktiv('sprache')
   <label for="verlauf_zeilen"><?= sp_e(sp_t('EINST.L_VERLAUF_ZEILEN')) ?></label>
   <input data-role="none" type="number" id="verlauf_zeilen" name="verlauf_zeilen" value="<?= sp_e(sp_x2_wert('verlauf_zeilen', (int) $sp_cfg['verlauf_zeilen'])) ?>"<?= $sp_mm('verlauf_zeilen', 5, 500) ?><?= sp_x2_mark('verlauf_zeilen') ?>>
 </div>
+<?php /* 0.12.25: Meldungen an SignalBot (ab Werk aus) */ ?>
+<div class="sm-hilfe"><?= sp_e(sp_t('SP_MELD.H')) ?></div>
+<?= sp_meld_form_html($sp_cfg) ?>
 
 <div class="sm-knopfreihe">
   <button data-role="none" class="sm-btn sm-b-aktion" type="submit"><?= sp_e(sp_t('ALLG.SPEICHERN')) ?></button>

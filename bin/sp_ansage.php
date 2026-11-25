@@ -93,6 +93,31 @@ if (!is_array($auftrag) || !isset($auftrag['art']) || !is_string($auftrag['art']
     fwrite(STDERR, "Auftrag fehlt oder ist kein JSON.\n");
     exit(2);
 }
+/* 0.12.25 (Entscheidung des Hausherrn 24.11.2026, F2): eine Stoerung des Dienstes an SignalBot ueber das gemeinsame
+ * Modul meldung.php (Auftrag {"art": "meldung", "anlass", "text"}). Block, Haken, Sperre, Bremse und Versand stehen in der
+ * Bibliothek der Oberflaeche (sp_meld_senden()). Antwort EINE Zeile MELDUNG;REGEL=<r>;LAGE=<l>, Rueckgabe 0 (2 bei einem
+ * unbrauchbaren Auftrag, 1 ohne Bibliothek). */
+if ($auftrag['art'] === 'meldung') {
+    $sp_bib = $home . '/webfrontend/html/plugins/' . $paket . '/sp_lib.php';
+    if (!is_file($sp_bib)) {
+        echo "MELDUNG;REGEL=KEINE_BIBLIOTHEK;LAGE=-\n";
+        exit(1);
+    }
+    require_once $sp_bib;
+    $sp_ma = (isset($auftrag['anlass']) && is_string($auftrag['anlass'])) ? $auftrag['anlass'] : '';
+    $sp_mt = (isset($auftrag['text']) && is_string($auftrag['text'])) ? $auftrag['text'] : '';
+    if (!array_key_exists($sp_ma, sp_meld_anlaesse()) || trim($sp_mt) === '' || strlen($sp_mt) > 2000) {
+        echo "MELDUNG;REGEL=AUFRUF;LAGE=-\n";
+        exit(2);
+    }
+    $sp_mr = sp_meld_senden(array(array('schluessel' => $sp_ma . '|' . substr(md5($sp_mt), 0, 10), 'anlass' => $sp_ma,
+                                        'text' => $sp_mt)), sp_config(false));
+    $sp_ml = (is_array($sp_mr) && is_array($sp_mr['q']) && isset($sp_mr['q']['lage'])) ? (string) $sp_mr['q']['lage'] : '-';
+    echo 'MELDUNG;REGEL=' . (is_array($sp_mr) ? ($sp_mr['regel'] !== '' ? $sp_mr['regel'] : 'GESENDET') : 'AUS')
+        . ';LAGE=' . preg_replace('/[^a-z_-]/', '', $sp_ml) . "\n";
+    exit(0);
+}
+
 $tmo = isset($auftrag['tmo']) && is_numeric($auftrag['tmo']) ? (int) ceil((float) $auftrag['tmo']) : ANSAGE_TMO;
 /* Hoechstens ANSAGE_TMO: bis 0.11.15 bis 30 s, und der Dienst schickte fuer
  * Alexa-NG 15 s - laenger als die 10 s, die in allen Linien gelten. */

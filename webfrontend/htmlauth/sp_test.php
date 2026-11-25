@@ -148,6 +148,9 @@ function sp_pruefungen()
     $zeilen[] = sp_pruefzeile($mqttEin ? 1 : -1, sp_t('TEST.F_MQTT_EIN'),
         sp_t($mqttEin ? 'TEST.A_MQTT_EIN_JA' : 'TEST.A_MQTT_EIN_NEIN'));
 
+    // 0.12.25: faellt das Themen-Praefix auf einen gemeinsamen Bereich unter haus/ (Regeln/07)?
+    $sp_hb = sp_pruef_praefix_haus($cfg);
+    $zeilen[] = sp_pruefzeile($sp_hb[0], sp_e(sp_t('HAUSBEREICH.F_TEST')), $sp_hb[1]);
     $m = sp_mqtt_zustand();
     if (!$m['gefunden']) {
         $zeilen[] = sp_pruefzeile(0, sp_t('TEST.F_MQTT'), sp_t('TEST.A_MQTT_NICHT_GEFUNDEN'));
@@ -223,6 +226,12 @@ function sp_pruefungen()
     $zeilen[] = sp_pruefzeile($st, sp_t('TEST.F_SMACTIVE'), $tx);
     list($st, $tx) = sp_formularprobe(__DIR__ . '/index.php');
     $zeilen[] = sp_pruefzeile($st, sp_t('TEST.F_FORMULAR'), $tx);
+    /* 0.12.25: Lade-Beanstandungen (Regeln/05, Sicherungsmodul 1.3.0) - rot, solange ein gespeicherter Wert beim Laden
+     * nicht so gilt, wie er gespeichert ist. */
+    $sp_lb = sp_lade_b();
+    $sp_ladea = sp_lade_beanstandungen();
+    $zeilen[] = sp_pruefzeile($sp_ladea ? 0 : 1, sp_e(sicherung_t('K_LADE_FRAGE', $sp_lb)),
+        $sp_ladea ? implode('<br>', sicherung_lade_saetze($sp_lb, $sp_ladea)) : sp_e(sicherung_t('K_LADE_KEINE', $sp_lb)));
 
     return $zeilen;
 }

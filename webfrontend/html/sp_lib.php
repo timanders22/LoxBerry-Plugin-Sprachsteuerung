@@ -26,12 +26,14 @@ if (!function_exists('sp_e')) {
  * Stufe 1). Liegt neben dieser Datei; die Datei schuetzt sich selbst gegen doppeltes Laden.
  * Der Dienst erreicht sie ueber bin/sp_ansage.php. */
 require_once __DIR__ . '/sprachausgabe.php';
+require_once __DIR__ . '/meldung.php';     // Statusmeldungen an SignalBot (seit 0.12.25)
 
 /* 0.12.18: das gemeinsame Sicherungsmodul (Abschrift von Werkzeuge/gemeinsam/sicherung.php, Auftrag des Hausherrn
  * 12.11.2026: alle Plugins verhalten sich beim Sichern und Zurueckspielen gleich). Liegt neben dieser Datei; die
  * Abschrift weist einen direkten Aufruf ueber den Webserver mit 403 ab. Die Beschreibung dieser Linie steht in
  * sp_sicherung_beschreibung(). */
 require_once __DIR__ . '/sicherung.php';
+require_once __DIR__ . '/haus_bereiche.php';     // gemeinsame Bereiche unter haus/ (seit 0.12.25, Regeln/07)
 
 /* 0.12.0 (I2): die gemeinsame Feldpruefung der Oberflaeche - dieselben Regeln
  * wie das Formular, damit "Sicherung einspielen" nichts annimmt, was das
@@ -570,15 +572,16 @@ function sp_config($erzeugen = true)
     if (!in_array($tts['mode'], $sp_modi, true)) {
         $tts['mode'] = 'musicserver';
     }
-    $tts['ip'] = trim((string) $tts['ip']);
+    $tts['ip'] = trim(sp_text_skalar($tts['ip']));     // 0.12.25 (Punkt 17): eine Liste ist '', nicht 'Array'
     // Nicht numerisch heisst Vorgabe, nicht Untergrenze: (int) 'abc' war 0 und
     // wurde zu Port 1, der Dienst nahm 7091 (sp_zahl_in_grenzen()).
     $tts['port'] = sp_zahl_in_grenzen($tts['port'], 1, 65535, $vor['tts']['port']);
     $tts['volume'] = sp_zahl_in_grenzen($tts['volume'], 1, 100, $vor['tts']['volume']);
-    $tts['zones'] = trim((string) $tts['zones']) !== '' ? trim((string) $tts['zones']) : '1';
-    $tts['lang'] = preg_replace('/[^a-z]/', '', strtolower((string) $tts['lang'])) ?: 'de';
-    $tts['template'] = trim((string) $tts['template']);
-    $tts['stimme'] = trim((string) (isset($tts['stimme']) ? $tts['stimme'] : ''));
+    $tts['zones'] = trim(sp_text_skalar($tts['zones'])) !== '' ? trim(sp_text_skalar($tts['zones'])) : '1';
+    // 0.12.25 (Punkt 17): hoechstens 5 Buchstaben wie im Dienst ([:5]) - bis hier blieb 'musicserver' ganz stehen
+    $tts['lang'] = substr(preg_replace('/[^a-z]/', '', strtolower(sp_text_skalar($tts['lang']))), 0, 5) ?: 'de';
+    $tts['template'] = trim(sp_text_skalar($tts['template']));
+    $tts['stimme'] = trim(sp_text_skalar(isset($tts['stimme']) ? $tts['stimme'] : ''));
     $sp_skalar = function ($k) use ($tts) {
         return (isset($tts[$k]) && is_scalar($tts[$k])) ? (string) $tts[$k] : '';
     };
@@ -627,11 +630,12 @@ function sp_config($erzeugen = true)
 
     $ruhe = is_array(isset($cfg['ruhe']) ? $cfg['ruhe'] : null)
           ? array_merge($vor['ruhe'], $cfg['ruhe']) : $vor['ruhe'];
-    $ruhe['ein'] = !empty($ruhe['ein']) ? 1 : 0;
+    $ruhe['ein'] = sp_ein($ruhe['ein']) ? 1 : 0;     // 0.12.25 (Punkt 17): wie _ein() im Dienst, nicht empty()
     foreach (array('von', 'bis') as $f) {
-        if (!preg_match('/^\d{1,2}:\d{2}$/', (string) $ruhe[$f])) {
-            $ruhe[$f] = $vor['ruhe'][$f];
-        }
+        /* 0.12.25 (Folgepunkt zu Punkt 17): gueltig nach sp_minuten() = _minuten() im Dienst; bis hier galt auch 25:00.
+         * Gespeichert bleibt der Text, wie er steht (Python: z), nur ein Text kann gueltig sein. */
+        $sp_z = is_string($ruhe[$f]) ? $ruhe[$f] : '';
+        $ruhe[$f] = sp_minuten($sp_z) >= 0 ? $sp_z : $vor['ruhe'][$f];
     }
     $cfg['ruhe'] = $ruhe;
 
@@ -655,15 +659,48 @@ function sp_config($erzeugen = true)
     /* Gruppe 11 (0.12.7): die vier Haken der Umstellung nur als 0 oder 1 - wie SCHALTER_0_1 im Dienst. Ein Text wie
      * "nein" oder eine Liste ist AUS, nicht "irgendwie wahr". */
     // Gruppe 20 (0.12.8): dazu kalender_fragen_ein (Kalenderfragen, ab Werk aus); 0.12.13 wetter_fragen_ein.
-    foreach (array('befehle_mqtt_ein', 'befehle_mqtt_steuern', 'befehle_cmd_ein', 'endpunkt_ein',
+    /* 0.12.25 (Entscheidung des Hausherrn 24.11.2026, Folgepunkt zu Punkt 17): ALLE zehn Schalter wie SCHALTER_0_1 im
+     * Dienst und mit derselben Regel (sp_ein() = _ein()). Bis hier blieben mqtt_dauer_ein, musik_ducken, musik_steuern
+     * und docker_neustart roh, und die sechs anderen nahmen nur 1, true und "1". Geprueft mit sp_normform_pruefen.py. */
+    foreach (array('mqtt_dauer_ein', 'musik_ducken', 'musik_steuern', 'docker_neustart',
+                   'befehle_mqtt_ein', 'befehle_mqtt_steuern', 'befehle_cmd_ein', 'endpunkt_ein',
                    'kalender_fragen_ein', 'wetter_fragen_ein') as $sp_h) {
-        $sp_w = isset($cfg[$sp_h]) ? $cfg[$sp_h] : 0;
-        $cfg[$sp_h] = ($sp_w === 1 || $sp_w === true || $sp_w === '1') ? 1 : 0;
+        $cfg[$sp_h] = sp_ein(isset($cfg[$sp_h]) ? $cfg[$sp_h] : 0) ? 1 : 0;
     }
     if (!in_array($cfg['antwortweg'], sp_auswahl('antwortweg') ?: array('satellit', 'loxone', 'beide'), true)) {
         $cfg['antwortweg'] = 'beide';
     }
     return $cfg;
+}
+
+/**
+ * Ein Schalter wie _ein() im Dienst (sprachsteuerung_dienst.py): str(wert).strip().lower() in ("1", "true", "yes",
+ * "on"). null ist "", eine Kommazahl ist nie "1" (Python schreibt 1.0), eine Liste nie (0.12.25, Folgepunkt zu Punkt 17).
+ */
+function sp_ein($w)
+{
+    if ($w === null || is_array($w) || is_object($w) || is_float($w)) { return false; }
+    if (is_bool($w)) { return $w; }
+    return in_array(strtolower(trim((string) $w)), array('1', 'true', 'yes', 'on'), true);
+}
+
+/**
+ * Eine Uhrzeit wie _minuten() im Dienst: H:MM oder HH:MM (Rand egal), Minute bis 59, Stunde bis 24, 24 nur mit :00.
+ * Rueckgabe die Minute des Tages, -1 = ungueltig (0.12.25, Folgepunkt zu Punkt 17).
+ */
+function sp_minuten($hhmm)
+{
+    if (!is_string($hhmm) || !preg_match('/^([0-9]{1,2}):([0-9]{2})\z/', trim($hhmm), $m)) { return -1; }
+    $h = (int) $m[1];
+    $mi = (int) $m[2];
+    if ($mi > 59 || $h > 24 || ($h === 24 && $mi !== 0)) { return -1; }
+    return $h * 60 + $mi;
+}
+
+/** Ein Feld als Text wie _skalar() im Dienst: nur Skalare, true -> '1', false/null/Liste -> '' (0.12.25). */
+function sp_text_skalar($w)
+{
+    return is_scalar($w) ? (string) $w : '';
 }
 
 /**
@@ -765,9 +802,67 @@ function sp_cfg_vervollstaendigen_datei($config, $zweit)
                  'zeile' => $fremd ? 'Konfiguration vollstaendig' . $fremd_satz : '');
 }
 
-function sp_config_speichern($cfg)
+/* ==================================================================
+ * Lade-Beanstandungen (0.12.25; Regeln/05, Sicherungsmodul 1.3.0)
+ *
+ * sp_config() bringt eine von Hand verbogene Datei fuer den Betrieb in ihre Grenzen und leert Zugangsdaten falscher
+ * Form. Das bleibt - aber jede solche Ersetzung wird gemeldet (Reiter Test rot, Seite gelb, einmal ins Protokoll) und
+ * nie in die Datei zurueckgeschrieben.
+ * ================================================================== */
+
+/** Die rohen Werte der Konfigurationsdatei (ohne jede Normierung), null = keine lesbare Datei. Schreibt nichts. */
+function sp_lade_roh()
 {
     $p = sp_paths();
+    clearstatcache(true, $p['config']);
+    $roh = is_file($p['config']) ? trim((string) @file_get_contents($p['config'])) : '';
+    $d = ($roh !== '' && $roh[0] === '{') ? json_decode($roh, true) : null;
+    return is_array($d) ? $d : null;
+}
+
+/** Die Beschreibung fuer die Lade-Beanstandungen: geheim sind die Sprechtoken (aktionstoken ist es immer). */
+function sp_lade_b()
+{
+    $b = sp_sicherung_beschreibung();
+    $b['geheim'] = array_map(function ($n) { return 'tts.' . $n; }, ansage_geheim());
+    return $b;
+}
+
+/** Die Lade-Beanstandungen: rohe Dateiwerte gegen den verwendeten Stand ($cfg, sonst sp_config(false)). */
+function sp_lade_beanstandungen($cfg = null)
+{
+    $d = sp_lade_roh();
+    if ($d === null) { return array(); }
+    return sicherung_lade_beanstandungen(sp_lade_b(), $d, is_array($cfg) ? $cfg : sp_config(false));
+}
+
+/** Vor dem Schreiben: jedes beanstandete Feld, das $cfg nicht geaendert hat, bekommt seinen Dateiwert zurueck. */
+function sp_lade_behalten(array $cfg)
+{
+    $d = sp_lade_roh();
+    if ($d === null) { return $cfg; }
+    $v = sp_config(false);
+    list($cfg, ) = sicherung_lade_behalten($cfg, $d, $v, sicherung_lade_beanstandungen(sp_lade_b(), $d, $v));
+    return $cfg;
+}
+
+/** Einmal je Aenderung ins Protokoll (nur Namen und Gruende, nie Werte). */
+function sp_lade_melden(array $beanst)
+{
+    $d = sp_paths()['datadir'];
+    if ($d === '' || !is_dir($d)) { return; }
+    if (sicherung_lade_melden_faellig($beanst, $d . '/lade_beanstandungen.merk')) {
+        sp_log(sicherung_lade_protokollzeile($beanst));
+    }
+}
+
+function sp_config_speichern($cfg, $lade_behalten = true)
+{
+    $p = sp_paths();
+    /* 0.12.25 (Lade-Beanstandungen, Regeln/05, Entscheidung des Hausherrn "Dateiwert behalten"): ein beim Laden
+     * beanstandetes Feld, das der neue Stand nicht geaendert hat, behaelt seinen gespeicherten Wert. Nicht beim
+     * Zurueckspielen und nicht beim Knopf "Angezeigte Werte uebernehmen" ($lade_behalten = false). */
+    if ($lade_behalten && is_array($cfg)) { $cfg = sp_lade_behalten($cfg); }
     // Die Konfiguration kann eine Miniserver-Adresse mit Zugangsdaten
     // enthalten - deshalb 0600, nicht 0644.
     if (!sp_json_schreiben($p['config'], $cfg, 0600)) { return false; }
@@ -2992,6 +3087,121 @@ function sp_sicherung_alt_erkennen($daten)
 }
 
 /** Die Beschreibung dieser Linie fuer das gemeinsame Sicherungsmodul. */
+/* ---------------- Statusmeldungen an SignalBot (0.12.25, gemeinsames Modul meldung.php) ----------------
+ *
+ * Auftrag des Hausherrn 23.11.2026, Entscheidungen 23./24.11.2026: dieselben Anlaesse wie die Ansage, eigener Haken je
+ * Anlass, ab Werk aus; Sperre, Bremse und Versand im Modul. Die Erkennung laeuft auch ohne Ausgabeart, wenn eine Meldung
+ * eingeschaltet ist (sp_meld_aktiv()), und legt einen Anlass hin, wenn Ansage ODER Meldung ihn will
+ * (sp_meld_will()); der Sender trennt die Wege wieder (sp_meld_nur_ansage()).
+ */
+
+/** Die meldbaren Anlaesse: Name => Beschriftung (dieselben wie die Ansage). */
+function sp_meld_anlaesse()
+{
+    return array('dienste' => sp_t('SP_MELD.A_DIENSTE'), 'spracherkennung' => sp_t('SP_MELD.A_SPRACHERKENNUNG'), 'sprachausgabe' => sp_t('SP_MELD.A_SPRACHAUSGABE'), 'wortwecker' => sp_t('SP_MELD.A_WORTWECKER'), 'sprachmodell' => sp_t('SP_MELD.A_SPRACHMODELL'), 'mikrofon' => sp_t('SP_MELD.A_MIKROFON'), 'container' => sp_t('SP_MELD.A_CONTAINER'), 'ansage' => sp_t('SP_MELD.A_ANSAGE'), 'miniserver' => sp_t('SP_MELD.A_MINISERVER'), 'konfiguration' => sp_t('SP_MELD.A_KONFIGURATION'));
+}
+
+/** Die ab-Werk-Haken der Ansage dieser Linie: so stehen auch die Haken der Meldung, solange der Block nie gespeichert ist. */
+function sp_meld_haken_vorgabe()
+{
+    return array('dienste' => 1, 'spracherkennung' => 1, 'sprachausgabe' => 1, 'wortwecker' => 1, 'sprachmodell' => 1, 'mikrofon' => 1, 'container' => 1, 'ansage' => 1, 'miniserver' => 1, 'konfiguration' => 1);
+}
+
+/** Ist der Haken dieses Anlasses fuer die ANSAGE gesetzt? */
+function sp_ansage_anlass_sprache($a, $cfg = null)
+{
+    if ($cfg === null) { $cfg = sp_config(false); }
+    return false;     // die Ansage hat keine Anlaesse dieser Art; dieser Block meldet nur
+}
+
+/** Der wirksame Block 'meldung' fuer den Betrieb (ungueltig gespeichert gilt als aus und wird im Formular genannt). */
+function sp_meld_block($cfg = null)
+{
+    if ($cfg === null) { $cfg = sp_config(false); }
+    list($b) = meld_block(is_array($cfg) && array_key_exists('meldung', $cfg) ? $cfg['meldung'] : null, sp_meld_anlaesse(), sp_meld_haken_vorgabe());
+    return $b;
+}
+
+/** Die Beanstandungen eines gespeicherten Blocks (leer = gueltig). */
+function sp_meld_bean($cfg = null)
+{
+    if ($cfg === null) { $cfg = sp_config(false); }
+    list(, $f) = meld_block(is_array($cfg) && array_key_exists('meldung', $cfg) ? $cfg['meldung'] : null, sp_meld_anlaesse(), sp_meld_haken_vorgabe());
+    return $f;
+}
+
+/** Ist irgendein Anlass zur Meldung eingeschaltet? Dann laeuft die Erkennung auch ohne Ausgabeart. */
+function sp_meld_aktiv($cfg = null)
+{
+    return meld_irgendein_an(sp_meld_block($cfg));
+}
+
+/** Will die Ansage ODER die Meldung diesen Anlass? */
+function sp_meld_will($a, $cfg = null)
+{
+    if ($cfg === null) { $cfg = sp_config(false); }
+    return sp_ansage_anlass_sprache($a, $cfg) || meld_anlass_an(sp_meld_block($cfg), (string) $a);
+}
+
+/** Der Kontext des Moduls: Datenordner (data/plugins/<ordner>, daraus der Absender) und Texte - wie bei der Ansage. */
+function sp_meld_k()
+{
+    return array('plugin' => sp_paths()['plugin'], 'ordner' => sp_paths()['datadir'], 't' => function ($s) { return sp_t($s); });
+}
+
+/** Fuer die Ansage nur Eintraege, deren Ansage-Haken gesetzt ist; ein Eintrag ohne bekannten Anlass bleibt wie bisher. */
+function sp_meld_nur_ansage(array $l, $cfg = null)
+{
+    if ($cfg === null) { $cfg = sp_config(false); }
+    $anl = sp_meld_anlaesse();
+    $aus = array();
+    foreach ($l as $e) {
+        if (is_array($e) && array_key_exists(meld_anlass_von($e), $anl) && !sp_ansage_anlass_sprache(meld_anlass_von($e), $cfg)) { continue; }
+        $aus[] = $e;
+    }
+    return $aus;
+}
+
+/** Die Eintraege an SignalBot melden. Protokoll: eine Zeile, wenn gesendet oder gescheitert (nie der Text). */
+function sp_meld_senden(array $l, $cfg = null)
+{
+    if ($cfg === null) { $cfg = sp_config(false); }
+    $b = sp_meld_block($cfg);
+    if (empty($b['ein']) || !$l) { return null; }
+    $a = meld_regel_senden($l, $b, sp_meld_k());
+    if ($a['regel'] === '' || in_array($a['regel'], array('BREMSE', 'STAND', 'ORDNER'), true)) {
+        sp_log(meld_regel_kurz($a));
+    }
+    return $a;
+}
+
+/** Der Knopf "Testmeldung senden": array(angenommen, Satz). Geht an Haken, Sperre und Bremse vorbei. */
+function sp_meld_test()
+{
+    $r = meld_testmeldung(sp_meld_k());
+    sp_log('Testmeldung an SignalBot: ' . ($r[0] ? 'angenommen' : 'nicht angenommen'));
+    return $r;
+}
+
+/** Der Block im Einstellungsformular (unter den Ansage-Regeln, im selben Formular), mit Lage und Knopf. */
+function sp_meld_form_html($cfg = null)
+{
+    if ($cfg === null) { $cfg = sp_config(false); }
+    $e = function ($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); };
+    $k = sp_meld_k();
+    $o = array();
+    /* 0.12.25: unsichtbarer Doppel des Speicherknopfs VOR dem Knopf Testmeldung - die Eingabetaste in einem Textfeld
+     * loest den ersten Absendeknopf des Formulars aus; sie soll speichern wie bisher, nicht die Testmeldung senden. */
+    $o[] = '<button data-role="none" type="submit" tabindex="-1" aria-hidden="true" style="position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden"></button>';
+    $o[] = '<h3>' . $e(meld_t('TITEL', $k)) . '</h3>';
+    $o[] = meld_formular_html(sp_meld_block($cfg), sp_meld_anlaesse(), array(), $k);
+    list(, $lage) = meld_pruefzeile(sp_meld_block($cfg), sp_meld_bean($cfg), $k);
+    $o[] = '<div class="sm-hilfe">' . $e(meld_t('F_TEST', $k) . ' ' . $lage) . '</div>';
+    $o[] = '<div class="sm-knopfreihe"><button data-role="none" class="sm-btn sm-b-aktion" type="submit" name="meld_test" value="1">'
+         . $e(meld_t('K_TEST', $k)) . '</button></div>';
+    return implode("\n", $o) . "\n";
+}
+
 function sp_sicherung_beschreibung()
 {
     $p = sp_paths();
@@ -3015,6 +3225,7 @@ function sp_sicherung_beschreibung()
         // ESPHome liest. Keine Zuordnung fuer Regel 3 - den Schluessel ordnet sp_sicherung_vorbereiten() zu.
         'satelliten' => sicherung_liste(array('name', 'art', 'host', 'port', 'raum', 'zone', 'schluessel', 'ausgabe',
                                               'passwort')),
+        'meldung' => meld_sicherung_knoten(sp_meld_anlaesse(), sp_meld_k()),     // 0.12.25: Meldungen an SignalBot
     );
     foreach (sp_sicherung_spaet_schluessel() as $s) {
         if (!isset($schluessel[$s])) { $schluessel[$s] = array('art' => 'wert'); }
@@ -3092,6 +3303,10 @@ function sp_sicherung_wert_pruefen($k, $w)
     }
     if (function_exists('sp_cfg_pruefen')) {
         foreach (sp_cfg_pruefen(array($k => $w)) as $t) { $aus[] = sp_e(sicherung_name($k) . ': ' . (string) $t); }
+    }
+    /* 0.12.25: kein Praefix auf einem gemeinsamen Bereich unter haus/ (Regeln/07) - wie im Formular. */
+    if (!$aus && $k === 'mqtt_topic' && is_string($w) && hb_bereich(trim($w, '/')) !== '') {
+        $aus[] = sp_e(sicherung_name($k) . ': ' . sprintf(sp_t('HAUSBEREICH.SICH_W'), hb_bereich(trim($w, '/'))));
     }
     return $aus;
 }
@@ -6302,4 +6517,32 @@ function sp_lox_vorschlaege()
 function sp_lox_vorschlaege_weg()
 {
     @unlink(sp_paths()['datadir'] . '/vorschlaege.json');
+}
+
+/**
+ * 0.12.25 (Entscheidung des Hausherrn 23.11.2026 "Nur gemeinsame Bereiche", Regeln/07): Zeile im Reiter Test -
+ * faellt das gespeicherte Themen-Praefix auf einen gemeinsamen Bereich unter haus/? Speichern und Zurueckspielen
+ * weisen ein solches Praefix ab; ein schon gespeichertes bleibt in Betrieb und ist hier rot, grau bei ausgeschaltetem MQTT.
+ * Dazu der Vergleich der Liste mit der, die der Dienst in seinen Zustand schreibt (haus_bereiche).
+ * Liste und Pruefung aus dem gemeinsamen Modul haus_bereiche.php. Rueckgabe array(stand, html).
+ */
+function sp_pruef_praefix_haus($cfg)
+{
+    $p = (trim((string) $cfg['mqtt_topic'], '/') !== '' ? trim((string) $cfg['mqtt_topic'], '/') : 'sprachsteuerung');
+    $b = hb_bereich($p);
+    if ($b !== '') {
+        if (!(!empty($cfg['mqtt_ein']))) {
+            return array(-1, sprintf(sp_t('HAUSBEREICH.A_AUS'), sp_e($p), sp_e($b)));
+        }
+        return array(0, sprintf(sp_t('HAUSBEREICH.A_NEIN'), sp_e($p), sp_e($b)));
+    }
+    $z = (is_array(sp_loxone()) && isset(sp_loxone()['haus_bereiche'])) ? sp_loxone()['haus_bereiche'] : null;
+    if (!is_array($z)) {
+        return array(-1, sprintf(sp_t('HAUSBEREICH.A_UNBEKANNT'), sp_e($p)));
+    }
+    if ($z !== hb_bereiche()) {
+        return array(0, sprintf(sp_t('HAUSBEREICH.A_LISTE'), sp_e(implode(', ', hb_bereiche())),
+            sp_e(implode(', ', array_map('strval', $z)))));
+    }
+    return array(1, sprintf(sp_t('HAUSBEREICH.A_JA'), sp_e($p)));
 }
